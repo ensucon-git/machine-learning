@@ -1,0 +1,287 @@
+"""Configuration loading and validation.
+
+The whole system is driven by a single YAML file. Values of the form
+``${ENV_VAR}`` are expanded from the environment so secrets (the Home Assistant
+long-lived token) never have to be written to disk.
+"""
+
+from __future__ import annotations
+
+import os
+import re
+from dataclasses import dataclass, field, fields, is_dataclass
+from pathlib import Path
+from typing import Any, get_type_hints
+
+import yaml
+
+_ENV_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
+
+
+def _expand(value: Any) -> Any:
+    """Recursively expand ``${VAR}`` / ``${VAR:-default}`` in strings."""
+    if isinstance(value, str):
+
+        def repl(m: re.Match[str]) -> str:
+            return os.environ.get(m.group(1), m.group(2) if m.group(2) is not None else "")
+
+        return _ENV_PATTERN.sub(repl, value)
+    if isinstance(value, dict):
+        return {k: _expand(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_expand(v) for v in value]
+    return value
+
+
+def _build(cls: type, data: dict[str, Any] | None):
+    """Instantiate a (possibly nested) dataclass from a plain dict.
+
+    Unknown keys raise, so a typo in the YAML fails loudly instead of silently
+    leaving a default in place while the house gets cold.
+    """
+    data = dict(data or {})
+    kwargs: dict[str, Any] = {}
+    # ``from __future__ import annotations`` turns field types into strings, so
+    # resolve them before checking for nested dataclasses.
+    hints = get_type_hints(cls)
+    known = {f.name for f in fields(cls)}
+    for key, value in data.items():
+        if key not in known:
+            raise ValueError(f"Unknown configuration key '{key}' in section '{cls.__name__}'")
+        ftype = hints.get(key)
+        if is_dataclass(ftype) and isinstance(value, dict):
+            kwargs[key] = _build(ftype, value)  # type: ignore[arg-type]
+        else:
+            kwargs[key] = value
+    return cls(**kwargs)
+
+
+@dataclass
+class HomeAssistantConfig:
+    base_url: str = "http://homeassistant.local:8123"
+    token: str = ""
+    verify_ssl: bool = True
+    timeout: float = 30.0
+
+
+@dataclass
+class EntityConfig:
+    """Entity ids in Home Assistant.
+
+    Only ``indoor_temp``, ``outdoor_temp`` and ``price`` are strictly required.
+    Everything else improves the model when present and is degraded gracefully
+    when missing.
+    """
+
+    indoor_temp: str = ""
+    outdoor_temp: str = ""
+    price: str = ""
+    wind_speed: str = ""
+    cloud_cover: str = ""
+    solar_radiation: str = ""
+    supply_temp: str = ""
+    return_temp: str = ""
+    heatpump_power: str = ""
+    heatpump_energy: str = ""
+    weather: str = ""
+    offset_output: str = ""
+    status_entity: str = ""
+    extra: list[str] = field(default_factory=list)
+
+    def required(self) -> dict[str, str]:
+        return {
+            "indoor_temp": self.indoor_temp,
+            "outdoor_temp": self.outdoor_temp,
+        }
+
+    def all_sensor_ids(self) -> list[str]:
+        names = [
+            self.indoor_temp,
+            self.outdoor_temp,
+            self.price,
+            self.wind_speed,
+            self.cloud_cover,
+            self.solar_radiation,
+            self.supply_temp,
+            self.return_temp,
+            self.heatpump_power,
+            self.heatpump_energy,
+            self.offset_output,
+        ]
+        return [n for n in [*names, *self.extra] if n]
+
+
+@dataclass
+class SiteConfig:
+    """Geographic position, used only for the local clear-sky solar model."""
+
+    latitude: float = 59.33
+    longitude: float = 18.06
+    elevation_m: float = 20.0
+    timezone: str = "Europe/Stockholm"
+
+
+@dataclass
+class HeatPumpConfig:
+    """Heating curve, capacity and COP of the pump.
+
+    ``curve_slope`` / ``curve_offset`` describe the supply-temperature setpoint
+    the pump derives from the outdoor temperature it *believes* it sees::
+
+        T_supply = curve_offset + curve_slope * (curve_ref - T_outdoor_filtered)
+
+    Most Nordic pumps expose exactly these two numbers.
+    """
+
+    curve_slope: float = 0.35
+    curve_offset: float = 23.0
+    curve_ref: float = 20.0
+    supply_min: float = 20.0
+    supply_max: float = 40.0
+    loop_delta_t: float = 5.0
+    outdoor_filter_hours: float = 3.0
+    heat_stop_temp: float = 17.0
+    max_heat_output_w: float = 8000.0
+    standby_power_w: float = 30.0
+    carnot_efficiency: float = 0.45
+    cop_min: float = 1.5
+    cop_max: float = 6.0
+    defrost_penalty: float = 0.12
+
+
+@dataclass
+class NTCConfig:
+    """Digital-resistor output.
+
+    The pump reads its outdoor sensor as a resistance. We can therefore command
+    a *fake* outdoor temperature by commanding a resistance. Two models are
+    supported: a Beta/NTC model, or an interpolated lookup table (recommended -
+    take it from the pump's service manual).
+    """
+
+    model: str = "beta"  # "beta" | "table"
+    r25: float = 22000.0
+    beta: float = 3700.0
+    table_temp_c: list[float] = field(default_factory=list)
+    table_ohm: list[float] = field(default_factory=list)
+    resistance_min: float = 0.0
+    resistance_max: float = 500000.0
+    negative_coefficient: bool = True
+
+
+@dataclass
+class ControlConfig:
+    output_mode: str = "offset"  # "offset" | "fake_temperature" | "resistance"
+    offset_min: float = -8.0
+    offset_max: float = 5.0
+    max_change_per_cycle: float = 1.5
+    cycle_minutes: int = 15
+    horizon_hours: float = 36.0
+    step_minutes: int = 15
+    block_hours: float = 3.0
+    setpoint: float = 21.0
+    comfort_min: float = 20.3
+    comfort_max: float = 22.0
+    hard_min: float = 19.0
+    hard_max: float = 23.5
+    weight_comfort: float = 40.0
+    weight_hard: float = 400.0
+    weight_offset_change: float = 0.05
+    weight_terminal: float = 2.0
+    price_scale: float = 1.0
+    price_addition: float = 0.0
+    dry_run: bool = False
+    max_data_age_minutes: float = 45.0
+    observer_gain: float = 1.0
+    fallback_offset: float = 0.0
+    warm_start_hours: float = 24.0
+
+
+@dataclass
+class OptimizerConfig:
+    population: int = 256
+    elites: int = 26
+    iterations: int = 12
+    sigma_floor: float = 0.15
+    seed: int = 0
+    polish: bool = True
+
+
+@dataclass
+class TrainingConfig:
+    history_days: int = 45
+    resample_minutes: int = 15
+    window_hours: float = 12.0
+    window_stride_hours: float = 3.0
+    burn_in_hours: float = 24.0
+    long_window_hours: float = 48.0
+    regularisation: float = 0.05
+    restarts: int = 3
+    max_windows: int = 900
+    validation_fraction: float = 0.25
+    use_residual_model: bool = True
+    residual_max_correction: float = 0.4
+    seed: int = 0
+
+
+@dataclass
+class PathsConfig:
+    data_dir: str = "data"
+    model_dir: str = "models"
+    state_file: str = "data/controller_state.json"
+
+
+@dataclass
+class ServerConfig:
+    host: str = "0.0.0.0"
+    port: int = 8129
+    api_key: str = ""
+
+
+@dataclass
+class Config:
+    home_assistant: HomeAssistantConfig = field(default_factory=HomeAssistantConfig)
+    entities: EntityConfig = field(default_factory=EntityConfig)
+    site: SiteConfig = field(default_factory=SiteConfig)
+    heat_pump: HeatPumpConfig = field(default_factory=HeatPumpConfig)
+    ntc: NTCConfig = field(default_factory=NTCConfig)
+    control: ControlConfig = field(default_factory=ControlConfig)
+    optimizer: OptimizerConfig = field(default_factory=OptimizerConfig)
+    training: TrainingConfig = field(default_factory=TrainingConfig)
+    paths: PathsConfig = field(default_factory=PathsConfig)
+    server: ServerConfig = field(default_factory=ServerConfig)
+
+    def validate(self) -> None:
+        missing = [k for k, v in self.entities.required().items() if not v]
+        if missing:
+            raise ValueError(f"entities.{', entities.'.join(missing)} must be configured")
+        c = self.control
+        if c.output_mode not in {"offset", "fake_temperature", "resistance"}:
+            raise ValueError(f"control.output_mode '{c.output_mode}' is not valid")
+        if c.offset_min >= c.offset_max:
+            raise ValueError("control.offset_min must be below control.offset_max")
+        if not (c.hard_min <= c.comfort_min <= c.comfort_max <= c.hard_max):
+            raise ValueError("comfort band must sit inside the hard band")
+        if c.step_minutes <= 0 or c.horizon_hours <= 0:
+            raise ValueError("control.step_minutes and control.horizon_hours must be positive")
+        if self.optimizer.elites >= self.optimizer.population:
+            raise ValueError("optimizer.elites must be smaller than optimizer.population")
+
+    @property
+    def model_path(self) -> Path:
+        return Path(self.paths.model_dir) / "thermal_model.json"
+
+    @property
+    def residual_path(self) -> Path:
+        return Path(self.paths.model_dir) / "residual_model.joblib"
+
+    @property
+    def dataset_path(self) -> Path:
+        return Path(self.paths.data_dir) / "history.csv.gz"
+
+
+def load_config(path: str | Path) -> Config:
+    raw = yaml.safe_load(Path(path).read_text(encoding="utf-8")) or {}
+    cfg: Config = _build(Config, _expand(raw))
+    cfg.validate()
+    return cfg

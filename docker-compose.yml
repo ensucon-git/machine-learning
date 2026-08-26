@@ -1,0 +1,36 @@
+services:
+  hpmpc:
+    build: .
+    image: hpmpc:latest
+    container_name: hpmpc
+    restart: unless-stopped
+    environment:
+      # Long-lived access token from your Home Assistant profile page.
+      HA_TOKEN: ${HA_TOKEN:?set HA_TOKEN in .env}
+      HPMPC_API_KEY: ${HPMPC_API_KEY:-}
+      TZ: ${TZ:-Europe/Stockholm}
+    volumes:
+      - ./config:/config
+      - hpmpc-data:/data
+    ports:
+      - "8129:8129"
+    # Nothing here needs the internet: only your Home Assistant instance.
+    networks:
+      - default
+
+  # Run on demand:  docker compose run --rm trainer
+  trainer:
+    build: .
+    image: hpmpc:latest
+    profiles: ["tools"]
+    environment:
+      HA_TOKEN: ${HA_TOKEN:?set HA_TOKEN in .env}
+      TZ: ${TZ:-Europe/Stockholm}
+    volumes:
+      - ./config:/config
+      - hpmpc-data:/data
+    entrypoint: ["sh", "-c"]
+    command: ["hpmpc --config /config/config.yaml collect && hpmpc --config /config/config.yaml train"]
+
+volumes:
+  hpmpc-data:

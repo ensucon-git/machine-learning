@@ -1,0 +1,138 @@
+# ---------------------------------------------------------------------------
+# hpmpc - self-hosted MPC for an air/water heat pump on floor heating
+#
+# Copy to config/config.yaml and fill in your own entity ids.
+# Secrets are read from the environment: export HA_TOKEN=... (or use .env).
+# ---------------------------------------------------------------------------
+
+home_assistant:
+  base_url: http://homeassistant.local:8123
+  token: ${HA_TOKEN}
+  verify_ssl: true
+  timeout: 30
+
+# Only indoor_temp and outdoor_temp are strictly required. Everything else
+# improves the model; leave unused entries empty and they are skipped.
+entities:
+  indoor_temp: sensor.vardagsrum_temperatur      # required
+  outdoor_temp: sensor.ute_temperatur            # required - the REAL outdoor temperature
+  price: sensor.nordpool_kwh_se3_sek_3_10_025    # spot price, SEK/kWh
+  weather: weather.hemma                         # used for the temperature/wind/cloud forecast
+
+  wind_speed: sensor.vindhastighet               # m/s
+  cloud_cover: sensor.molnighet                  # %, 0-100
+  solar_radiation: ""                            # W/m2 if you own a pyranometer; otherwise leave empty
+
+  supply_temp: sensor.varmepump_framledning      # strongly recommended: makes the fit far better
+  return_temp: sensor.varmepump_retur
+  heatpump_power: sensor.varmepump_effekt        # W - enables the COP fit
+  heatpump_energy: ""
+
+  # The digital resistor. Must be a number or input_number entity.
+  offset_output: number.varmepump_utetemp_offset
+  # Optional: the controller publishes its own status here (created on the fly).
+  status_entity: sensor.hpmpc_status
+
+site:
+  latitude: 59.3293
+  longitude: 18.0686
+  elevation_m: 20
+  timezone: Europe/Stockholm
+
+# Your pump's heating curve. Read these off the pump's display; 'hpmpc train'
+# re-fits slope, offset and the filter time constant if a supply sensor exists.
+heat_pump:
+  curve_slope: 0.35            # supply = curve_offset + slope * (curve_ref - T_outdoor_filtered)
+  curve_offset: 23.0
+  curve_ref: 20.0
+  supply_min: 20.0
+  supply_max: 40.0
+  loop_delta_t: 5.0            # supply minus return at design flow
+  outdoor_filter_hours: 3.0    # the pump's own outdoor averaging
+  heat_stop_temp: 17.0         # filtered outdoor temperature where heating stops
+  max_heat_output_w: 8000
+  standby_power_w: 30
+  carnot_efficiency: 0.45      # refitted from measured power when available
+  cop_min: 1.5
+  cop_max: 6.0
+  defrost_penalty: 0.12
+
+# Only used when control.output_mode is "resistance". Take the table from your
+# pump's service manual - it beats the two-parameter beta model every time.
+ntc:
+  model: beta                  # "beta" or "table"
+  r25: 22000                   # NTC nominal resistance at 25 C
+  beta: 3700
+  table_temp_c: []             # e.g. [-30, -20, -10, 0, 10, 20, 30]
+  table_ohm: []                # e.g. [177000, 99000, 58000, 35000, 22000, 14000, 9000]
+  resistance_min: 0
+  resistance_max: 500000
+
+control:
+  # How the offset reaches the pump:
+  #   offset            write the offset in kelvin to a number entity
+  #   fake_temperature  write the faked outdoor temperature in degC
+  #   resistance        write the resistance in ohm for the digital potentiometer
+  output_mode: offset
+
+  offset_min: -8.0             # most negative offset (pump thinks it is colder -> more heat)
+  offset_max: 5.0
+  max_change_per_cycle: 1.5    # kelvin per cycle, keeps the pump from hunting
+  cycle_minutes: 15
+
+  horizon_hours: 36            # long enough to see through a whole price cycle
+  step_minutes: 15
+  block_hours: 3               # the offset is piecewise constant over blocks this long
+
+  setpoint: 21.0
+  comfort_min: 20.3            # the optimiser is free to roam inside this band ...
+  comfort_max: 22.0
+  hard_min: 19.0               # ... and is heavily penalised outside this one
+  hard_max: 23.5
+
+  weight_comfort: 40.0
+  weight_hard: 400.0
+  weight_offset_change: 0.05
+  weight_terminal: 2.0
+
+  price_scale: 1.0             # set to 0.01 if your price sensor reports ore/kWh
+  price_addition: 0.0          # grid transfer fee + energy tax, SEK/kWh - this is the real marginal cost
+
+  observer_gain: 1.0
+  fallback_offset: 0.0         # used whenever sensors are missing or implausible
+  max_data_age_minutes: 45
+  warm_start_hours: 24
+  dry_run: false               # true = compute everything, write nothing
+
+optimizer:
+  population: 256
+  elites: 26
+  iterations: 12
+  sigma_floor: 0.15
+  seed: 0
+  polish: true
+
+training:
+  history_days: 45
+  resample_minutes: 15
+  window_hours: 12             # short windows pin the fast air dynamics
+  window_stride_hours: 3
+  burn_in_hours: 24            # simulated but not scored; lets the slab estimate settle
+  long_window_hours: 48        # long windows pin the slab, i.e. the storage capacity
+  max_windows: 900
+  validation_fraction: 0.25
+  regularisation: 0.05
+  restarts: 3
+  use_residual_model: true
+  residual_max_correction: 0.4 # K/h - hard cap on what the learned residual may do
+  seed: 0
+
+paths:
+  data_dir: data
+  model_dir: models
+  state_file: data/controller_state.json
+
+server:
+  host: 0.0.0.0
+  port: 8129
+  api_key: ${HPMPC_API_KEY:-}

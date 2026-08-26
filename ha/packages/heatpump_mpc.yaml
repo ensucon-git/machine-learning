@@ -1,0 +1,142 @@
+# ---------------------------------------------------------------------------
+# Home Assistant package for hpmpc.
+#
+# Put this in config/packages/heatpump_mpc.yaml and add to configuration.yaml:
+#
+#   homeassistant:
+#     packages: !include_dir_named packages
+#
+# It provides: the offset helper the controller writes to, a dead-man switch
+# that neutralises the offset if the controller goes quiet, and dashboard
+# sensors. Adapt the last automation to however your digital resistor is wired.
+# ---------------------------------------------------------------------------
+
+input_number:
+  varmepump_utetemp_offset:
+    name: Heat pump outdoor offset
+    min: -8
+    max: 5
+    step: 0.05
+    unit_of_measurement: "K"
+    icon: mdi:thermometer-lines
+    mode: box
+
+  varmepump_offset_max_avvikelse:
+    name: Max allowed offset (manual safety limit)
+    min: 0
+    max: 10
+    step: 0.5
+    initial: 8
+    unit_of_measurement: "K"
+    icon: mdi:shield-alert
+
+input_boolean:
+  varmepump_mpc_aktiv:
+    name: MPC control active
+    icon: mdi:robot
+
+template:
+  - sensor:
+      # What the pump is being told the outdoor temperature is.
+      - name: "Heat pump perceived outdoor temperature"
+        unique_id: hpmpc_perceived_outdoor
+        unit_of_measurement: "°C"
+        device_class: temperature
+        state_class: measurement
+        state: >
+          {% set real = states('sensor.ute_temperatur') | float(none) %}
+          {% set offset = states('input_number.varmepump_utetemp_offset') | float(0) %}
+          {{ (real + offset) | round(2) if real is not none else none }}
+
+      # Minutes since the controller last reported in - drives the dead-man switch.
+      - name: "MPC age"
+        unique_id: hpmpc_age_minutes
+        unit_of_measurement: "min"
+        state_class: measurement
+        state: >
+          {% set updated = state_attr('sensor.hpmpc_status', 'updated') %}
+          {{ ((as_timestamp(now()) - as_timestamp(updated)) / 60) | round(0) if updated else 9999 }}
+
+  - binary_sensor:
+      - name: "MPC healthy"
+        unique_id: hpmpc_healthy
+        device_class: problem
+        state: >
+          {{ states('sensor.mpc_age') | float(9999) > 45 }}
+
+automation:
+  # ---- Dead-man switch --------------------------------------------------
+  # If the controller stops reporting, walk the offset back to neutral. A
+  # stuck extreme offset is the one failure mode that actually costs money or
+  # comfort, so this runs regardless of why the controller went away.
+  - alias: "MPC dead-man switch"
+    id: hpmpc_deadman
+    mode: single
+    trigger:
+      - platform: numeric_state
+        entity_id: sensor.mpc_age
+        above: 45
+        for: "00:05:00"
+      - platform: state
+        entity_id: input_boolean.varmepump_mpc_aktiv
+        to: "off"
+    action:
+      - service: input_number.set_value
+        target:
+          entity_id: input_number.varmepump_utetemp_offset
+        data:
+          value: 0
+      - service: persistent_notification.create
+        data:
+          title: "Heat pump MPC"
+          message: >
+            The controller has not reported for {{ states('sensor.mpc_age') }} minutes.
+            The outdoor offset has been reset to 0 K.
+
+  # ---- Manual safety limit ---------------------------------------------
+  - alias: "MPC offset clamp"
+    id: hpmpc_clamp
+    mode: single
+    trigger:
+      - platform: state
+        entity_id: input_number.varmepump_utetemp_offset
+    condition: >
+      {{ states('input_number.varmepump_utetemp_offset') | float(0) | abs
+         > states('input_number.varmepump_offset_max_avvikelse') | float(8) }}
+    action:
+      - service: input_number.set_value
+        target:
+          entity_id: input_number.varmepump_utetemp_offset
+        data:
+          value: >
+            {% set limit = states('input_number.varmepump_offset_max_avvikelse') | float(8) %}
+            {% set value = states('input_number.varmepump_utetemp_offset') | float(0) %}
+            {{ [[value, limit] | min, -limit] | max }}
+
+  # ---- Drive the digital resistor --------------------------------------
+  # Replace the action with however your hardware is addressed. This example
+  # assumes an ESPHome node exposing a resistance number in ohm; see
+  # ha/esphome_digital_resistor.yaml.
+  - alias: "MPC to digital resistor"
+    id: hpmpc_to_hardware
+    mode: single
+    trigger:
+      - platform: state
+        entity_id: input_number.varmepump_utetemp_offset
+      - platform: state
+        entity_id: sensor.ute_temperatur
+    condition:
+      - condition: state
+        entity_id: input_boolean.varmepump_mpc_aktiv
+        state: "on"
+    action:
+      - service: number.set_value
+        target:
+          entity_id: number.utegivare_resistans
+        data:
+          # Beta model for a 22 kohm / B=3700 NTC. Keep this identical to the
+          # ntc section of config.yaml, or let hpmpc write ohm directly by
+          # setting control.output_mode: resistance.
+          value: >
+            {% set t = states('sensor.heat_pump_perceived_outdoor_temperature') | float(0) %}
+            {{ (22000 * (2.718281828 ** (3700 * (1/(t + 273.15) - 1/298.15)))) | round(0) }}

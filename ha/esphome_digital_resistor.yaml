@@ -1,0 +1,50 @@
+# Example ESPHome node that emulates the heat pump's outdoor NTC.
+#
+# A DS3502 is a 10 kohm 7-bit I2C digital potentiometer: 128 steps, so ~78 ohm
+# per step. Put it in SERIES with a fixed resistor sized for your pump's sensor
+# so the reachable window straddles the real outdoor temperature - you only
+# need a few kelvin of authority, not the whole NTC curve.
+#
+# Check the resolution you actually get with:
+#     hpmpc ntc-table --step-ohm 78
+# If a step is worth more than ~0.2 K at your usual outdoor temperature, use a
+# higher-resolution part (MCP4261, 8-bit) or a DAC-driven current source.
+#
+# SAFETY: keep the original NTC connected through a relay that defaults to the
+# real sensor when the ESP is unpowered. The pump must always see a plausible
+# sensor, especially when this project is not running.
+
+esphome:
+  name: utegivare-emulator
+
+esp32:
+  board: esp32dev
+
+i2c:
+  sda: GPIO21
+  scl: GPIO22
+
+number:
+  - platform: template
+    name: "Utegivare resistans"
+    id: utegivare_resistans
+    unit_of_measurement: "Ω"
+    min_value: 0
+    max_value: 200000
+    step: 1
+    optimistic: true
+    set_action:
+      - lambda: |-
+          // Series resistor + digital pot: R_total = R_fixed + wiper
+          const float r_fixed = 15000.0;   // pick to centre your usual range
+          const float r_pot = 10000.0;     // DS3502 full-scale
+          float wanted = x - r_fixed;
+          int steps = (int) roundf(clamp(wanted, 0.0f, r_pot) / r_pot * 127.0f);
+          id(pot).set_wiper(steps);
+
+switch:
+  # Fail-safe: de-energise to fall back to the real NTC.
+  - platform: gpio
+    name: "Use emulated outdoor sensor"
+    pin: GPIO23
+    restore_mode: ALWAYS_OFF
