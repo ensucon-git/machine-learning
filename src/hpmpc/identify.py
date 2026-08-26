@@ -237,16 +237,20 @@ def _identifiability(jac: np.ndarray, names: Sequence[str]) -> dict[str, Any]:
     singular = np.asarray(singular, dtype=float)
     if singular.size == 0 or singular[0] <= 0:
         return {}
+    # The last right-singular vector spans the direction the residuals barely
+    # respond to: the parameters with the largest weight there are the ones
+    # trading off against each other.
     weakest = np.abs(vt[-1])
+    # A parameter is well determined when it loads on at least one strong
+    # singular direction, i.e. moving it alone visibly changes the fit.
+    strength = (np.abs(vt) * singular[:, None]).max(axis=0)
     return {
         "condition_number": round(float(singular[0] / max(singular[-1], 1e-12)), 1),
         "singular_values": [round(float(v / singular[0]), 5) for v in singular],
         "weakest_direction": {
             names[i]: round(float(weakest[i]), 3) for i in np.argsort(weakest)[::-1][:4]
         },
-        "well_determined": [
-            names[i] for i in range(len(names)) if float(np.abs(vt[:, i] * singular[:, None]).max()) > 0.1 * singular[0]
-        ],
+        "well_determined": [names[i] for i in range(len(names)) if strength[i] > 0.1 * singular[0]],
     }
 
 
@@ -309,9 +313,7 @@ def fit_thermal(
         len(lo), len(train_short), len(train_long) if train_long else 0, max(1, restarts),
     )
 
-    best_solution = None
-    best_params = prior
-    best_score = np.inf
+    attempts: list[dict[str, Any]] = []
     for attempt in range(max(1, restarts)):
         x0 = x_prior.copy() if attempt == 0 else np.clip(
             x_prior + np.random.default_rng(tr.seed + attempt).normal(0.0, 0.18, size=x_prior.size), 0.02, 0.98
@@ -327,11 +329,27 @@ def fit_thermal(
         )
         candidate = ThermalParams.from_vector(_denormalise(solution.x, lo, hi))
         score = _score(candidate, cfg, val_short).get("rmse_c", np.inf)
-        log.info("  restart %d: cost %.6g, validation RMSE %.4f C", attempt, solution.cost, score)
-        if score < best_score:
-            best_score, best_params, best_solution = score, candidate, solution
+        drift = float(np.linalg.norm(solution.x - x_prior))
+        log.info(
+            "  restart %d: cost %.6g, validation RMSE %.4f C, distance from prior %.3f",
+            attempt, solution.cost, score, drift,
+        )
+        attempts.append({"params": candidate, "score": score, "drift": drift, "solution": solution})
 
-    params = best_params
+    # Restarts exist to escape local minima, not to chase noise. The likelihood
+    # has a near-flat ridge, so a hundredth of a degree of validation RMSE is
+    # not evidence: among fits that are effectively tied, keep the one closest
+    # to the prior, which is the physically better behaved one.
+    best_score = min(a["score"] for a in attempts)
+    tied = [a for a in attempts if a["score"] <= best_score * 1.05 + 1e-9]
+    chosen = min(tied, key=lambda a: a["drift"])
+    if len(tied) > 1:
+        log.info(
+            "  %d restarts within 5%% of the best validation RMSE; keeping the one nearest the prior",
+            len(tied),
+        )
+    params = chosen["params"]
+    best_solution = chosen["solution"]
     metrics: dict[str, Any] = {
         "train": _score(params, cfg, train_short),
         "validation": _score(params, cfg, val_short),

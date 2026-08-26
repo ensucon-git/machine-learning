@@ -299,17 +299,17 @@ class Controller:
             return report
 
         self.state.consecutive_failures = 0
-        if not self.state.warm_started:
+        elapsed_raw = self._hours_since_last_cycle(now)
+        # A cold start, or a long outage, means the slab estimate is worthless.
+        # Rebuild it from history rather than integrating across the gap.
+        if not self.state.warm_started or elapsed_raw > 6.0:
+            if elapsed_raw > 6.0:
+                report["notes"].append(f"{elapsed_raw:.1f} h since the last cycle - re-warming the state estimate")
+            self.state.warm_started = False
             self.warm_start()
+            elapsed_raw = 0.0
 
-        previous_time = pd.Timestamp(self.state.updated_at) if self.state.updated_at else None
-        elapsed = (
-            (now - previous_time.to_pydatetime()).total_seconds() / 3600.0
-            if previous_time is not None
-            else 0.0
-        )
-        elapsed = float(np.clip(elapsed, 0.0, 6.0))
-        self.update_estimate(readings, elapsed)
+        self.update_estimate(readings, float(np.clip(elapsed_raw, 0.0, 6.0)))
 
         forecast, sources = build_forecast(self.cfg, self.ha, now)
         report["forecast_sources"] = sources
@@ -390,6 +390,17 @@ class Controller:
         self._write(offset, float(readings.get("t_outdoor") or 0.0), report, apply)
         self._persist(now, report)
         return report
+
+    def _hours_since_last_cycle(self, now: datetime) -> float:
+        if not self.state.updated_at:
+            return 0.0
+        try:
+            previous = pd.Timestamp(self.state.updated_at)
+        except (ValueError, TypeError):
+            return 0.0
+        if previous.tz is None:
+            previous = previous.tz_localize("UTC")
+        return max(0.0, (now - previous.to_pydatetime()).total_seconds() / 3600.0)
 
     def _residual_bias(self, forecast: pd.DataFrame) -> np.ndarray:
         if self.residual is None:

@@ -137,3 +137,14 @@ def test_bad_parameters_are_clipped_into_the_feasible_set():
     low, high = ThermalParams.bounds()
     clipped = ThermalParams(Ci=1e9, Hfloor=-5.0).clipped().to_vector()
     assert np.all(clipped >= low) and np.all(clipped <= high)
+
+
+def test_identifiability_separates_strong_from_weak_parameters(synthetic):
+    cfg, frame, truth = synthetic
+    _, metrics = fit_thermal(frame, cfg, initial=perturbed(truth))
+    ident = metrics["identifiability"]
+    names = set(ThermalParams.names())
+    assert set(ident["well_determined"]) <= names
+    assert set(ident["weakest_direction"]) <= names
+    assert len(ident["singular_values"]) == len(names)
+    assert ident["singular_values"][0] == pytest.approx(1.0)

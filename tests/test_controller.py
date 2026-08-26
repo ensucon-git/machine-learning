@@ -175,3 +175,17 @@ def test_residual_failure_does_not_break_control(controller, fake_ha):
     controller.residual = Broken()
     report = controller.step(now=fake_ha.now, apply=False)
     assert report["mode"] == "mpc"
+
+
+def test_long_outage_forces_a_state_rebuild(controller, fake_ha):
+    from datetime import timedelta
+
+    controller.state.warm_started = True
+    controller.state.updated_at = (fake_ha.now - timedelta(hours=30)).isoformat()
+    report = controller.step(now=fake_ha.now, apply=False)
+    assert any("re-warming" in note for note in report["notes"])
+
+
+def test_a_corrupt_timestamp_does_not_crash_the_cycle(controller, fake_ha):
+    controller.state.updated_at = "not-a-timestamp"
+    assert controller.step(now=fake_ha.now, apply=False)["mode"] == "mpc"

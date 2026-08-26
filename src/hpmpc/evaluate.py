@@ -259,6 +259,7 @@ def backtest(
     flat = constants[min(constants, key=lambda v: abs(v))]
 
     saving = matched["net_cost_sek"] - mpc_run["net_cost_sek"]
+    gross_saving = matched["cost_sek"] - mpc_run["cost_sek"]
     return {
         "period": {
             "start": str(frame.index[0]),
@@ -273,6 +274,8 @@ def backtest(
         },
         "baseline_flat": {k: v for k, v in flat.items() if k != "series"},
         "saving_sek": round(float(saving), 3),
+        "gross_saving_sek": round(float(gross_saving), 3),
+        "terminal_credit_sek": round(float(saving - gross_saving), 3),
         "saving_pct": round(float(100.0 * saving / matched["net_cost_sek"]) if matched["net_cost_sek"] else 0.0, 2),
         "energy_change_pct": round(
             float(100.0 * (mpc_run["kwh"] - matched["kwh"]) / matched["kwh"]) if matched["kwh"] else 0.0, 2
@@ -282,6 +285,7 @@ def backtest(
             "Weather and price forecasts are perfect in this replay; expect the real saving to be lower.",
             "Compare against 'baseline_matched': it holds the same average indoor temperature.",
             "The saving is net of the heat each run leaves in the slab, so ending cold is not counted as a win.",
+            "On short replays the terminal term can be a large share of the saving - use --days 7 or more.",
         ],
         "series": mpc_run["series"],
     }
@@ -306,6 +310,8 @@ def format_backtest(result: dict[str, Any]) -> str:
         f"{'Kh outside comfort':22}{mpc['kelvin_hours_outside_comfort']:>12.2f}{matched['kelvin_hours_outside_comfort']:>12.2f}",
         "",
         f"Saving: {result['saving_sek']:.2f} SEK ({result['saving_pct']:.1f} %) at equal average indoor temperature",
+        f"        of which {result['gross_saving_sek']:.2f} SEK on the meter "
+        f"and {result['terminal_credit_sek']:.2f} SEK in heat left in the slab",
         f"Energy: {result['energy_change_pct']:+.1f} % kWh",
         "",
         "Caveats:",
