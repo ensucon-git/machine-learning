@@ -126,9 +126,11 @@ tyst vid nästa omplanering, så vinsten realiseras aldrig i sluten loop. I den 
 prissattes den lagrade värmen till vad den skulle kosta att köpa — då försvinner
 incitamentet helt, och äkta förladdning när elen är billig belönas korrekt.
 
-> Under utvecklingen gav den öppna slingan **+13 %** besparing innan den termen fanns —
-> och den slutna slingan **−0,9 %**. Efter fixen: **+1,6 %** öppet, **+7,7 %** slutet.
-> Den öppna siffran var ren självbedrägeri.
+> Under utvecklingen påstod den öppna slingan **+13 %** besparing innan den termen
+> fanns — på data där den slutna slingan levererade **−0,9 %**. Den öppna siffran var
+> ren självbedrägeri. Efter fixen ligger den öppna prognosen på blygsamma ~2 % per
+> lösning och den slutna slingan levererar ~5 %, alltså mer än den lovar i stället för
+> mindre.
 
 Sökningen är en cross-entropy-metod över batchade utrullningar, efterpolerad med
 L-BFGS-B (ändlig-differens-gradienten beräknas som *en* batchad utrullning av 13
@@ -164,10 +166,24 @@ parametrarna mot sanningen och kör ett backtest. Ungefär vad du ska se:
 
 ```
 Curve:     slope 0.3518, offset 22.956 C, filter 3.0 h, R2 0.9933 - applied
-Building:  validation RMSE 0.146 C over 47 windows (persistence 1.176 C)
-           UA 221.7 W/K, time constants {'air': 1.95, 'slab': 8.38, 'envelope': 91.57}
-COP:       Carnot efficiency 0.4288, standby 30 W, observed SCOP 3.259
+Building:  validation RMSE 0.098 C over 47 windows (persistence 1.013 C)
+           48 h horizon RMSE 0.075 C
+           UA 177.5 W/K, time constants {'air': 2.13, 'slab': 10.32, 'envelope': 140.03}
+           identifiability: condition number 260, weakest direction ['f_sol_i', 'Hme', 'A_sol']
+COP:       Carnot efficiency 0.4284, standby 71 W, observed SCOP 3.144
+
+     parameter         true      fitted     error
+     Ci              2100.0      1996.0       -5%
+     Cm             26000.0     22855.1      -12%
+     Hie              165.0       147.2      -11%
+     Hfloor          1350.0      1393.3       +3%
+     A_sol              5.5         4.1      -26%   <- flaggad som svagast identifierad
+     UA (W/K)         195.0       177.5       -9%
 ```
+
+Notera `A_sol`: identifierbarhetsrapporten pekar ut solaperturen som den svagast
+bestämda riktningen, och det är precis den parameter som avviker mest. Diagnostiken
+säger alltså sanningen om sig själv.
 
 ---
 
@@ -288,18 +304,32 @@ som faktiskt inträffade, verkställer sitt första block, och modellen stegas f
 
 ```
                                MPC    constant
-electricity (kWh)             76.0        80.1
-cost (SEK)                   56.34       61.04
-mean indoor (C)              21.16       21.18
-Kh outside comfort            0.13        2.26
+electricity (kWh)            197.6       197.7
+cost (SEK)                  162.37      168.45
+stored heat (SEK)             1.60       -0.47
+net cost (SEK)              160.76      168.92
+mean indoor (C)              21.03       20.98
+min indoor (C)               20.14       19.41
+Kh outside comfort            0.73       11.97
 
-Saving: 4.70 SEK (7.7 %) at equal average indoor temperature
-Energy: -5.1 % kWh
+Saving: 8.16 SEK (4.8 %) at equal average indoor temperature
+        of which 6.08 SEK on the meter and 2.08 SEK in heat left in the slab
+Energy: -0.1 % kWh
 ```
 
-Jämförelsen görs mot det **konstanta offset som ger samma medelinnetemperatur**. Att
-jämföra mot offset 0 vore ohederligt — en del av besparingen skulle bara vara ett kallare
-hus.
+Två saker att lägga märke till. Det mesta av besparingen syns faktiskt på elmätaren
+(6,08 av 8,16 kr) — resten är värme som ligger kvar i plattan och krediteras till vad
+den skulle kosta att köpa. Och komforten blir samtidigt **mycket** bättre: 0,7 mot 12,0
+kelvintimmar utanför komfortbandet, eftersom ett konstant offset inte kan förutse ett
+väderomslag.
+
+Jämförelsen görs mot det **konstanta offset som ger samma medelinnetemperatur**, och
+kostnaden räknas netto efter den värme varje körning lämnar kvar i plattan. Att jämföra
+brutto mot offset 0 vore ohederligt på två sätt: en del av besparingen skulle bara vara
+ett kallare hus, och den som slutar perioden med kall platta skulle belönas för det.
+
+Kör minst sju dygn. På kortare perioder kan terminaltermen bli en stor andel av
+besparingen och siffran blir skör.
 
 Läs förbehållen som skrivs ut: i uppspelningen *är* modellen verkligheten, och prognoserna
 är perfekta. Siffran är alltså en övre gräns. Modellens egen träffsäkerhet är den andra
@@ -436,9 +466,10 @@ beta-modellen. Riktiga givare följer inte en tvåparametersmodell över hela sp
 
 ## Vad kan man realistiskt spara?
 
-Backtestet ovan ger 7,7 % lägre kostnad vid samma medelinnetemperatur — och 5 % mindre
-energi, eftersom optimeraren också väljer *varmare* timmar med bättre COP, inte bara
-billigare timmar.
+Backtestet ovan ger 4,8 % lägre kostnad vid samma medelinnetemperatur, och samtidigt
+klart bättre komfort. Optimeraren väljer inte bara billiga timmar utan också *varmare*
+timmar med bättre COP — hur mycket av vinsten som kommer från vilket beror helt på
+prisspridningen just den veckan.
 
 Räkna med mindre i verkligheten: prognoser är inte perfekta och modellen är inte huset.
 Faktorer som avgör hur mycket du får ut:

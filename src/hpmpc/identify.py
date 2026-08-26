@@ -331,22 +331,25 @@ def fit_thermal(
         score = _score(candidate, cfg, val_short).get("rmse_c", np.inf)
         drift = float(np.linalg.norm(solution.x - x_prior))
         log.info(
-            "  restart %d: cost %.6g, validation RMSE %.4f C, distance from prior %.3f",
+            "  restart %d: objective %.6g, validation RMSE %.4f C, distance from prior %.3f",
             attempt, solution.cost, score, drift,
         )
-        attempts.append({"params": candidate, "score": score, "drift": drift, "solution": solution})
+        attempts.append(
+            {"params": candidate, "score": score, "drift": drift, "cost": float(solution.cost), "solution": solution}
+        )
 
-    # Restarts exist to escape local minima, not to chase noise. The likelihood
-    # has a near-flat ridge, so a hundredth of a degree of validation RMSE is
-    # not evidence: among fits that are effectively tied, keep the one closest
-    # to the prior, which is the physically better behaved one.
-    best_score = min(a["score"] for a in attempts)
-    tied = [a for a in attempts if a["score"] <= best_score * 1.05 + 1e-9]
+    # Selection is on the regularised training objective, i.e. the thing every
+    # restart is actually minimising. Selecting on validation RMSE instead
+    # sounds safer but is not: on a near-flat likelihood ridge a hundredth of a
+    # degree is noise, and preferring it lets a restart win precisely by
+    # escaping the regularisation that keeps the parameters physical. Genuine
+    # ties are broken toward the prior.
+    best_cost = min(a["cost"] for a in attempts)
+    tied = [a for a in attempts if a["cost"] <= best_cost * 1.02 + 1e-12]
     chosen = min(tied, key=lambda a: a["drift"])
-    if len(tied) > 1:
+    if len(attempts) > 1:
         log.info(
-            "  %d restarts within 5%% of the best validation RMSE; keeping the one nearest the prior",
-            len(tied),
+            "  selected restart with objective %.6g (validation RMSE %.4f C)", chosen["cost"], chosen["score"]
         )
     params = chosen["params"]
     best_solution = chosen["solution"]
@@ -360,6 +363,10 @@ def fit_thermal(
         "time_constants_hours": {k: round(v, 2) for k, v in params.time_constants_hours().items()},
         "heat_loss_w_per_k": round(params.heat_loss_w_per_k(), 1),
         "restarts": max(1, restarts),
+        "restart_scores": [
+            {"objective": round(a["cost"], 8), "validation_rmse_c": a["score"], "drift": round(a["drift"], 4)}
+            for a in attempts
+        ],
     }
     if train_long is not None:
         metrics["validation_long_horizon"] = _score(params, cfg, val_long)
