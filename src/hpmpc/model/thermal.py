@@ -31,6 +31,7 @@ import numpy as np
 
 from ..config import HeatPumpConfig
 from . import heatpump as hp
+from .heatpump import PumpModel
 
 MAX_SUBSTEP_HOURS = 5.0 / 60.0
 
@@ -113,6 +114,9 @@ class Exogenous:
     wind: np.ndarray
     solar_ghi: np.ndarray
     price: np.ndarray
+    humidity: np.ndarray = np.nan
+    """Relative humidity in percent. Only used for the defrost derate; NaN means
+    "assume the reference humidity", i.e. no extra derate."""
     indoor_bias: np.ndarray = 0.0
     """Learned correction to dTi/dt [K/h] from the residual model. It depends
     only on exogenous signals (time of day, sun, wind, outdoor temperature), so
@@ -124,6 +128,7 @@ class Exogenous:
         self.wind = _as_series(self.wind, n)
         self.solar_ghi = _as_series(self.solar_ghi, n)
         self.price = _as_series(self.price, n)
+        self.humidity = _as_series(self.humidity, n, fill_nan=False)
         self.indoor_bias = _as_series(self.indoor_bias, n)
 
     def __len__(self) -> int:
@@ -135,7 +140,7 @@ class Exogenous:
         return int(self.t_outdoor.shape[0])
 
 
-def _as_series(value: Any, n: int) -> np.ndarray:
+def _as_series(value: Any, n: int, fill_nan: bool = True) -> np.ndarray:
     """Coerce a scalar / (K,) / (B, K) input to a 2-D ``(B, K)`` array."""
     arr = np.asarray(value, dtype=float)
     if arr.ndim == 0:
@@ -143,7 +148,7 @@ def _as_series(value: Any, n: int) -> np.ndarray:
     arr = np.atleast_2d(arr)
     if arr.shape[-1] != n:
         raise ValueError(f"exogenous series has length {arr.shape[-1]}, expected {n}")
-    return np.nan_to_num(arr, nan=0.0)
+    return np.nan_to_num(arr, nan=0.0) if fill_nan else arr
 
 
 @dataclass
@@ -167,7 +172,7 @@ def substeps_for(dt_hours: float) -> int:
 
 def simulate(
     params: ThermalParams,
-    pump: HeatPumpConfig,
+    pump: PumpModel | HeatPumpConfig,
     exog: Exogenous,
     offset: np.ndarray,
     state: State,
@@ -193,6 +198,7 @@ def simulate(
     dict of arrays with shape ``(B, K)``: ``t_indoor``, ``t_mass``,
     ``t_filtered_outdoor``, ``t_supply``, ``q_heat``, ``p_electric``.
     """
+    pump = PumpModel.coerce(pump)
     u = np.atleast_2d(np.asarray(offset, dtype=float))
     steps = u.shape[-1]
     if steps != len(exog):
@@ -210,18 +216,27 @@ def simulate(
 
     # The pump's filtered outdoor temperature depends only on known inputs, so
     # the whole trajectory (and hence the supply temperature) is precomputed.
-    t_filt = hp.filter_outdoor_series(te + u_sub, pump.outdoor_filter_hours, h, state.t_filtered_outdoor)
+    humidity = np.repeat(exog.humidity, sub, axis=1)
+    # Clamp what the pump is allowed to be shown before filtering: the actuator
+    # cannot present an arbitrary temperature, and the optimiser must plan
+    # against the same limit the controller will enforce.
+    perceived = np.clip(te + u_sub, pump.cfg.perceived_min_c, pump.cfg.perceived_max_c)
+    t_filt = hp.filter_outdoor_series(perceived, pump.cfg.outdoor_filter_hours, h, state.t_filtered_outdoor)
 
     if supply_temp_override is None:
-        t_supply = hp.supply_setpoint(t_filt, pump)
-        enabled = hp.heating_enabled(t_filt, pump).astype(float)
+        t_supply = pump.supply_setpoint(t_filt)
+        enabled = pump.heating_enabled(t_filt).astype(float)
     else:
         override = np.atleast_2d(np.asarray(supply_temp_override, dtype=float))
         if override.shape[-1] != steps:
             raise ValueError("supply_temp_override must have one value per step")
         t_supply = np.repeat(override, sub, axis=1)
         enabled = np.ones_like(t_supply)
-    t_water = hp.mean_water_temp(t_supply, pump)
+    t_water = pump.mean_water_temp(t_supply)
+
+    # COP and capacity depend only on inputs that are already known, so resolve
+    # the whole grid once instead of looking it up inside the integration loop.
+    operating = pump.operating_point(t_supply, te, humidity)
 
     hie_eff = params.Hie * (1.0 + params.k_wind * wind)   # (1|B, K*S)
 
@@ -232,6 +247,7 @@ def simulate(
     out_tm = np.empty((batch, steps))
     out_q = np.zeros((batch, steps))
     out_p = np.zeros((batch, steps))
+    out_backup = np.zeros((batch, steps))
 
     inv_ci = 1.0 / params.Ci
     inv_cm = 1.0 / params.Cm
@@ -240,8 +256,9 @@ def simulate(
         for s in range(sub):
             j = k * sub + s
             te_j = te[:, j]
-            q = params.Hfloor * (t_water[:, j] - tm)
-            q = np.clip(q, 0.0, pump.max_heat_output_w) * enabled[:, j]
+            demand = np.maximum(params.Hfloor * (t_water[:, j] - tm), 0.0) * enabled[:, j]
+            delivered = operating.deliver_at(demand, j)
+            q = delivered["q_heat"]
 
             d_ti = (
                 params.Him * (tm - ti)
@@ -260,13 +277,15 @@ def simulate(
             tm = tm + h * d_tm
 
             out_q[:, k] += q
-            out_p[:, k] += hp.electric_power(q, t_supply[:, j], te_j, pump)
+            out_p[:, k] += delivered["p_electric"]
+            out_backup[:, k] += delivered["q_backup"]
 
         out_ti[:, k] = ti
         out_tm[:, k] = tm
 
     out_q /= sub
     out_p /= sub
+    out_backup /= sub
 
     return {
         "t_indoor": out_ti,
@@ -274,6 +293,7 @@ def simulate(
         "t_filtered_outdoor": np.broadcast_to(t_filt[:, sub - 1 :: sub], (batch, steps)),
         "t_supply": np.broadcast_to(t_supply[:, sub - 1 :: sub], (batch, steps)),
         "q_heat": out_q,
+        "q_backup": out_backup,
         "p_electric": out_p,
     }
 

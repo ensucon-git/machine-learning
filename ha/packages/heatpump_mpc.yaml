@@ -1,34 +1,16 @@
 # ---------------------------------------------------------------------------
-# Home Assistant package for hpmpc.
+# Home Assistant package for hpmpc, wired for the Daikin + ESP32 setup.
 #
 # Put this in config/packages/heatpump_mpc.yaml and add to configuration.yaml:
 #
 #   homeassistant:
 #     packages: !include_dir_named packages
 #
-# It provides: the offset helper the controller writes to, a dead-man switch
-# that neutralises the offset if the controller goes quiet, and dashboard
-# sensors. Adapt the last automation to however your digital resistor is wired.
+# With control.output_mode: resistance, hpmpc writes ohm straight to the
+# ESPHome number entity, so Home Assistant does no conversion. What it does
+# provide is the safety net: if the controller goes quiet, HA releases the
+# emulator and the pump goes back to its real sensor.
 # ---------------------------------------------------------------------------
-
-input_number:
-  varmepump_utetemp_offset:
-    name: Heat pump outdoor offset
-    min: -8
-    max: 5
-    step: 0.05
-    unit_of_measurement: "K"
-    icon: mdi:thermometer-lines
-    mode: box
-
-  varmepump_offset_max_avvikelse:
-    name: Max allowed offset (manual safety limit)
-    min: 0
-    max: 10
-    step: 0.5
-    initial: 8
-    unit_of_measurement: "K"
-    icon: mdi:shield-alert
 
 input_boolean:
   varmepump_mpc_aktiv:
@@ -37,17 +19,6 @@ input_boolean:
 
 template:
   - sensor:
-      # What the pump is being told the outdoor temperature is.
-      - name: "Heat pump perceived outdoor temperature"
-        unique_id: hpmpc_perceived_outdoor
-        unit_of_measurement: "°C"
-        device_class: temperature
-        state_class: measurement
-        state: >
-          {% set real = states('sensor.ute_temperatur') | float(none) %}
-          {% set offset = states('input_number.varmepump_utetemp_offset') | float(0) %}
-          {{ (real + offset) | round(2) if real is not none else none }}
-
       # Minutes since the controller last reported in - drives the dead-man switch.
       - name: "MPC age"
         unique_id: hpmpc_age_minutes
@@ -57,18 +28,41 @@ template:
           {% set updated = state_attr('sensor.hpmpc_status', 'updated') %}
           {{ ((as_timestamp(now()) - as_timestamp(updated)) / 60) | round(0) if updated else 9999 }}
 
+      # What the controller is currently costing or saving, for the dashboard.
+      - name: "MPC predicted saving"
+        unique_id: hpmpc_predicted_saving
+        unit_of_measurement: "%"
+        state: "{{ state_attr('sensor.hpmpc_status', 'predicted_saving_pct') | float(0) }}"
+
+      # Resistive backup heat the plan expects to need. Anything above zero for
+      # long is worth investigating: it means the heating curve, the offset
+      # limits or the pump sizing is being pushed past what the compressor can do.
+      - name: "MPC backup heater in plan"
+        unique_id: hpmpc_backup_heater
+        unit_of_measurement: "kWh"
+        state: "{{ state_attr('sensor.hpmpc_status', 'backup_heater_kwh_horizon') | float(0) }}"
+
+      - name: "Heat pump perceived outdoor temperature"
+        unique_id: hpmpc_perceived_outdoor
+        unit_of_measurement: "°C"
+        device_class: temperature
+        state: "{{ states('sensor.emulated_outdoor_temperature') }}"
+
   - binary_sensor:
       - name: "MPC healthy"
         unique_id: hpmpc_healthy
         device_class: problem
         state: >
-          {{ states('sensor.mpc_age') | float(9999) > 45 }}
+          {{ states('sensor.mpc_age') | float(9999) > 45
+             or not is_state('switch.emulated_outdoor_sensor_engaged', 'on') }}
 
 automation:
   # ---- Dead-man switch --------------------------------------------------
-  # If the controller stops reporting, walk the offset back to neutral. A
-  # stuck extreme offset is the one failure mode that actually costs money or
-  # comfort, so this runs regardless of why the controller went away.
+  # If the controller stops reporting, release the emulator and let the pump
+  # read its own sensor again. A stuck faked temperature is the one failure
+  # mode that actually costs money or comfort, so this runs regardless of why
+  # the controller went away. The ESP32 has its own 45-minute watchdog as well;
+  # these two are deliberately independent.
   - alias: "MPC dead-man switch"
     id: hpmpc_deadman
     mode: single
@@ -81,62 +75,60 @@ automation:
         entity_id: input_boolean.varmepump_mpc_aktiv
         to: "off"
     action:
-      - service: input_number.set_value
+      - service: switch.turn_off
         target:
-          entity_id: input_number.varmepump_utetemp_offset
-        data:
-          value: 0
+          entity_id: switch.emulated_outdoor_sensor_engaged
       - service: persistent_notification.create
         data:
           title: "Heat pump MPC"
           message: >
             The controller has not reported for {{ states('sensor.mpc_age') }} minutes.
-            The outdoor offset has been reset to 0 K.
+            The outdoor sensor emulator has been released; the pump is reading its
+            own sensor again.
 
-  # ---- Manual safety limit ---------------------------------------------
-  - alias: "MPC offset clamp"
-    id: hpmpc_clamp
+  # ---- Sanity check on the faked temperature ----------------------------
+  # Independent of anything hpmpc does: if what the pump is being shown drifts
+  # implausibly far from the real outdoor temperature, stop the experiment.
+  - alias: "MPC offset sanity check"
+    id: hpmpc_offset_sanity
     mode: single
     trigger:
       - platform: state
-        entity_id: input_number.varmepump_utetemp_offset
+        entity_id: sensor.emulated_outdoor_temperature
     condition: >
-      {{ states('input_number.varmepump_utetemp_offset') | float(0) | abs
-         > states('input_number.varmepump_offset_max_avvikelse') | float(8) }}
+      {% set faked = states('sensor.emulated_outdoor_temperature') | float(none) %}
+      {% set real = states('sensor.ute_temperatur') | float(none) %}
+      {{ faked is not none and real is not none and (faked - real) | abs > 8 }}
     action:
-      - service: input_number.set_value
+      - service: switch.turn_off
         target:
-          entity_id: input_number.varmepump_utetemp_offset
+          entity_id: switch.emulated_outdoor_sensor_engaged
+      - service: input_boolean.turn_off
+        target:
+          entity_id: input_boolean.varmepump_mpc_aktiv
+      - service: persistent_notification.create
         data:
-          value: >
-            {% set limit = states('input_number.varmepump_offset_max_avvikelse') | float(8) %}
-            {% set value = states('input_number.varmepump_utetemp_offset') | float(0) %}
-            {{ [[value, limit] | min, -limit] | max }}
+          title: "Heat pump MPC stopped"
+          message: >
+            The pump was being shown {{ states('sensor.emulated_outdoor_temperature') }} °C
+            while the real outdoor temperature is {{ states('sensor.ute_temperatur') }} °C.
+            The emulator has been released and MPC control switched off.
 
-  # ---- Drive the digital resistor --------------------------------------
-  # Replace the action with however your hardware is addressed. This example
-  # assumes an ESPHome node exposing a resistance number in ohm; see
-  # ha/esphome_digital_resistor.yaml.
-  - alias: "MPC to digital resistor"
-    id: hpmpc_to_hardware
+  # ---- Backup heater warning -------------------------------------------
+  - alias: "MPC backup heater warning"
+    id: hpmpc_backup_warning
     mode: single
     trigger:
-      - platform: state
-        entity_id: input_number.varmepump_utetemp_offset
-      - platform: state
-        entity_id: sensor.ute_temperatur
-    condition:
-      - condition: state
-        entity_id: input_boolean.varmepump_mpc_aktiv
-        state: "on"
+      - platform: numeric_state
+        entity_id: sensor.mpc_backup_heater_in_plan
+        above: 2
+        for: "01:00:00"
     action:
-      - service: number.set_value
-        target:
-          entity_id: number.utegivare_resistans
+      - service: persistent_notification.create
         data:
-          # Beta model for a 22 kohm / B=3700 NTC. Keep this identical to the
-          # ntc section of config.yaml, or let hpmpc write ohm directly by
-          # setting control.output_mode: resistance.
-          value: >
-            {% set t = states('sensor.heat_pump_perceived_outdoor_temperature') | float(0) %}
-            {{ (22000 * (2.718281828 ** (3700 * (1/(t + 273.15) - 1/298.15)))) | round(0) }}
+          title: "Heat pump MPC"
+          message: >
+            The plan expects {{ states('sensor.mpc_backup_heater_in_plan') }} kWh of
+            resistive backup heat over the next 36 hours. That runs at COP 1. Check
+            heat_pump.curve_slope, control.offset_min and whether the weather has
+            simply gone past what the compressor can cover.

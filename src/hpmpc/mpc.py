@@ -21,7 +21,7 @@ from typing import Any
 import numpy as np
 
 from .config import Config
-from .model import heatpump as hp
+from .model import build_pump
 from .model.thermal import Exogenous, State, ThermalParams, simulate, steady_state_mass_temp
 
 log = logging.getLogger(__name__)
@@ -37,6 +37,10 @@ class CostBreakdown:
     terminal: float
     energy_kwh: float
     stored_value_sek: float
+    backup_kwh: float = 0.0
+    backup_penalty: float = 0.0
+    power_limit_penalty: float = 0.0
+    peak_kw: float = 0.0
 
     @property
     def net_cost_sek(self) -> float:
@@ -58,6 +62,10 @@ class CostBreakdown:
             "smoothness": round(self.smoothness, 4),
             "terminal": round(self.terminal, 4),
             "energy_kwh": round(self.energy_kwh, 3),
+            "backup_kwh": round(self.backup_kwh, 3),
+            "backup_penalty": round(self.backup_penalty, 4),
+            "power_limit_penalty": round(self.power_limit_penalty, 4),
+            "peak_kw": round(self.peak_kw, 3),
         }
 
 
@@ -118,6 +126,8 @@ class MpcResult:
             "horizon_kwh": round(float(self.cost.energy_kwh), 2),
             "horizon_cost_sek": round(float(self.cost.energy_sek), 2),
             "horizon_net_cost_sek": round(float(self.cost.net_cost_sek), 2),
+            "backup_heater_kwh": round(float(self.cost.backup_kwh), 2),
+            "peak_electric_kw": round(float(self.cost.peak_kw), 2),
             "stored_energy_value_sek": round(float(self.cost.stored_value_sek), 2),
             "baseline_flat": self.baseline_flat.to_dict(),
             "baseline_matched": self.baseline_matched.to_dict(),
@@ -149,6 +159,7 @@ class MpcSolver:
     def __init__(self, cfg: Config, params: ThermalParams) -> None:
         self.cfg = cfg
         self.params = params
+        self.pump = build_pump(cfg)
         self.sizes = block_layout(cfg)
         self.n_blocks = len(self.sizes)
         self.steps = int(self.sizes.sum())
@@ -163,7 +174,7 @@ class MpcSolver:
     ) -> tuple[np.ndarray, dict[str, np.ndarray], dict[str, np.ndarray]]:
         c = self.cfg.control
         u = expand_blocks(blocks, self.sizes)
-        traj = simulate(self.params, self.cfg.heat_pump, exog, u, state, self.dt)
+        traj = simulate(self.params, self.pump, exog, u, state, self.dt)
 
         ti = traj["t_indoor"]
         energy_kwh = traj["p_electric"] * self.dt / 1000.0
@@ -185,7 +196,24 @@ class MpcSolver:
         stored_value = self._stored_energy_value(traj, exog)
         terminal = c.weight_terminal * (ti[:, -1] - c.setpoint) ** 2 - stored_value
 
-        total = energy_sek + comfort + hard + smoothness + terminal
+        # The backup heater is already priced correctly through its COP of 1;
+        # this is the extra aversion for those who would rather not run resistive
+        # heat at all.
+        backup_kwh = np.sum(traj["q_backup"], axis=1) * self.dt / 1000.0
+        backup_penalty = c.weight_backup_heater * backup_kwh
+
+        # Soft power cap. A plan that preheats hard in deep cold can stack the
+        # compressor and the immersion heater on top of each other; on a Swedish
+        # 25 A service that trips the main fuse, which is a worse outcome than
+        # any electricity bill.
+        peak_kw = np.max(traj["p_electric"], axis=1) / 1000.0
+        if c.max_electric_power_kw > 0:
+            excess = np.maximum(traj["p_electric"] / 1000.0 - c.max_electric_power_kw, 0.0)
+            power_limit = c.weight_power_limit * np.sum(excess**2, axis=1) * self.dt
+        else:
+            power_limit = np.zeros_like(peak_kw)
+
+        total = energy_sek + comfort + hard + smoothness + terminal + backup_penalty + power_limit
         parts = {
             "energy_sek": energy_sek,
             "stored_value_sek": stored_value,
@@ -194,6 +222,10 @@ class MpcSolver:
             "smoothness": smoothness,
             "terminal": terminal,
             "energy_kwh": np.sum(energy_kwh, axis=1),
+            "backup_kwh": backup_kwh,
+            "backup_penalty": backup_penalty,
+            "power_limit_penalty": power_limit,
+            "peak_kw": peak_kw,
             "total": total,
         }
         return total, parts, traj
@@ -217,7 +249,9 @@ class MpcSolver:
         stored_wh = self.params.Cm * (traj["t_mass"][:, -1] - tm_target) + self.params.Ci * (
             traj["t_indoor"][:, -1] - c.setpoint
         )
-        cop_ref = np.maximum(hp.cop(traj["t_supply"][:, -1], np.full_like(stored_wh, t_end), self.cfg.heat_pump), 1e-3)
+        cop_ref = np.maximum(
+            self.pump.cop(traj["t_supply"][:, -1], np.full_like(stored_wh, t_end)), 1e-3
+        )
         return stored_wh / 1000.0 * price_ref / cop_ref
 
     def _breakdown(self, parts: dict[str, np.ndarray], i: int) -> CostBreakdown:
@@ -230,6 +264,10 @@ class MpcSolver:
             terminal=float(parts["terminal"][i]),
             energy_kwh=float(parts["energy_kwh"][i]),
             stored_value_sek=float(parts["stored_value_sek"][i]),
+            backup_kwh=float(parts["backup_kwh"][i]),
+            backup_penalty=float(parts["backup_penalty"][i]),
+            power_limit_penalty=float(parts["power_limit_penalty"][i]),
+            peak_kw=float(parts["peak_kw"][i]),
         )
 
     # -------------------------------------------------------------- search

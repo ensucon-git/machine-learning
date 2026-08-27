@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -58,8 +59,9 @@ def test_build_forecast_produces_a_complete_horizon(cfg, fake_ha):
     expected = int(cfg.control.horizon_hours * 60 / cfg.control.step_minutes)
     assert len(frame) == expected
     assert not frame[["t_outdoor", "wind", "solar_ghi", "price"]].isna().any().any()
-    assert "weather forecast" in sources["t_outdoor"]
+    assert "weather entity" in sources["weather"]["source"]
     assert frame["price"].nunique() > 1
+    assert "spot_price" in frame
 
 
 def test_forecast_is_anchored_to_the_measured_outdoor_temperature(cfg, fake_ha):
@@ -78,12 +80,14 @@ def test_missing_weather_entity_persists_current_values(cfg, fake_ha):
     assert "persisted" in sources["t_outdoor"]
 
 
-def test_price_scale_and_addition_are_applied(cfg, fake_ha):
+def test_price_scale_addition_and_vat_are_applied_in_order(cfg, fake_ha):
     cfg.control.price_scale = 0.01     # ore/kWh -> SEK/kWh
-    cfg.control.price_addition = 0.5   # grid fee + tax
+    cfg.control.price_addition = 0.5   # grid transfer + energy tax
+    cfg.control.price_vat_pct = 25.0
     frame, _ = build_forecast(cfg, fake_ha, fake_ha.now)
-    assert frame["price"].min() >= 0.5
-    assert frame["price"].max() < 1.0
+    expected = (frame["spot_price"] * 0.01 + 0.5) * 1.25
+    assert frame["price"].to_numpy() == pytest.approx(expected.to_numpy())
+    assert frame["price"].min() >= 0.625
 
 
 def test_no_outdoor_data_at_all_is_an_error(cfg, fake_ha):
@@ -91,3 +95,79 @@ def test_no_outdoor_data_at_all_is_an_error(cfg, fake_ha):
     fake_ha.drop("sensor.outdoor")
     with pytest.raises(ValueError, match="No outdoor temperature"):
         build_forecast(cfg, fake_ha, fake_ha.now)
+
+
+# ------------------------------------------------- provider-backed forecast
+
+
+def _smhi_frame(hours: int = 48) -> pd.DataFrame:
+    index = pd.date_range("2026-01-15", periods=hours, freq="h", tz="UTC")
+    return pd.DataFrame(
+        {"t_outdoor": np.linspace(-8.0, 2.0, hours), "wind": 4.0, "cloud": 30.0, "humidity": 82.0},
+        index=index,
+    )
+
+
+def test_smhi_and_spot_prices_are_used_when_configured(cfg, fake_ha, monkeypatch):
+    import hpmpc.forecast as module
+
+    now = pd.Timestamp("2026-01-15 06:00", tz="UTC").to_pydatetime()
+    points = [
+        (pd.Timestamp("2026-01-15", tz="UTC") + pd.Timedelta(hours=h), 0.2 + 0.05 * h) for h in range(48)
+    ]
+    monkeypatch.setattr(module, "fetch_forecast", lambda *a, **k: (_smhi_frame(), {"source": "SMHI test"}))
+    monkeypatch.setattr(module, "fetch_prices", lambda *a, **k: (points, {"source": "spot test", "first": "x", "last": "y"}))
+
+    cfg.forecast.weather_source = "smhi"
+    cfg.forecast.price_source = "elprisetjustnu"
+    cfg.site.latitude, cfg.site.longitude = 58.5877, 16.1924
+    frame, sources = build_forecast(cfg, fake_ha, now)
+
+    assert sources["weather"]["source"] == "SMHI test"
+    assert sources["price"]["source"] == "spot test"
+    assert frame["humidity"].notna().all()
+    assert frame["price"].nunique() > 1
+
+
+def test_smhi_failure_falls_back_to_the_weather_entity(cfg, fake_ha, monkeypatch):
+    import hpmpc.forecast as module
+    from hpmpc.providers._http import ProviderError
+
+    def boom(*args, **kwargs):
+        raise ProviderError("smhi down")
+
+    monkeypatch.setattr(module, "fetch_forecast", boom)
+    cfg.forecast.weather_source = "smhi"
+    cfg.site.latitude, cfg.site.longitude = 58.5877, 16.1924
+    frame, sources = build_forecast(cfg, fake_ha, fake_ha.now)
+
+    assert "smhi down" in sources["weather_error"]
+    assert "weather entity" in sources["weather"]["source"]
+    assert frame["t_outdoor"].notna().all()
+
+
+def test_price_failure_falls_back_to_the_price_entity(cfg, fake_ha, monkeypatch):
+    import hpmpc.forecast as module
+    from hpmpc.providers import PriceUnavailable
+
+    def boom(*args, **kwargs):
+        raise PriceUnavailable("no prices")
+
+    monkeypatch.setattr(module, "fetch_prices", boom)
+    cfg.forecast.price_source = "elprisetjustnu"
+    frame, sources = build_forecast(cfg, fake_ha, fake_ha.now)
+
+    assert "no prices" in sources["price_error"]
+    assert "Home Assistant entity" in sources["price"]["source"]
+    assert frame["price"].nunique() > 1
+
+
+def test_humidity_falls_back_to_the_sensor_then_to_unknown(cfg, fake_ha):
+    cfg.entities.outdoor_humidity = "sensor.humidity"
+    fake_ha.set("sensor.humidity", 91.0)
+    frame, _ = build_forecast(cfg, fake_ha, fake_ha.now)
+    assert frame["humidity"].eq(91.0).all()
+
+    cfg.entities.outdoor_humidity = ""
+    frame, _ = build_forecast(cfg, fake_ha, fake_ha.now)
+    assert frame["humidity"].isna().all()   # unknown, not guessed

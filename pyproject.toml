@@ -30,7 +30,7 @@ hpmpc = "hpmpc.cli:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-hpmpc = ["resources/*.yaml"]
+hpmpc = ["resources/*.yaml", "resources/pumps/*.yaml"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

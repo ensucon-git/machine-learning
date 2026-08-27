@@ -1,0 +1,92 @@
+# Daikin Altherma LT - ERLQ016CAW1 outdoor unit + EHVH16S26CB9W hydrobox
+# ---------------------------------------------------------------------------
+# R410A split, 16 kW class, 260 L integrated DHW tank, electric backup heater.
+#
+# PROVENANCE - read this before trusting the numbers.
+#
+# The efficiency table is stored as *Carnot efficiency*, not COP:
+#
+#     COP = efficiency * (T_supply + 273.15) / (T_supply - T_ambient)
+#
+# That is deliberate. Carnot efficiency for this machine sits in a narrow
+# 0.35-0.42 band across the whole envelope, so interpolating it is stable and
+# extrapolating it stays physical, whereas interpolating raw COP between
+# rating points produces nonsense near small lifts.
+#
+# The values below are anchored on the published rating points for this unit
+# class (A7/W35 COP 4.4, A7/W45 3.3, A7/W55 2.6, A2/W35 3.6, A-7/W35 2.8,
+# A-7/W55 1.9, A-15/W35 2.3) and smoothed between them. They are a
+# well-behaved PRIOR, not the manufacturer's data.
+#
+# Two things to do about that:
+#   1. Replace this table with the real one from the Daikin databook for your
+#      exact unit ("Capacity tables / heating" - it lists capacity and power
+#      input for each ambient/LWT pair; efficiency = COP * (Ts+273.15)/(Ts-Ta)).
+#      Run `hpmpc pump-table` to see what the current table implies as COP.
+#   2. More importantly: let `hpmpc train` fit this table against your own
+#      measured electrical power. After that the shipped numbers only set the
+#      shape, and your meter sets the level.
+# ---------------------------------------------------------------------------
+
+name: Daikin ERLQ016CAW1 + EHVH16S26CB9W
+source: approximate - anchored on published rating points, refine from the databook
+refrigerant: R410A
+
+efficiency:
+  # Rows follow ambient_c, columns follow supply_c.
+  ambient_c: [-25, -20, -15, -10, -7, -2, 2, 7, 12, 20]
+  supply_c: [25, 30, 35, 40, 45, 50, 55]
+  values:
+    - [0.357, 0.354, 0.350, 0.347, 0.345, 0.340, 0.333]   # -25
+    - [0.367, 0.364, 0.360, 0.356, 0.355, 0.349, 0.342]   # -20
+    - [0.377, 0.374, 0.370, 0.366, 0.365, 0.359, 0.352]   # -15
+    - [0.388, 0.384, 0.380, 0.376, 0.374, 0.369, 0.361]   # -10
+    - [0.393, 0.389, 0.385, 0.381, 0.379, 0.373, 0.366]   # -7
+    - [0.393, 0.389, 0.385, 0.381, 0.379, 0.373, 0.366]   # -2
+    - [0.393, 0.389, 0.385, 0.381, 0.379, 0.373, 0.366]   # 2
+    - [0.408, 0.404, 0.400, 0.396, 0.394, 0.388, 0.380]   # 7
+    - [0.418, 0.414, 0.410, 0.406, 0.404, 0.398, 0.390]   # 12
+    - [0.428, 0.424, 0.420, 0.416, 0.413, 0.407, 0.399]   # 20
+
+capacity:
+  # Heating capacity at W35, kW, as a function of ambient temperature.
+  ambient_c: [-25, -20, -15, -10, -7, -2, 2, 7, 12, 20]
+  kw_at_w35: [8.0, 9.5, 10.8, 12.0, 12.8, 14.0, 15.0, 16.0, 17.0, 18.0]
+  # Capacity falls as the required supply temperature rises.
+  supply_derate:
+    supply_c: [25, 35, 45, 55]
+    factor: [1.05, 1.00, 0.93, 0.85]
+
+limits:
+  # Below this ambient temperature the compressor stops and only the backup
+  # heater is left. This is why the faked outdoor temperature must never be
+  # allowed to wander far below reality in deep cold.
+  min_ambient_c: -25.0
+  min_supply_c: 25.0
+  max_supply_c: 55.0
+
+backup_heater:
+  # EHVH16S26CB9W ships with a 3-phase 9 kW backup heater (3/6/9 kW steps).
+  # It runs at COP 1.0: every kilowatt-hour it makes costs three to four times
+  # what the compressor charges. Modelling it is the whole reason the optimiser
+  # will not chase a cheap hour into a supply temperature the compressor cannot
+  # reach on its own.
+  enabled: true
+  max_kw: 9.0
+  cop: 1.0
+
+defrost:
+  # EN14511 rating points already include typical defrost losses, so this is an
+  # ADDITIONAL derate for genuinely bad conditions: humid air near freezing.
+  # It is zero at the reference humidity and grows from there.
+  enabled: true
+  peak_ambient_c: 1.0
+  width_c: 5.0
+  max_derate: 0.10
+  humidity_reference_pct: 75.0
+  humidity_sensitivity: 0.9
+
+# Standby power and the space-heating cut-off temperature live in
+# heat_pump.standby_power_w / heat_pump.heat_stop_temp in config.yaml, so there
+# is exactly one place to change them. For this unit, 40 W and 18 C are
+# reasonable starting points.

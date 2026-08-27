@@ -22,7 +22,7 @@ import numpy as np
 import pandas as pd
 
 from .config import Config
-from .model import heatpump as hp
+from .model import build_pump
 from .model.thermal import Exogenous, State, ThermalParams, simulate, steady_state_mass_temp
 from .mpc import MpcSolver
 from .residual import ResidualModel
@@ -32,11 +32,15 @@ log = logging.getLogger(__name__)
 
 def _exog_slice(frame: pd.DataFrame, start: int, steps: int, bias: np.ndarray | None) -> Exogenous:
     sl = slice(start, start + steps)
+    humidity = (
+        frame["humidity"].to_numpy(dtype=float)[sl] if "humidity" in frame else np.full(steps, np.nan)
+    )
     return Exogenous(
         frame["t_outdoor"].to_numpy(dtype=float)[sl],
         frame["wind"].to_numpy(dtype=float)[sl],
         frame["solar_ghi"].to_numpy(dtype=float)[sl],
         frame["price"].to_numpy(dtype=float)[sl],
+        humidity=humidity,
         indoor_bias=np.zeros(steps) if bias is None else bias[sl],
     )
 
@@ -47,11 +51,12 @@ def _stored_energy_reference(cfg: Config, params: ThermalParams, frame: pd.DataF
     window = slice(max(0, n_steps - tail), n_steps)
     t_end = float(frame["t_outdoor"].to_numpy(dtype=float)[window].mean())
     price_ref = float(frame["price"].to_numpy(dtype=float)[window].mean())
-    supply_ref = float(hp.supply_setpoint(np.array(t_end), cfg.heat_pump))
+    pump = build_pump(cfg)
+    supply_ref = float(pump.supply_setpoint(np.array(t_end)))
     return {
         "t_mass_target": float(steady_state_mass_temp(params, cfg.control.setpoint, t_end)),
         "price_ref": price_ref,
-        "cop_ref": float(hp.cop(np.array(supply_ref), np.array(t_end), cfg.heat_pump)),
+        "cop_ref": float(pump.cop(np.array(supply_ref), np.array(t_end))),
     }
 
 
@@ -94,7 +99,7 @@ def _run_policy(
         plant_exog = _exog_slice(frame, start, cycle_steps, bias)
         result = simulate(
             params,
-            cfg.heat_pump,
+            build_pump(cfg),
             plant_exog,
             np.full((1, cycle_steps), float(offset)),
             State(ti, tm, tf),
@@ -171,7 +176,7 @@ def _constant_offset_runs(
     grid = np.round(np.linspace(cfg.control.offset_min, cfg.control.offset_max, 25), 3)
     result = simulate(
         params,
-        cfg.heat_pump,
+        build_pump(cfg),
         exog,
         np.repeat(grid[:, None], n_steps, axis=1),
         state,

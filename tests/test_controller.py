@@ -189,3 +189,28 @@ def test_long_outage_forces_a_state_rebuild(controller, fake_ha):
 def test_a_corrupt_timestamp_does_not_crash_the_cycle(controller, fake_ha):
     controller.state.updated_at = "not-a-timestamp"
     assert controller.step(now=fake_ha.now, apply=False)["mode"] == "mpc"
+
+
+def test_perceived_temperature_limit_caps_the_offset(controller, cfg, fake_ha):
+    cfg.control.max_change_per_cycle = 99.0
+    cfg.heat_pump.perceived_min_c = -8.0
+    fake_ha.set("sensor.outdoor", -5.0)
+    # The house is freezing, so the safety override asks for maximum heat ...
+    fake_ha.set("sensor.indoor", cfg.control.hard_min - 1.0)
+    report = controller.step(now=fake_ha.now)
+    # ... but the pump may only ever be shown -8 degC, i.e. a -3 K offset.
+    assert report["offset"] == pytest.approx(-3.0)
+    assert any("degC" in note for note in report["notes"])
+
+
+def test_backup_heater_energy_reaches_the_status_entity(controller, cfg, fake_ha):
+    cfg.entities.status_entity = "sensor.hpmpc_status"
+    cfg.heat_pump.model = "daikin_erlq016caw1"
+    from hpmpc.model import build_pump
+    from hpmpc.mpc import MpcSolver
+
+    controller.pump = build_pump(cfg)
+    controller.solver = MpcSolver(cfg, controller.params)
+    controller.step(now=fake_ha.now)
+    posted = dict(fake_ha.posted)["/api/states/sensor.hpmpc_status"]
+    assert "backup_heater_kwh_horizon" in posted["attributes"]

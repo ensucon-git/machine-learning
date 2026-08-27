@@ -178,7 +178,10 @@ def test_init_config_writes_a_loadable_file(tmp_path, monkeypatch):
     assert main(["--config", str(target), "init-config"]) == 0
     from hpmpc.config import load_config
 
-    assert load_config(target).control.output_mode == "offset"
+    loaded = load_config(target)
+    assert loaded.control.output_mode == "resistance"
+    assert loaded.heat_pump.model == "daikin_erlq016caw1"
+    assert loaded.forecast.price_area == "SE3"
     # A second call must not silently clobber an edited config.
     assert main(["--config", str(target), "init-config"]) == 1
 
@@ -190,3 +193,78 @@ def test_train_without_a_dataset_fails_cleanly(tmp_path, monkeypatch):
     text = config.read_text().replace("data_dir: data", f"data_dir: {tmp_path}")
     config.write_text(text)
     assert main(["--config", str(config), "train"]) == 1
+
+
+# ------------------------------------------------------------ CLI helpers
+
+
+@pytest.fixture
+def config_file(tmp_path, monkeypatch):
+    monkeypatch.setenv("HA_TOKEN", "token")
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        "entities: {indoor_temp: sensor.a, outdoor_temp: sensor.b}\n"
+        "site: {latitude: 58.5877, longitude: 16.1924}\n"
+        "heat_pump: {model: daikin_erlq016caw1}\n"
+        f"paths: {{data_dir: {tmp_path}, model_dir: {tmp_path}}}\n",
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_curve_converts_two_endpoints(config_file, capsys):
+    assert main(["--config", str(config_file), "curve", "--point=-15:40", "--point=15:25"]) == 0
+    out = capsys.readouterr().out
+    assert "curve_slope: 0.500" in out
+    assert "curve_offset: 22.50" in out
+    # The printed table must reproduce the endpoints it was given.
+    assert "      -15     40.0" in out
+    assert "       15     25.0" in out
+
+
+def test_curve_rejects_a_single_point(config_file, capsys):
+    assert main(["--config", str(config_file), "curve", "--point=-15:40"]) == 1
+    assert "exactly two points" in capsys.readouterr().out
+
+
+def test_curve_rejects_unparseable_input(config_file, capsys):
+    assert main(["--config", str(config_file), "curve", "--point=nonsense"]) == 1
+    assert "Could not parse" in capsys.readouterr().out
+
+
+def test_calibrate_ntc_recovers_a_known_thermistor(config_file, capsys):
+    # Points generated from a 20 kohm / B=3950 part.
+    assert main([
+        "--config", str(config_file), "calibrate-ntc",
+        "--point=0:67300", "--point=25:20000",
+    ]) == 0
+    out = capsys.readouterr().out
+    assert "R25 = 20000" in out
+    assert "B = 39" in out
+    assert "ntc:" in out
+
+
+def test_calibrate_ntc_needs_two_points(config_file, capsys):
+    assert main(["--config", str(config_file), "calibrate-ntc", "--point=0:67300"]) == 1
+    assert "at least two" in capsys.readouterr().out
+
+
+def test_pump_table_prints_cop_and_capacity(config_file, capsys):
+    assert main(["--config", str(config_file), "pump-table"]) == 0
+    out = capsys.readouterr().out
+    assert "ERLQ016CAW1" in out
+    assert "COP" in out and "Compressor capacity (kW)" in out
+    assert "backup heater: enabled" in out
+
+
+def test_pump_table_says_so_when_no_map_is_configured(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("HA_TOKEN", "token")
+    path = tmp_path / "c.yaml"
+    path.write_text("entities: {indoor_temp: sensor.a, outdoor_temp: sensor.b}\n", encoding="utf-8")
+    assert main(["--config", str(path), "pump-table"]) == 1
+    assert "cannot see the electric" in capsys.readouterr().out
+
+
+def test_ntc_table_flags_coarse_resolution(config_file, capsys):
+    assert main(["--config", str(config_file), "ntc-table", "--step-ohm", "20000"]) == 0
+    assert "coarse" in capsys.readouterr().out

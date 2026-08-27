@@ -1,0 +1,217 @@
+# ---------------------------------------------------------------------------
+# ESP32 outdoor-sensor emulator for a Daikin Altherma
+# (ERLQ016CAW1 outdoor unit + EHVH16S26CB9W hydrobox)
+#
+# hpmpc writes a resistance in ohm to number.utegivare_resistans (control.
+# output_mode: resistance) and this node presents it to the pump.
+#
+#
+# WHICH SENSOR TO FAKE - read this first, it matters more than the wiring
+# ---------------------------------------------------------------------------
+# The obvious target is R1T, the ambient thermistor in the outdoor unit. It is
+# also the wrong one. R1T does not only feed the weather-dependent curve: the
+# unit uses it for defrost timing, for operating-range limits, and for deciding
+# when it may run at all. Lying to it means lying to all of that.
+#
+# The Daikin indoor unit can instead take its own EXTERNAL OUTDOOR SENSOR
+# (accessory KRCS01-1, mounted outdoors) and be told by field setting to use
+# that sensor for the weather-dependent curve, while the outdoor unit keeps its
+# real R1T for defrost and protection. That is the sensor to emulate: same
+# effect on the heating curve, none of the side effects.
+#
+# Look up the field setting in YOUR installer manual - the code differs between
+# Altherma generations, and guessing at it is not something to do to a heat
+# pump. Search the manual for "external outdoor sensor" / "ambient sensor".
+#
+# If you do end up on R1T anyway, keep control.offset_min/offset_max small
+# (about +/- 4 K) and keep heat_pump.perceived_min_c well above the unit's
+# -25 C operating limit, so the lie never reaches a threshold that matters.
+#
+#
+# HARDWARE
+# ---------------------------------------------------------------------------
+# A Daikin 20 kohm outdoor thermistor spans roughly 32 kohm at +15 C to
+# 197 kohm at -20 C. One 8-bit 100 kohm digital pot cannot cover that with
+# usable resolution. What works:
+#
+#   two 10-bit 100 kohm digital rheostats in series (e.g. 2x AD5293-100)
+#     -> 0 .. 200 kohm in ~195 ohm steps
+#
+# Check what that buys you before ordering:
+#
+#     hpmpc ntc-table --step-ohm 195
+#
+#       temp (C)         ohm   K per 195 ohm
+#          -20.0      196648             0.015
+#            0.0       67628             0.049
+#           15.0       32159             0.110
+#
+# Comfortably under the 0.2 K where quantisation starts to show. An 8-bit
+# 100 kohm part would give roughly 0.4 K at +15 C and could not reach -20 C
+# at all.
+#
+# SAFETY: the real thermistor stays wired through the NC contact of a relay.
+# The ESP has to actively energise the relay to take over. Lose power, lose
+# Wi-Fi, crash the firmware - the pump falls back to its real sensor.
+# ---------------------------------------------------------------------------
+
+esphome:
+  name: daikin-utegivare
+  friendly_name: Daikin outdoor sensor emulator
+
+esp32:
+  board: esp32dev
+
+logger:
+api:
+  encryption:
+    key: !secret api_encryption_key
+ota:
+  - platform: esphome
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  # If Wi-Fi drops the node keeps running; the watchdog below hands the pump
+  # back to its real sensor rather than freezing on a stale value.
+  reboot_timeout: 0s
+
+spi:
+  clk_pin: GPIO18
+  mosi_pin: GPIO23
+  miso_pin: GPIO19
+
+globals:
+  - id: target_ohm
+    type: float
+    restore_value: false
+    initial_value: '0'
+  - id: last_command_ms
+    type: uint32_t
+    restore_value: false
+    initial_value: '0'
+
+# Energise to take over the sensor; de-energise to hand it back.
+switch:
+  - platform: gpio
+    id: emulator_relay
+    name: "Emulated outdoor sensor engaged"
+    pin: GPIO25
+    restore_mode: ALWAYS_OFF
+
+number:
+  - platform: template
+    name: "Utegivare resistans"
+    id: utegivare_resistans
+    unit_of_measurement: "Ω"
+    min_value: 0
+    max_value: 250000
+    step: 1
+    optimistic: true
+    set_action:
+      - lambda: |-
+          // Independent sanity band. hpmpc already clamps what the pump may be
+          // shown, but the firmware must not trust the network: a corrupted or
+          // malicious value must not be able to present an absurd temperature.
+          const float R_MIN = 25000.0;    // about +20 C
+          const float R_MAX = 260000.0;   // about -25 C
+          float wanted = x;
+          if (wanted < R_MIN || wanted > R_MAX) {
+            ESP_LOGW("hpmpc", "Rejected out-of-band resistance %.0f ohm", wanted);
+            return;
+          }
+          id(target_ohm) = wanted;
+          id(last_command_ms) = millis();
+
+          // Two 100 kohm 10-bit rheostats in series; fill the first, spill into
+          // the second.
+          const float FULL_SCALE = 100000.0;
+          const int STEPS = 1023;
+          float first = wanted > FULL_SCALE ? FULL_SCALE : wanted;
+          float second = wanted > FULL_SCALE ? wanted - FULL_SCALE : 0.0f;
+          id(pot_coarse).set_level(first / FULL_SCALE * STEPS);
+          id(pot_fine).set_level(second / FULL_SCALE * STEPS);
+
+          if (!id(emulator_relay).state) {
+            id(emulator_relay).turn_on();
+          }
+
+sensor:
+  - platform: template
+    name: "Emulated outdoor temperature"
+    id: emulated_outdoor
+    unit_of_measurement: "°C"
+    device_class: temperature
+    accuracy_decimals: 2
+    lambda: |-
+      // Inverse of the NTC table, so Home Assistant shows what the pump believes
+      // rather than a raw resistance nobody can read at a glance. Keep these two
+      // arrays identical to the ntc section of config.yaml.
+      static const float T[] = {-30,-25,-20,-15,-10,-5,0,5,10,15,20,25,30};
+      static const float R[] = {347667,260639,196648,149283,114003,87562,
+                                67628,52514,40991,32159,25354,20084,15984};
+      const int N = 13;
+      float r = id(target_ohm);
+      if (r <= 0) return {};
+      // R decreases as T increases, so walk down.
+      for (int i = 0; i < N - 1; i++) {
+        if (r <= R[i] && r >= R[i + 1]) {
+          float f = (r - R[i]) / (R[i + 1] - R[i]);
+          return T[i] + f * (T[i + 1] - T[i]);
+        }
+      }
+      return r > R[0] ? T[0] : T[N - 1];
+    update_interval: 30s
+
+interval:
+  # Watchdog: the third safety layer, after hpmpc's own limits and the Home
+  # Assistant dead-man switch. If no fresh command arrives, hand the pump back
+  # to its real sensor. A stuck emulated value is the one failure that costs
+  # real money, and this layer survives Home Assistant and hpmpc both dying.
+  - interval: 60s
+    then:
+      - lambda: |-
+          const uint32_t TIMEOUT_MS = 45 * 60 * 1000UL;
+          if (id(emulator_relay).state && id(last_command_ms) > 0 &&
+              (millis() - id(last_command_ms)) > TIMEOUT_MS) {
+            ESP_LOGW("hpmpc", "No command for 45 minutes - releasing to the real sensor");
+            id(emulator_relay).turn_off();
+          }
+
+# Replace with the driver for the parts you actually fit. AD5293 is SPI; the
+# MCP4xxx family and the AD527x family (I2C) work the same way from here - all
+# this code needs is "set wiper to N of 1023".
+output:
+  - platform: template
+    id: pot_coarse
+    type: float
+    write_action:
+      - lambda: |-
+          // TODO: shift out the 10-bit wiper value to the first rheostat.
+          ESP_LOGD("hpmpc", "coarse wiper -> %.0f", state);
+  - platform: template
+    id: pot_fine
+    type: float
+    write_action:
+      - lambda: |-
+          // TODO: shift out the 10-bit wiper value to the second rheostat.
+          ESP_LOGD("hpmpc", "fine wiper -> %.0f", state);
+
+
+# ---------------------------------------------------------------------------
+# COMMISSIONING
+#
+# 1. Do not connect the pump yet. Command a few resistances and measure the
+#    output with a multimeter. The two rheostats have real wiper resistance
+#    (tens of ohms each) and a tolerance of a few percent - measure, do not
+#    assume.
+# 2. Measure the pump's OWN thermistor at two or three known temperatures
+#    (ice water is a free and accurate 0 C) and fit the curve:
+#       hpmpc calibrate-ntc --point=0:66800 --point=20:25354
+#    Paste the result into config.yaml. This calibration is what makes the
+#    faked temperature mean what you think it means.
+# 3. Connect the pump with control.dry_run: true and offset 0. The pump's own
+#    display should read the real outdoor temperature. If it does not, the
+#    calibration is wrong - fix it before going further.
+# 4. Command a steady -2 K offset for a day and check that the leaving water
+#    temperature rises by about slope * 2 K. Only then let the controller run.
+# ---------------------------------------------------------------------------

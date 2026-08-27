@@ -22,7 +22,10 @@ from .solar import irradiance_from_cloud_cover
 log = logging.getLogger(__name__)
 
 # Signals that are physically continuous and may be interpolated across gaps.
-CONTINUOUS = ["t_indoor", "t_outdoor", "wind", "cloud", "solar_radiation", "t_supply", "t_return", "power"]
+CONTINUOUS = [
+    "t_indoor", "t_outdoor", "wind", "cloud", "humidity", "solar_radiation",
+    "t_supply", "t_return", "power",
+]
 # Signals that hold their value until explicitly changed.
 STEPWISE = ["price", "output_raw"]
 
@@ -41,6 +44,7 @@ def column_map(cfg: Config) -> dict[str, str]:
         e.supply_temp: "t_supply",
         e.return_temp: "t_return",
         e.heatpump_power: "power",
+        e.outdoor_humidity: "humidity",
         e.price: "price",
         e.offset_output: "output_raw",
     }

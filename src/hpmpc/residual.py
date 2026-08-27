@@ -27,6 +27,7 @@ from sklearn.ensemble import HistGradientBoostingRegressor
 
 from .config import Config
 from .identify import _initial_mass_temp
+from .model import build_pump
 from .model.thermal import Exogenous, State, ThermalParams, simulate
 
 log = logging.getLogger(__name__)
@@ -119,6 +120,11 @@ def one_step_residuals(frame: pd.DataFrame, cfg: Config, params: ThermalParams) 
         data.get("wind", pd.Series(0.0, index=data.index)).fillna(0.0).to_numpy(dtype=float)[None, :],
         data.get("solar_ghi", pd.Series(0.0, index=data.index)).fillna(0.0).to_numpy(dtype=float)[None, :],
         data.get("price", pd.Series(1.0, index=data.index)).fillna(1.0).to_numpy(dtype=float)[None, :],
+        humidity=(
+            data["humidity"].to_numpy(dtype=float)[None, :]
+            if "humidity" in data
+            else np.full((1, len(data)), np.nan)
+        ),
     )
     measured = data["t_indoor"].to_numpy(dtype=float)
     offsets = data["offset"].fillna(0.0).to_numpy(dtype=float)[None, :]
@@ -128,7 +134,7 @@ def one_step_residuals(frame: pd.DataFrame, cfg: Config, params: ThermalParams) 
     tm0 = float(_initial_mass_temp(params, measured[:1], exog.t_outdoor[:, 0])[0])
     free = simulate(
         params,
-        cfg.heat_pump,
+        build_pump(cfg),
         exog,
         offsets,
         State(measured[0], tm0, float(exog.t_outdoor[0, 0] + offsets[0, 0])),

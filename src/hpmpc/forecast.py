@@ -17,6 +17,8 @@ import pandas as pd
 
 from .config import Config
 from .ha import HomeAssistant, to_float
+from .providers import PriceUnavailable, fetch_forecast, fetch_prices
+from .providers._http import ProviderError
 from .solar import condition_to_cloud_cover, irradiance_from_cloud_cover
 
 log = logging.getLogger(__name__)
@@ -132,80 +134,162 @@ def parse_price_attributes(attributes: dict[str, Any], fallback: float | None) -
     return points
 
 
+def weather_points(cfg: Config, ha: HomeAssistant, index: pd.DatetimeIndex) -> tuple[pd.DataFrame, dict[str, Any]]:
+    """Get a weather forecast from the configured source, falling back sideways.
+
+    SMHI first when configured, then the Home Assistant weather entity, then
+    nothing - and the caller persists the current sensor readings. Each step
+    down is recorded in the returned metadata rather than hidden, because a
+    controller planning 36 hours against a persisted constant should say so.
+    """
+    sources: dict[str, Any] = {}
+    if cfg.forecast.weather_source == "smhi":
+        try:
+            frame, meta = fetch_forecast(
+                cfg.site.latitude,
+                cfg.site.longitude,
+                cache_dir=cfg.cache_dir,
+                cache_minutes=cfg.forecast.weather_cache_minutes,
+                timeout=cfg.forecast.timeout,
+            )
+            sources["weather"] = meta
+            return frame, sources
+        except (ProviderError, ValueError) as exc:
+            log.warning("SMHI forecast failed (%s); falling back to Home Assistant", exc)
+            sources["weather_error"] = str(exc)
+
+    if cfg.entities.weather:
+        parsed = parse_weather_forecast(ha.weather_forecast(cfg.entities.weather))
+        if not parsed.empty:
+            frame = parsed.set_index("time")
+            if "humidity" not in frame:
+                frame["humidity"] = np.nan
+            sources.setdefault("weather", {"source": f"Home Assistant weather entity {cfg.entities.weather}"})
+            return frame, sources
+
+    sources.setdefault("weather", {"source": "none - persisting current sensor values"})
+    return pd.DataFrame(columns=["t_outdoor", "wind", "cloud", "humidity"]), sources
+
+
+def price_points(cfg: Config, ha: HomeAssistant, now: datetime) -> tuple[list[tuple[pd.Timestamp, float]], dict[str, Any]]:
+    """Get spot prices from the configured source, falling back to the price entity."""
+    sources: dict[str, Any] = {}
+    if cfg.forecast.price_source == "elprisetjustnu":
+        try:
+            points, meta = fetch_prices(
+                area=cfg.forecast.price_area,
+                now=now,
+                timezone_name=cfg.site.timezone,
+                cache_dir=cfg.cache_dir,
+                cache_minutes=cfg.forecast.price_cache_minutes,
+                timeout=cfg.forecast.timeout,
+            )
+            sources["price"] = meta
+            return points, sources
+        except (PriceUnavailable, ProviderError, ValueError) as exc:
+            log.warning("Spot price fetch failed (%s); falling back to Home Assistant", exc)
+            sources["price_error"] = str(exc)
+
+    state = ha.get_state(cfg.entities.price) if cfg.entities.price else None
+    fallback = state.numeric if state else None
+    points = parse_price_attributes(state.attributes, fallback) if state else []
+    if points:
+        sources.setdefault("price", {"source": f"Home Assistant entity {cfg.entities.price}"})
+    else:
+        sources.setdefault("price", {"source": "flat - no price forecast found"})
+    return points, sources
+
+
+def marginal_price(spot: np.ndarray, cfg: Config) -> np.ndarray:
+    """Turn a spot price into the marginal cost of one more kilowatt-hour.
+
+    ``(spot * price_scale + price_addition) * (1 + vat/100)``. The addition is
+    grid transfer plus energy tax; leaving it out inflates the *relative* gap
+    between cheap and expensive hours and makes the optimiser chase savings
+    that are proportionally smaller than they look.
+    """
+    c = cfg.control
+    return (np.asarray(spot, dtype=float) * c.price_scale + c.price_addition) * (1.0 + c.price_vat_pct / 100.0)
+
+
 def build_forecast(cfg: Config, ha: HomeAssistant, now: datetime | None = None) -> tuple[pd.DataFrame, dict[str, Any]]:
     """Return the exogenous frame over the horizon plus provenance metadata."""
+    now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
     index = horizon_index(cfg, now)
-    sources: dict[str, Any] = {}
     frame = pd.DataFrame(index=index)
 
-    # ---- weather -------------------------------------------------------
-    weather = parse_weather_forecast(ha.weather_forecast(cfg.entities.weather)) if cfg.entities.weather else pd.DataFrame()
+    weather, sources = weather_points(cfg, ha, index)
     current_outdoor = _current_value(ha, cfg.entities.outdoor_temp)
     current_wind = _current_value(ha, cfg.entities.wind_speed)
     current_cloud = _current_value(ha, cfg.entities.cloud_cover)
+    current_humidity = _current_value(ha, cfg.entities.outdoor_humidity)
 
-    if not weather.empty and weather["t_outdoor"].notna().any():
-        points = [(r.time, r.t_outdoor) for r in weather.itertuples() if r.t_outdoor is not None]
-        series = _series_from_points(points, index, "time")
-        sources["t_outdoor"] = f"weather forecast ({cfg.entities.weather})"
-    else:
-        series = None
-    if series is None or series.isna().all():
+    # ---- outdoor temperature -------------------------------------------
+    series = _column_series(weather, "t_outdoor", index, "time")
+    if series is None:
         if current_outdoor is None:
             raise ValueError("No outdoor temperature available - neither a forecast nor a current sensor value")
         series = pd.Series(current_outdoor, index=index)
         sources["t_outdoor"] = "persisted current sensor value (no forecast)"
     elif current_outdoor is not None:
         # Anchor the forecast to the measured value and let the bias decay over
-        # 6 h; forecasts are often a degree off at the current hour.
+        # 6 h; forecasts are routinely a degree off at the current hour, and the
+        # first hour is the one the controller acts on.
         bias = current_outdoor - float(series.iloc[0])
         decay = np.exp(-np.arange(len(index)) * cfg.control.step_minutes / 60.0 / 6.0)
         series = series + bias * decay
         sources["t_outdoor_bias_correction_c"] = round(bias, 2)
     frame["t_outdoor"] = series.to_numpy(dtype=float)
 
-    wind_points = [(r.time, r.wind) for r in weather.itertuples() if getattr(r, "wind", None) is not None] if not weather.empty else []
-    wind = _series_from_points(wind_points, index, "time")
-    if wind is None or wind.isna().all():
-        wind = pd.Series(current_wind if current_wind is not None else 0.0, index=index)
-        sources["wind"] = "persisted current value" if current_wind is not None else "assumed calm"
-    else:
-        sources["wind"] = f"weather forecast ({cfg.entities.weather})"
-    frame["wind"] = np.clip(wind.to_numpy(dtype=float), 0.0, None)
-
-    cloud_points = [(r.time, r.cloud) for r in weather.itertuples() if getattr(r, "cloud", None) is not None] if not weather.empty else []
-    cloud = _series_from_points(cloud_points, index, "time")
-    if cloud is None or cloud.isna().all():
-        cloud = pd.Series(current_cloud if current_cloud is not None else 50.0, index=index)
-        sources["cloud"] = "persisted current value" if current_cloud is not None else "assumed 50%"
-    else:
-        sources["cloud"] = f"weather forecast ({cfg.entities.weather})"
-    frame["cloud"] = np.clip(cloud.to_numpy(dtype=float), 0.0, 100.0)
+    # ---- wind, cloud, humidity -----------------------------------------
+    for column, current, default in (
+        ("wind", current_wind, 0.0),
+        ("cloud", current_cloud, 50.0),
+        ("humidity", current_humidity, np.nan),
+    ):
+        values = _column_series(weather, column, index, "time")
+        if values is None or values.isna().all():
+            fallback = current if current is not None else default
+            values = pd.Series(fallback, index=index)
+            sources[column] = "persisted current value" if current is not None else f"assumed {default}"
+        frame[column] = values.to_numpy(dtype=float)
+    frame["wind"] = np.clip(frame["wind"], 0.0, None)
+    frame["cloud"] = np.clip(frame["cloud"], 0.0, 100.0)
 
     frame["solar_ghi"] = irradiance_from_cloud_cover(
         index, frame["cloud"], cfg.site.latitude, cfg.site.longitude
     ).to_numpy(dtype=float)
     sources["solar_ghi"] = "clear-sky model attenuated by forecast cloud cover"
 
-    # ---- price ---------------------------------------------------------
-    price_state = ha.get_state(cfg.entities.price) if cfg.entities.price else None
-    fallback = price_state.numeric if price_state else None
-    points = parse_price_attributes(price_state.attributes, fallback) if price_state else []
-    price = _series_from_points(points, index, "step")
-    if price is None or price.isna().all():
-        price = pd.Series(fallback if fallback is not None else 1.0, index=index)
-        sources["price"] = "flat (no price forecast found)"
-    else:
-        horizon_end = index[-1]
+    # ---- price ----------------------------------------------------------
+    points, price_sources = price_points(cfg, ha, now)
+    sources.update(price_sources)
+    spot = _series_from_points(points, index, "step")
+    if spot is None or spot.isna().all():
+        current_price = _current_value(ha, cfg.entities.price)
+        spot = pd.Series(current_price if current_price is not None else 1.0, index=index)
+        sources["price_fallback"] = "flat price"
+    elif points:
         known_until = max(t for t, _ in points)
-        sources["price"] = f"{cfg.entities.price}, known until {known_until.isoformat()}"
-        if known_until < horizon_end:
-            sources["price_extrapolated_hours"] = round((horizon_end - known_until).total_seconds() / 3600.0, 1)
-    frame["price"] = price.to_numpy(dtype=float) * cfg.control.price_scale + cfg.control.price_addition
-    frame["price"] = frame["price"].ffill().bfill().fillna(1.0)
-
+        if known_until < index[-1]:
+            sources["price_extrapolated_hours"] = round(
+                (index[-1] - known_until).total_seconds() / 3600.0, 1
+            )
+    frame["spot_price"] = spot.ffill().bfill().fillna(1.0).to_numpy(dtype=float)
+    frame["price"] = marginal_price(frame["spot_price"].to_numpy(), cfg)
     frame["price_known"] = _price_known_mask(points, index)
     return frame, sources
+
+
+def _column_series(
+    weather: pd.DataFrame, column: str, index: pd.DatetimeIndex, method: str
+) -> pd.Series | None:
+    if weather.empty or column not in weather:
+        return None
+    values = weather[column].dropna()
+    if values.empty:
+        return None
+    return _series_from_points(list(values.items()), index, method)
 
 
 def _price_known_mask(points: Sequence[tuple[pd.Timestamp, float]], index: pd.DatetimeIndex) -> np.ndarray:

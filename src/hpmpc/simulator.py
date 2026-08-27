@@ -15,6 +15,7 @@ import numpy as np
 import pandas as pd
 
 from .config import Config
+from .model import build_pump
 from .model.thermal import Exogenous, State, ThermalParams, simulate, steady_state_mass_temp
 from .solar import irradiance_from_cloud_cover
 
@@ -94,7 +95,7 @@ def simulate_house(
     t0 = float(weather["t_outdoor"].iloc[0])
     result = simulate(
         params,
-        cfg.heat_pump,
+        build_pump(cfg),
         exog,
         np.asarray(offsets, dtype=float)[None, :],
         State(cfg.control.setpoint, float(steady_state_mass_temp(params, cfg.control.setpoint, t0)), t0),

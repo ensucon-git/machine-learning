@@ -83,6 +83,7 @@ class EntityConfig:
     return_temp: str = ""
     heatpump_power: str = ""
     heatpump_energy: str = ""
+    outdoor_humidity: str = ""
     weather: str = ""
     offset_output: str = ""
     status_entity: str = ""
@@ -106,6 +107,7 @@ class EntityConfig:
             self.return_temp,
             self.heatpump_power,
             self.heatpump_energy,
+            self.outdoor_humidity,
             self.offset_output,
         ]
         return [n for n in [*names, *self.extra] if n]
@@ -113,12 +115,30 @@ class EntityConfig:
 
 @dataclass
 class SiteConfig:
-    """Geographic position, used only for the local clear-sky solar model."""
+    """Where the house is.
 
+    Used for the local clear-sky solar model and for the SMHI point forecast.
+    SMHI's grid is roughly 2.5 km, so anything inside the same town gives the
+    same forecast - ``hpmpc geocode`` can pin it exactly if you want.
+    """
+
+    address: str = ""
     latitude: float = 59.33
     longitude: float = 18.06
     elevation_m: float = 20.0
     timezone: str = "Europe/Stockholm"
+
+
+@dataclass
+class ForecastConfig:
+    """Where the weather and price forecasts come from."""
+
+    weather_source: str = "home_assistant"   # "smhi" | "home_assistant"
+    price_source: str = "home_assistant"     # "elprisetjustnu" | "home_assistant"
+    price_area: str = "SE3"
+    weather_cache_minutes: float = 30.0
+    price_cache_minutes: float = 60.0
+    timeout: float = 30.0
 
 
 @dataclass
@@ -133,6 +153,11 @@ class HeatPumpConfig:
     Most Nordic pumps expose exactly these two numbers.
     """
 
+    model: str = ""
+    """Bundled performance map (e.g. ``daikin_erlq016caw1``) or a path to your
+    own YAML. Empty falls back to the generic Carnot model."""
+    efficiency_scale: float = 1.0
+    capacity_scale: float = 1.0
     curve_slope: float = 0.35
     curve_offset: float = 23.0
     curve_ref: float = 20.0
@@ -141,6 +166,14 @@ class HeatPumpConfig:
     loop_delta_t: float = 5.0
     outdoor_filter_hours: float = 3.0
     heat_stop_temp: float = 17.0
+    perceived_min_c: float = -30.0
+    perceived_max_c: float = 30.0
+    """Absolute bounds on the temperature the pump is allowed to be shown.
+
+    This is a property of the machine, not of the control strategy, so the model
+    honours it too - the optimiser never plans something the controller would
+    then have to clip. On a Daikin it also keeps the faked value away from the
+    operating-range and defrost thresholds."""
     max_heat_output_w: float = 8000.0
     standby_power_w: float = 30.0
     carnot_efficiency: float = 0.45
@@ -188,8 +221,20 @@ class ControlConfig:
     weight_hard: float = 400.0
     weight_offset_change: float = 0.05
     weight_terminal: float = 2.0
+    weight_backup_heater: float = 0.0
+    """Extra SEK per kWh of resistive backup heat, on top of what it already
+    costs in electricity. Non-zero expresses "I would rather be a little cooler
+    than run the immersion heater at all"."""
+    max_electric_power_kw: float = 0.0
+    """Soft cap on total electrical input. 0 disables it. Set it below your main
+    fuse: a 16 kW compressor plus a 9 kW backup heater can trip a 25 A service,
+    and a preheat plan is exactly when they would run together."""
+    weight_power_limit: float = 25.0
     price_scale: float = 1.0
     price_addition: float = 0.0
+    price_vat_pct: float = 0.0
+    """Applied last: ``(spot * price_scale + price_addition) * (1 + vat/100)``.
+    Leave at 0 when the price entity already includes VAT."""
     dry_run: bool = False
     max_data_age_minutes: float = 45.0
     observer_gain: float = 1.0
@@ -243,6 +288,7 @@ class Config:
     home_assistant: HomeAssistantConfig = field(default_factory=HomeAssistantConfig)
     entities: EntityConfig = field(default_factory=EntityConfig)
     site: SiteConfig = field(default_factory=SiteConfig)
+    forecast: ForecastConfig = field(default_factory=ForecastConfig)
     heat_pump: HeatPumpConfig = field(default_factory=HeatPumpConfig)
     ntc: NTCConfig = field(default_factory=NTCConfig)
     control: ControlConfig = field(default_factory=ControlConfig)
@@ -266,6 +312,18 @@ class Config:
             raise ValueError("control.step_minutes and control.horizon_hours must be positive")
         if self.optimizer.elites >= self.optimizer.population:
             raise ValueError("optimizer.elites must be smaller than optimizer.population")
+        f = self.forecast
+        if f.weather_source not in {"smhi", "home_assistant"}:
+            raise ValueError(f"forecast.weather_source '{f.weather_source}' is not valid")
+        if f.price_source not in {"elprisetjustnu", "home_assistant"}:
+            raise ValueError(f"forecast.price_source '{f.price_source}' is not valid")
+        if f.price_source == "elprisetjustnu" and f.price_area.upper() not in {"SE1", "SE2", "SE3", "SE4"}:
+            raise ValueError(f"forecast.price_area '{f.price_area}' is not a Swedish bidding area")
+        if f.weather_source == "smhi" and not (55.0 <= self.site.latitude <= 71.0 and 4.0 <= self.site.longitude <= 32.0):
+            raise ValueError(
+                f"site.latitude/longitude ({self.site.latitude}, {self.site.longitude}) is outside SMHI's "
+                "coverage - set the coordinates (try 'hpmpc geocode') or use forecast.weather_source: home_assistant"
+            )
 
     @property
     def model_path(self) -> Path:
@@ -274,6 +332,10 @@ class Config:
     @property
     def residual_path(self) -> Path:
         return Path(self.paths.model_dir) / "residual_model.joblib"
+
+    @property
+    def cache_dir(self) -> str:
+        return self.paths.data_dir
 
     @property
     def dataset_path(self) -> Path:

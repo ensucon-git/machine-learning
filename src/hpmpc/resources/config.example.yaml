@@ -1,8 +1,12 @@
 # ---------------------------------------------------------------------------
 # hpmpc - self-hosted MPC for an air/water heat pump on floor heating
 #
-# Copy to config/config.yaml and fill in your own entity ids.
-# Secrets are read from the environment: export HA_TOKEN=... (or use .env).
+# This example is filled in for a Daikin Altherma LT (ERLQ016CAW1 outdoor unit
+# + EHVH16S26CB9W hydrobox) in Norrkoping, price area SE3. Change the entity
+# ids to your own; everything else is commented so you can see what to adjust.
+#
+# Copy to config/config.yaml. Secrets come from the environment:
+#   export HA_TOKEN=...
 # ---------------------------------------------------------------------------
 
 home_assistant:
@@ -14,57 +18,87 @@ home_assistant:
 # Only indoor_temp and outdoor_temp are strictly required. Everything else
 # improves the model; leave unused entries empty and they are skipped.
 entities:
-  indoor_temp: sensor.vardagsrum_temperatur      # required
-  outdoor_temp: sensor.ute_temperatur            # required - the REAL outdoor temperature
-  price: sensor.nordpool_kwh_se3_sek_3_10_025    # spot price, SEK/kWh
-  weather: weather.hemma                         # used for the temperature/wind/cloud forecast
+  indoor_temp: sensor.vardagsrum_temperatur       # required
+  outdoor_temp: sensor.ute_temperatur             # required - the REAL outdoor temperature
+  price: sensor.nordpool_kwh_se3_sek_3_10_025     # only a fallback; see forecast.price_source
 
-  wind_speed: sensor.vindhastighet               # m/s
-  cloud_cover: sensor.molnighet                  # %, 0-100
-  solar_radiation: ""                            # W/m2 if you own a pyranometer; otherwise leave empty
+  wind_speed: sensor.vindhastighet                # m/s
+  cloud_cover: sensor.molnighet                   # %, 0-100
+  outdoor_humidity: sensor.ute_luftfuktighet      # %, drives the defrost derate
+  solar_radiation: ""                             # W/m2 if you own a pyranometer
+  weather: weather.hemma                          # fallback if SMHI is unreachable
 
-  supply_temp: sensor.varmepump_framledning      # strongly recommended: makes the fit far better
-  return_temp: sensor.varmepump_retur
-  heatpump_power: sensor.varmepump_effekt        # W - enables the COP fit
-  heatpump_energy: ""
+  supply_temp: sensor.daikin_framledning          # strongly recommended - transforms the fit
+  return_temp: sensor.daikin_retur
+  heatpump_power: sensor.daikin_effekt            # W - this is what calibrates the COP map
 
   # The digital resistor. Must be a number or input_number entity.
-  offset_output: number.varmepump_utetemp_offset
-  # Optional: the controller publishes its own status here (created on the fly).
+  offset_output: number.utegivare_resistans
+  # Optional: the controller publishes its own status here.
   status_entity: sensor.hpmpc_status
 
 site:
-  latitude: 59.3293
-  longitude: 18.0686
-  elevation_m: 20
+  address: Falkvagen, Norrkoping, Sverige
+  # Run 'hpmpc geocode "Falkvagen, Norrkoping"' to pin these exactly. SMHI's
+  # grid is about 2.5 km, so anywhere in Norrkoping gives the same forecast.
+  latitude: 58.5877
+  longitude: 16.1924
+  elevation_m: 25
   timezone: Europe/Stockholm
 
-# Your pump's heating curve. Read these off the pump's display; 'hpmpc train'
-# re-fits slope, offset and the filter time constant if a supply sensor exists.
+forecast:
+  weather_source: smhi              # SMHI open data: free, no key, ~10 days ahead
+  price_source: elprisetjustnu      # Nord Pool day-ahead per bidding area, free, no key
+  price_area: SE3
+  weather_cache_minutes: 30         # SMHI updates hourly; be polite to a free service
+  price_cache_minutes: 60
+  timeout: 30
+
 heat_pump:
-  curve_slope: 0.35            # supply = curve_offset + slope * (curve_ref - T_outdoor_filtered)
-  curve_offset: 23.0
+  # Loads the bundled performance map: COP and capacity across the whole
+  # envelope, plus the electric backup heater. Run 'hpmpc pump-table' to see
+  # what it implies and compare against your databook.
+  model: daikin_erlq016caw1
+  efficiency_scale: 1.0             # refitted from your power sensor by 'hpmpc train'
+  capacity_scale: 1.0
+
+  # Daikin sets the weather-dependent curve as two endpoints. This example is
+  # "40 C leaving water at -15 C outdoor, 25 C at +15 C outdoor", a typical
+  # floor-heating curve. Convert your own with:
+  #   hpmpc curve --point=-15:40 --point=15:25
+  curve_slope: 0.50
+  curve_offset: 22.5
   curve_ref: 20.0
-  supply_min: 20.0
-  supply_max: 40.0
-  loop_delta_t: 5.0            # supply minus return at design flow
-  outdoor_filter_hours: 3.0    # the pump's own outdoor averaging
-  heat_stop_temp: 17.0         # filtered outdoor temperature where heating stops
-  max_heat_output_w: 8000
-  standby_power_w: 30
-  carnot_efficiency: 0.45      # refitted from measured power when available
-  cop_min: 1.5
-  cop_max: 6.0
+  supply_min: 22.0
+  supply_max: 40.0                  # floor heating: never let it plan above this
+  loop_delta_t: 5.0
+  outdoor_filter_hours: 3.0         # the pump's own outdoor averaging; refitted during training
+  heat_stop_temp: 18.0              # space heating off above this filtered outdoor temperature
+
+  # Absolute bounds on what the pump may be shown, independent of the offset.
+  # Keeping the faked value inside the normal operating range avoids provoking
+  # defrost logic or operating-limit behaviour that has nothing to do with the
+  # heating curve.
+  perceived_min_c: -20.0
+  perceived_max_c: 25.0
+
+  standby_power_w: 40
+  max_heat_output_w: 16000          # only used if heat_pump.model is empty
+  carnot_efficiency: 0.43           # only used if heat_pump.model is empty
+  cop_min: 1.0
+  cop_max: 8.0
   defrost_penalty: 0.12
 
-# Only used when control.output_mode is "resistance". Take the table from your
-# pump's service manual - it beats the two-parameter beta model every time.
+# The digital resistor. These values describe a typical Daikin 20 kohm outdoor
+# thermistor. VERIFY THEM: measure your own sensor at two or three temperatures
+# and run 'hpmpc calibrate-ntc', or take the table from the service manual.
+# Getting this wrong biases every decision the controller makes.
 ntc:
-  model: beta                  # "beta" or "table"
-  r25: 22000                   # NTC nominal resistance at 25 C
-  beta: 3700
-  table_temp_c: []             # e.g. [-30, -20, -10, 0, 10, 20, 30]
-  table_ohm: []                # e.g. [177000, 99000, 58000, 35000, 22000, 14000, 9000]
+  model: table
+  table_temp_c: [-30, -25, -20, -15, -10, -5, 0, 5, 10, 15, 20, 25, 30]
+  table_ohm:    [347667, 260639, 196648, 149283, 114003, 87562, 67628, 52514, 40991, 32159, 25354, 20084, 15984]
+  r25: 20000                        # used only when model: beta
+  beta: 3950
   resistance_min: 0
   resistance_max: 500000
 
@@ -73,36 +107,48 @@ control:
   #   offset            write the offset in kelvin to a number entity
   #   fake_temperature  write the faked outdoor temperature in degC
   #   resistance        write the resistance in ohm for the digital potentiometer
-  output_mode: offset
+  output_mode: resistance
 
-  offset_min: -8.0             # most negative offset (pump thinks it is colder -> more heat)
-  offset_max: 5.0
-  max_change_per_cycle: 1.5    # kelvin per cycle, keeps the pump from hunting
+  offset_min: -6.0                  # more negative = pump thinks it is colder = more heat
+  offset_max: 4.0
+  max_change_per_cycle: 1.0         # kelvin per cycle; keeps the pump from hunting
   cycle_minutes: 15
 
-  horizon_hours: 36            # long enough to see through a whole price cycle
+  horizon_hours: 36                 # long enough to see through a whole price cycle
   step_minutes: 15
-  block_hours: 3               # the offset is piecewise constant over blocks this long
+  block_hours: 3
 
   setpoint: 21.0
-  comfort_min: 20.3            # the optimiser is free to roam inside this band ...
+  comfort_min: 20.3                 # the optimiser roams freely inside this band ...
   comfort_max: 22.0
-  hard_min: 19.0               # ... and is heavily penalised outside this one
+  hard_min: 19.0                    # ... and is heavily penalised outside this one
   hard_max: 23.5
 
   weight_comfort: 40.0
   weight_hard: 400.0
   weight_offset_change: 0.05
   weight_terminal: 2.0
+  weight_backup_heater: 0.0         # raise it to avoid resistive heat beyond its raw cost
 
-  price_scale: 1.0             # set to 0.01 if your price sensor reports ore/kWh
-  price_addition: 0.0          # grid transfer fee + energy tax, SEK/kWh - this is the real marginal cost
+  # Soft cap on total electrical input. A 16 kW compressor plus a 9 kW backup
+  # heater will trip a 25 A service, and a preheat plan is exactly when they
+  # would run together. Set this below your main fuse. 0 disables the cap.
+  max_electric_power_kw: 0.0
+  weight_power_limit: 25.0
+
+  # Marginal cost = (spot * price_scale + price_addition) * (1 + price_vat_pct/100).
+  # elprisetjustnu returns bare spot in SEK/kWh, so add transfer and energy tax
+  # here, then VAT. Leaving these at zero makes the optimiser overestimate what
+  # load shifting is worth.
+  price_scale: 1.0
+  price_addition: 0.60              # grid transfer + energy tax, SEK/kWh - USE YOUR OWN
+  price_vat_pct: 25.0
 
   observer_gain: 1.0
-  fallback_offset: 0.0         # used whenever sensors are missing or implausible
+  fallback_offset: 0.0              # used whenever sensors are missing or implausible
   max_data_age_minutes: 45
   warm_start_hours: 24
-  dry_run: false               # true = compute everything, write nothing
+  dry_run: false                    # true = compute everything, write nothing
 
 optimizer:
   population: 256
@@ -115,16 +161,16 @@ optimizer:
 training:
   history_days: 45
   resample_minutes: 15
-  window_hours: 12             # short windows pin the fast air dynamics
+  window_hours: 12                  # short windows pin the fast air dynamics
   window_stride_hours: 3
-  burn_in_hours: 24            # simulated but not scored; lets the slab estimate settle
-  long_window_hours: 48        # long windows pin the slab, i.e. the storage capacity
+  burn_in_hours: 24                 # simulated but not scored; lets the slab estimate settle
+  long_window_hours: 48             # long windows pin the slab, i.e. the storage capacity
   max_windows: 900
   validation_fraction: 0.25
   regularisation: 0.05
   restarts: 3
   use_residual_model: true
-  residual_max_correction: 0.4 # K/h - hard cap on what the learned residual may do
+  residual_max_correction: 0.4      # K/h - hard cap on what the learned residual may do
   seed: 0
 
 paths:

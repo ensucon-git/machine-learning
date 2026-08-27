@@ -28,6 +28,7 @@ from scipy.optimize import least_squares
 from .config import Config
 from .dataset import segments
 from .model import heatpump as hp
+from .model import build_pump
 from .model.thermal import Exogenous, State, ThermalParams, simulate, steady_state_mass_temp
 
 log = logging.getLogger(__name__)
@@ -180,7 +181,7 @@ def predict(params: ThermalParams, cfg: Config, ws: WindowSet) -> np.ndarray:
     tm0 = _initial_mass_temp(params, ws.t_indoor0, ws.exog.t_outdoor[:, 0])
     result = simulate(
         params,
-        cfg.heat_pump,
+        build_pump(cfg),
         ws.exog,
         ws.offset,
         State(ws.t_indoor0, tm0, ws.t_filtered0),
@@ -449,7 +450,20 @@ def fit_heating_curve(frame: pd.DataFrame, cfg: Config) -> dict[str, Any] | None
 
 
 def fit_cop(frame: pd.DataFrame, cfg: Config, params: ThermalParams) -> dict[str, Any] | None:
-    """Fit the Carnot efficiency and standby power against measured power."""
+    """Calibrate the pump's efficiency against the owner's own electricity meter.
+
+    The shipped performance map sets the *shape* of COP across the operating
+    envelope - how it falls with lift, where defrost bites, when the compressor
+    runs out of capacity. This fits the *level*: a single multiplicative scale
+    on the map, plus standby power. One well-determined number beats ten
+    poorly-determined ones, and it is the number that decides whether load
+    shifting is worth doing at all.
+
+    Rows where the model says the electric backup heater was running are
+    excluded from the scale fit - their power says nothing about compressor
+    efficiency - and the residual is reported per ambient-temperature bin so a
+    wrong map *shape* shows up rather than being absorbed into the scale.
+    """
     if "power" not in frame or frame["power"].notna().sum() < 200:
         return None
     dt_hours = cfg.training.resample_minutes / 60.0
@@ -459,6 +473,7 @@ def fit_cop(frame: pd.DataFrame, cfg: Config, params: ThermalParams) -> dict[str
     if "offset" not in data:
         data["offset"] = 0.0
 
+    pump = build_pump(cfg)
     has_supply = "t_supply" in data and data["t_supply"].notna().mean() > 0.8
     supply_override = data["t_supply"].ffill().bfill().to_numpy(dtype=float)[None, :] if has_supply else None
 
@@ -467,49 +482,80 @@ def fit_cop(frame: pd.DataFrame, cfg: Config, params: ThermalParams) -> dict[str
         data.get("wind", pd.Series(0.0, index=data.index)).fillna(0.0).to_numpy(dtype=float)[None, :],
         data.get("solar_ghi", pd.Series(0.0, index=data.index)).fillna(0.0).to_numpy(dtype=float)[None, :],
         data.get("price", pd.Series(1.0, index=data.index)).fillna(1.0).to_numpy(dtype=float)[None, :],
+        humidity=(
+            data["humidity"].to_numpy(dtype=float)[None, :]
+            if "humidity" in data
+            else np.full((1, len(data)), np.nan)
+        ),
     )
+    offsets = data["offset"].fillna(0.0).to_numpy(dtype=float)[None, :]
     ti0 = float(data["t_indoor"].iloc[0])
     tm0 = float(_initial_mass_temp(params, np.array([ti0]), exog.t_outdoor[:, 0])[0])
     sim = simulate(
-        params,
-        cfg.heat_pump,
-        exog,
-        data["offset"].fillna(0.0).to_numpy(dtype=float)[None, :],
-        State(ti0, tm0, float(exog.t_outdoor[0, 0] + data["offset"].fillna(0.0).iloc[0])),
-        dt_hours,
-        supply_temp_override=supply_override,
+        params, pump, exog, offsets,
+        State(ti0, tm0, float(exog.t_outdoor[0, 0] + offsets[0, 0])),
+        dt_hours, supply_temp_override=supply_override,
     )
 
     q = sim["q_heat"][0]
+    q_backup = sim["q_backup"][0]
     ts = sim["t_supply"][0]
     te = exog.t_outdoor[0]
+    rh = exog.humidity[0]
     power = data["power"].to_numpy(dtype=float)
 
     idle = q < 0.02 * max(float(np.max(q)), 1.0)
     standby = float(np.median(power[idle])) if idle.sum() > 20 else cfg.heat_pump.standby_power_w
     standby = float(np.clip(standby, 0.0, 300.0))
 
-    run = q > 0.15 * max(float(np.max(q)), 1.0)
+    cop_base = np.maximum(pump.cop(ts, te, rh), 1e-6)
+    q_compressor = np.maximum(q - q_backup, 0.0)
+    run = (q_compressor > 0.15 * max(float(np.max(q_compressor)), 1.0)) & (q_backup <= 1.0)
     if run.sum() < 100:
+        log.warning("Too few compressor-only samples to calibrate efficiency (%d)", int(run.sum()))
         return None
-    lift = np.maximum(ts[run] - te[run], 1.0)
-    defrost = 1.0 - cfg.heat_pump.defrost_penalty * np.exp(-(((te[run] + 2.0) / 4.0) ** 2))
-    x = q[run] * lift / ((ts[run] + hp.KELVIN) * defrost)   # = q / (COP/eta)
+
+    x = q_compressor[run] / cop_base[run]
     z = np.maximum(power[run] - standby, 1.0)
     denom = float(np.sum(x * x))
     if denom <= 0:
         return None
-    inv_eta = float(np.sum(x * z) / denom)
-    eta = float(np.clip(1.0 / max(inv_eta, 1e-6), 0.15, 0.75))
+    scale = float(np.clip(denom / float(np.sum(x * z)), 0.5, 2.0))
 
-    pred = x * inv_eta + standby
-    resid = pred - power[run]
-    scop = float(np.sum(q[run]) / max(np.sum(power[run]), 1.0))
-    return {
-        "carnot_efficiency": round(eta, 4),
+    predicted = q_compressor / (cop_base * scale) + q_backup + standby
+    resid = predicted[run] - power[run]
+    delivered = float(np.sum(q) * dt_hours / 1000.0)
+    consumed = float(np.sum(power) * dt_hours / 1000.0)
+
+    result: dict[str, Any] = {
+        "efficiency_scale": round(scale, 4),
         "standby_power_w": round(standby, 1),
         "power_rmse_w": round(float(np.sqrt(np.mean(resid**2))), 1),
         "power_mae_w": round(float(np.mean(np.abs(resid))), 1),
-        "seasonal_cop_observed": round(scop, 3),
+        "seasonal_cop_observed": round(delivered / max(consumed, 1e-6), 3),
         "n_samples": int(run.sum()),
+        "backup_heater_hours": round(float(np.sum(q_backup > 1.0) * dt_hours), 2),
+        "residual_by_ambient": _residual_by_ambient(te[run], resid),
+        "pump_model": pump.describe(),
     }
+    if pump.performance is None:
+        # Generic Carnot backend: express the same correction in its own units.
+        result["carnot_efficiency"] = round(float(np.clip(cfg.heat_pump.carnot_efficiency * scale, 0.15, 0.75)), 4)
+        result.pop("efficiency_scale")
+    return result
+
+
+def _residual_by_ambient(t_ambient: np.ndarray, residual: np.ndarray) -> dict[str, float]:
+    """Mean power error per outdoor-temperature bin.
+
+    A wrong efficiency *level* shows up as a uniform offset here; a wrong map
+    *shape* shows up as a trend across the bins, which is the signal to replace
+    the shipped table with the manufacturer's own.
+    """
+    edges = np.array([-30.0, -15.0, -10.0, -5.0, 0.0, 5.0, 10.0, 30.0])
+    out: dict[str, float] = {}
+    for lo, hi in zip(edges[:-1], edges[1:]):
+        mask = (t_ambient >= lo) & (t_ambient < hi)
+        if mask.sum() >= 20:
+            out[f"{lo:.0f}..{hi:.0f}C"] = round(float(np.mean(residual[mask])), 1)
+    return out

@@ -33,6 +33,8 @@ PUMP_OVERRIDE_KEYS = (
     "curve_ref",
     "outdoor_filter_hours",
     "carnot_efficiency",
+    "efficiency_scale",
+    "capacity_scale",
     "standby_power_w",
 )
 
@@ -95,12 +97,22 @@ def train(cfg: Config, frame: pd.DataFrame, fit_curve: bool = True) -> dict[str,
     report["cop"] = cop
     if cop:
         overrides.update(
-            {"carnot_efficiency": cop["carnot_efficiency"], "standby_power_w": cop["standby_power_w"]}
+            {k: cop[k] for k in ("carnot_efficiency", "efficiency_scale", "standby_power_w") if k in cop}
         )
+        correction = cop.get("efficiency_scale", cop.get("carnot_efficiency"))
         log.info(
-            "COP fit: Carnot efficiency %.3f, standby %.0f W, observed seasonal COP %.2f",
-            cop["carnot_efficiency"], cop["standby_power_w"], cop["seasonal_cop_observed"],
+            "Efficiency fit: correction %.3f, standby %.0f W, observed seasonal COP %.2f, "
+            "power RMSE %.0f W, backup heater ran %.1f h",
+            correction, cop["standby_power_w"], cop["seasonal_cop_observed"],
+            cop["power_rmse_w"], cop.get("backup_heater_hours", 0.0),
         )
+        drift = cop.get("residual_by_ambient", {})
+        if drift and max(abs(v) for v in drift.values()) > 250:
+            log.warning(
+                "Power error varies with outdoor temperature (%s W by bin) - the shape of the "
+                "performance map looks wrong. Replace it with the databook table.",
+                drift,
+            )
     working = apply_pump_overrides(cfg, overrides)
 
     # 4. Residual ----------------------------------------------------------
@@ -177,10 +189,16 @@ def summarise(report: dict[str, Any]) -> str:
         )
     cop = report.get("cop")
     if cop:
+        correction = cop.get("efficiency_scale", cop.get("carnot_efficiency"))
+        label = "efficiency scale" if "efficiency_scale" in cop else "Carnot efficiency"
         lines.append(
-            f"COP:       Carnot efficiency {cop['carnot_efficiency']}, standby {cop['standby_power_w']} W, "
+            f"Pump:      {label} {correction}, standby {cop['standby_power_w']} W, "
             f"observed SCOP {cop['seasonal_cop_observed']}, power RMSE {cop['power_rmse_w']} W"
         )
+        if cop.get("backup_heater_hours"):
+            lines.append(f"           backup heater active {cop['backup_heater_hours']} h in this data")
+        if cop.get("residual_by_ambient"):
+            lines.append(f"           power error by outdoor bin (W): {cop['residual_by_ambient']}")
     residual = report.get("residual")
     if residual and residual.get("accepted"):
         lines.append(

@@ -103,6 +103,247 @@ def cmd_ntc_table(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_curve(args: argparse.Namespace) -> int:
+    """Convert a two-point heating curve into the config's slope/offset form.
+
+    Daikin (and most Nordic pumps) express the weather-dependent curve as two
+    endpoints - "40 C leaving water at -15 C outdoor, 25 C at +15 C". This
+    turns that into the linear form the model uses, and shows the result, so a
+    transcription error does not silently become the single number that decides
+    every heating decision.
+    """
+    points: list[tuple[float, float]] = []
+    for raw in args.point:
+        try:
+            outdoor, supply = raw.split(":")
+            points.append((float(outdoor), float(supply)))
+        except ValueError:
+            print(f"Could not parse '{raw}'; expected OUTDOOR:SUPPLY, for example --point=-15:40")
+            return 1
+    if len(points) != 2:
+        print("Give exactly two points, the cold end and the warm end of the curve.")
+        return 1
+    (t1, s1), (t2, s2) = sorted(points)
+    if t1 == t2:
+        print("The two points must be at different outdoor temperatures.")
+        return 1
+
+    reference = args.reference
+    slope = (s1 - s2) / (t2 - t1)
+    offset = s1 - slope * (reference - t1)
+    print(f"curve_slope: {slope:.3f}")
+    print(f"curve_offset: {offset:.2f}")
+    print(f"curve_ref: {reference:.1f}")
+    print(f"\n  supply = {offset:.2f} + {slope:.3f} * ({reference:.0f} - outdoor_filtered)\n")
+    print(f"{'outdoor':>9}{'supply':>9}")
+    for outdoor in range(int(min(t1, -20)), int(max(t2, 15)) + 1, 5):
+        print(f"{outdoor:>9}{offset + slope * (reference - outdoor):>9.1f}")
+    print(
+        "\nCheck the two endpoints against your pump's display before pasting this in.\n"
+        "Cap heat_pump.supply_max at what your floor loop is designed for."
+    )
+    return 0
+
+
+def cmd_geocode(args: argparse.Namespace) -> int:
+    """Look up coordinates for an address, once, so you can paste them in."""
+    from .providers import geocode
+
+    results = geocode(args.address, limit=args.limit)
+    if not results:
+        print(f"No match for '{args.address}'. Try adding the municipality and country.")
+        return 1
+    print(f"Matches for '{args.address}':\n")
+    for i, hit in enumerate(results, 1):
+        print(f"  {i}. {hit['display_name']}")
+        print(f"     latitude: {hit['latitude']}   longitude: {hit['longitude']}   ({hit['type']})")
+    best = results[0]
+    print("\nPaste into config.yaml:\n")
+    print("site:")
+    print(f"  address: {args.address}")
+    print(f"  latitude: {best['latitude']}")
+    print(f"  longitude: {best['longitude']}")
+    print(
+        "\nSMHI's forecast grid is about 2.5 km, so anywhere in the same town gives\n"
+        "the same numbers - do not agonise over the exact house."
+    )
+    return 0
+
+
+def cmd_providers(args: argparse.Namespace) -> int:
+    """Verify that the weather and price sources actually answer from here."""
+    from .providers import fetch_forecast, fetch_prices
+    from .providers._http import ProviderError
+
+    cfg = _load(args)
+    ok = True
+
+    print(f"Weather source: {cfg.forecast.weather_source}")
+    if cfg.forecast.weather_source == "smhi":
+        try:
+            frame, meta = fetch_forecast(
+                cfg.site.latitude, cfg.site.longitude,
+                cache_dir=None if args.no_cache else cfg.cache_dir,
+                cache_minutes=cfg.forecast.weather_cache_minutes,
+                timeout=cfg.forecast.timeout,
+            )
+            span = (frame.index[-1] - frame.index[0]).total_seconds() / 3600.0
+            print(f"  ok       {len(frame)} points over {span:.0f} h, cache: {meta.get('cache')}")
+            print(f"           reference time {meta.get('reference_time')}")
+            head = frame.head(6)
+            print(f"\n{'time (UTC)':22}{'temp':>7}{'wind':>7}{'cloud':>8}{'humidity':>10}")
+            for stamp, row in head.iterrows():
+                print(
+                    f"{stamp.strftime('%Y-%m-%d %H:%M'):22}{row['t_outdoor']:>7.1f}{row['wind']:>7.1f}"
+                    f"{row['cloud']:>8.0f}{row['humidity']:>10.0f}"
+                )
+        except (ProviderError, ValueError) as exc:
+            print(f"  FAILED   {exc}")
+            ok = False
+    else:
+        print("  (using the Home Assistant weather entity; run 'hpmpc check' instead)")
+
+    print(f"\nPrice source: {cfg.forecast.price_source} ({cfg.forecast.price_area})")
+    if cfg.forecast.price_source == "elprisetjustnu":
+        try:
+            points, meta = fetch_prices(
+                area=cfg.forecast.price_area,
+                timezone_name=cfg.site.timezone,
+                cache_dir=None if args.no_cache else cfg.cache_dir,
+                cache_minutes=cfg.forecast.price_cache_minutes,
+                timeout=cfg.forecast.timeout,
+            )
+            print(f"  ok       {len(points)} hourly prices, {meta['first']} .. {meta['last']}")
+            for day in meta.get("days", []):
+                print(f"           {day['date']}: {day['hours']} h{' (cached)' if day['cached'] else ''}")
+            if meta.get("tomorrow_published") is False:
+                print("           tomorrow not published yet (Nord Pool publishes just after 13:00)")
+            if meta.get("warning"):
+                print(f"  WARNING  {meta['warning']}")
+            values = np.array([v for _, v in points])
+            print(
+                f"           spot excl. VAT/fees: min {values.min():.3f}  max {values.max():.3f}  "
+                f"mean {values.mean():.3f} SEK/kWh"
+            )
+            marginal_min = (values.min() * cfg.control.price_scale + cfg.control.price_addition) * (
+                1 + cfg.control.price_vat_pct / 100
+            )
+            marginal_max = (values.max() * cfg.control.price_scale + cfg.control.price_addition) * (
+                1 + cfg.control.price_vat_pct / 100
+            )
+            print(f"           your marginal cost:  min {marginal_min:.3f}  max {marginal_max:.3f} SEK/kWh")
+            if cfg.control.price_addition == 0 and cfg.control.price_vat_pct == 0:
+                print(
+                    "  WARNING  price_addition and price_vat_pct are both zero, so the optimiser is\n"
+                    "           planning against bare spot. Add your grid transfer, energy tax and VAT,\n"
+                    "           or it will overestimate what load shifting is worth."
+                )
+            print(f"           {meta['attribution']}")
+        except (ProviderError, ValueError) as exc:
+            print(f"  FAILED   {exc}")
+            ok = False
+    else:
+        print("  (using the Home Assistant price entity; run 'hpmpc check' instead)")
+
+    print("\nAll providers reachable." if ok else "\nSome providers failed; see above.")
+    return 0 if ok else 1
+
+
+def cmd_pump_table(args: argparse.Namespace) -> int:
+    """Print what the loaded performance map implies, to check against the databook."""
+    from .model import build_pump
+
+    cfg = _load(args)
+    pump = build_pump(cfg)
+    if pump.performance is None:
+        print(
+            "No performance map loaded (heat_pump.model is empty), so the generic Carnot model is in\n"
+            f"use with efficiency {cfg.heat_pump.carnot_efficiency}. That model cannot see the electric\n"
+            "backup heater. Set heat_pump.model to your unit to fix that."
+        )
+        return 1
+    performance = pump.performance
+    print(f"{performance.name}")
+    print(f"source: {performance.source}")
+    print(f"efficiency scale {performance.efficiency_scale:.4f} (fitted against your meter by 'hpmpc train')")
+    print(f"backup heater: {'enabled' if performance.backup_enabled else 'disabled'}, "
+          f"{performance.backup_max_kw} kW at COP {performance.backup_cop}")
+    print(f"compressor stops below {performance.min_ambient_c} degC ambient\n")
+
+    supply = args.supply or [30.0, 35.0, 40.0, 45.0, 50.0]
+    ambient = args.ambient or [-20.0, -15.0, -10.0, -7.0, -2.0, 2.0, 7.0, 12.0]
+
+    print("COP")
+    print("  ambient  " + "".join(f"{f'W{int(t)}':>8}" for t in supply))
+    for ta in ambient:
+        row = "".join(f"{float(pump.cop(np.array(ts), np.array(ta))):>8.2f}" for ts in supply)
+        print(f"  {ta:>7.0f}  {row}")
+
+    print("\nCompressor capacity (kW)")
+    print("  ambient  " + "".join(f"{f'W{int(t)}':>8}" for t in supply))
+    for ta in ambient:
+        row = "".join(f"{float(pump.capacity_w(np.array(ta), np.array(ts))) / 1000:>8.1f}" for ts in supply)
+        print(f"  {ta:>7.0f}  {row}")
+
+    print(
+        "\nCompare against the 'heating capacity tables' in your unit's databook.\n"
+        "  efficiency = COP * (T_supply + 273.15) / (T_supply - T_ambient)\n"
+        "Edit the table with heat_pump.model pointing at your own YAML file if the shape is off;\n"
+        "the level is corrected automatically from your power sensor during training."
+    )
+    return 0
+
+
+def cmd_calibrate_ntc(args: argparse.Namespace) -> int:
+    """Fit an NTC model to resistances you measured on your own sensor."""
+    from .ntc import resistance_to_temperature, temperature_to_resistance
+
+    points: list[tuple[float, float]] = []
+    for raw in args.point:
+        try:
+            temp, ohm = raw.split(":")
+            points.append((float(temp), float(ohm)))
+        except ValueError:
+            print(f"Could not parse '{raw}'; expected TEMP:OHM, for example 0:66800")
+            return 1
+    if len(points) < 2:
+        print("Need at least two measurements at different temperatures.")
+        return 1
+
+    temps = np.array([t for t, _ in points], dtype=float)
+    ohms = np.array([r for _, r in points], dtype=float)
+    # ln R = ln R25 + B (1/T - 1/298.15): linear in (1/T), so a plain least squares.
+    x = 1.0 / (temps + 273.15) - 1.0 / 298.15
+    design = np.column_stack([np.ones_like(x), x])
+    coefficients, *_ = np.linalg.lstsq(design, np.log(ohms), rcond=None)
+    r25 = float(np.exp(coefficients[0]))
+    beta = float(coefficients[1])
+
+    from .config import NTCConfig
+
+    fitted = NTCConfig(model="beta", r25=r25, beta=beta)
+    print(f"Fitted: R25 = {r25:.0f} ohm, B = {beta:.0f}\n")
+    print(f"{'measured T':>12}{'measured R':>12}{'model R':>12}{'error':>10}")
+    for temp, ohm in points:
+        modelled = float(temperature_to_resistance(temp, fitted))
+        print(f"{temp:>12.1f}{ohm:>12.0f}{modelled:>12.0f}{100 * (modelled / ohm - 1):>9.1f}%")
+    worst = max(
+        abs(float(resistance_to_temperature(r, fitted)) - t) for t, r in points
+    )
+    print(f"\nWorst temperature error at the measured points: {worst:.2f} K")
+    if len(points) < 4 or worst > 0.5:
+        print(
+            "A two-parameter beta model drifts at the ends of the range. With four or more\n"
+            "measurements, or the table from the service manual, prefer ntc.model: table."
+        )
+    print("\nPaste into config.yaml:\n")
+    print("ntc:")
+    print("  model: beta")
+    print(f"  r25: {r25:.0f}")
+    print(f"  beta: {beta:.0f}")
+    return 0
+
+
 def cmd_check(args: argparse.Namespace) -> int:
     cfg = _load(args)
     print(f"Config OK: {args.config}")
@@ -253,6 +494,7 @@ def cmd_demo(args: argparse.Namespace) -> int:
     cfg.entities.indoor_temp = "sensor.demo_indoor"
     cfg.entities.outdoor_temp = "sensor.demo_outdoor"
     cfg.entities.price = "sensor.demo_price"
+    cfg.heat_pump.model = args.pump
     cfg.paths.data_dir = args.workdir
     cfg.paths.model_dir = args.workdir
     cfg.paths.state_file = str(Path(args.workdir) / "controller_state.json")
@@ -367,6 +609,32 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("check", help="validate config and Home Assistant connectivity")
     p.set_defaults(func=cmd_check)
 
+    p = sub.add_parser("curve", help="convert a two-point heating curve to slope/offset")
+    p.add_argument("--point", action="append", required=True, metavar="OUTDOOR:SUPPLY",
+                   help="a curve endpoint. Negative temperatures need the equals form: --point=-15:40")
+    p.add_argument("--reference", type=float, default=20.0)
+    p.set_defaults(func=cmd_curve)
+
+    p = sub.add_parser("geocode", help="look up coordinates for an address")
+    p.add_argument("address")
+    p.add_argument("--limit", type=int, default=5)
+    p.set_defaults(func=cmd_geocode)
+
+    p = sub.add_parser("providers", help="verify the weather and price sources from this machine")
+    p.add_argument("--no-cache", action="store_true", help="bypass the local cache and go to the network")
+    p.set_defaults(func=cmd_providers)
+
+    p = sub.add_parser("pump-table", help="print the loaded COP and capacity tables")
+    p.add_argument("--ambient", type=float, nargs="*", default=None)
+    p.add_argument("--supply", type=float, nargs="*", default=None)
+    p.set_defaults(func=cmd_pump_table)
+
+    p = sub.add_parser("calibrate-ntc", help="fit an NTC model to your own measurements")
+    p.add_argument("--point", action="append", required=True, metavar="TEMP:OHM",
+                   help="a measured pair, e.g. --point 0:66800. Negative temperatures need "
+                        "the equals form: --point=-20:197000")
+    p.set_defaults(func=cmd_calibrate_ntc)
+
     p = sub.add_parser("ntc-table", help="print the NTC curve and the resolution of a resistance step")
     p.add_argument("--low", type=float, default=-25.0)
     p.add_argument("--high", type=float, default=20.0)
@@ -415,6 +683,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--days", type=int, default=30)
     p.add_argument("--backtest-days", type=float, default=7.0)
     p.add_argument("--seed", type=int, default=1)
+    p.add_argument("--pump", default="daikin_erlq016caw1",
+                   help="bundled performance map to use; empty string for the generic Carnot model")
     p.add_argument("--workdir", default="demo_output")
     p.set_defaults(func=cmd_demo)
     return parser
