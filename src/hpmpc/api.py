@@ -43,9 +43,12 @@ class ControllerService:
         self.cfg = working
         self.ha = HomeAssistant(self.cfg.home_assistant)
         self.controller = Controller(self.cfg, params, self.ha, residual)
+        self.controller.reload_config(self.config_path)
 
     def step(self, apply: bool | None = None) -> dict[str, Any]:
         with self.lock:
+            if self.controller.reload_config(self.config_path):
+                self.cfg = self.controller.cfg
             try:
                 report = self.controller.step(apply=apply)
                 self.last_error = None

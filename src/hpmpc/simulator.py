@@ -124,6 +124,78 @@ def simulate_house(
     return frame
 
 
+def add_house_electricity(
+    frame: pd.DataFrame,
+    cfg: Config,
+    rng: np.random.Generator,
+    ev_kw: float = 11.0,
+    charge_probability: float = 0.45,
+    phase_split: tuple[float, float, float] = (0.5, 0.3, 0.2),
+) -> pd.DataFrame:
+    """Add a plausible whole-house electricity measurement.
+
+    Everything the disaggregation has to contend with, and nothing it is told:
+    a base load with a daily shape, single-phase appliances switching on and
+    off, an 11 kW car charger on random evenings, and an uneven split of the
+    household load across the three phases. The heat pump and the charger are
+    balanced; nothing else is.
+    """
+    out = frame.copy()
+    local = out.index.tz_convert(cfg.site.timezone)
+    hour = local.hour.to_numpy(dtype=float) + local.minute.to_numpy(dtype=float) / 60.0
+    weekend = (local.dayofweek.to_numpy() >= 5).astype(float)
+    n = len(out)
+
+    # Base load: night trough, morning and evening peaks, a little more at weekends.
+    base = (
+        260.0
+        + 420.0 * np.exp(-(((hour - 7.5) / 1.6) ** 2))
+        + 620.0 * np.exp(-(((hour - 19.0) / 2.4) ** 2))
+        + 130.0 * weekend
+    )
+    base = base * rng.normal(1.0, 0.06, n).clip(0.6, 1.5)
+
+    # Single-phase appliances: short, sharp, unpredictable.
+    appliance = np.zeros(n)
+    appliance_phase = np.zeros(n, dtype=int)
+    step_hours = (out.index[1] - out.index[0]).total_seconds() / 3600.0
+    events = int(n * step_hours / 24.0 * 6)          # roughly six a day
+    for _ in range(max(events, 0)):
+        start = int(rng.integers(0, n))
+        length = int(rng.integers(1, max(2, int(1.0 / step_hours))))
+        power = float(rng.uniform(800.0, 2600.0))
+        phase = int(rng.integers(0, 3))
+        end = min(start + length, n)
+        appliance[start:end] += power
+        appliance_phase[start:end] = phase
+
+    # Car charging: whole evenings, on random days, balanced across the phases.
+    charging = np.zeros(n)
+    day_index = (local.normalize() - local.normalize()[0]).days
+    for day in range(int(day_index.max()) + 1):
+        if rng.random() > charge_probability:
+            continue
+        start_hour = float(rng.uniform(16.0, 21.0))
+        duration = float(rng.uniform(1.5, 5.0))
+        mask = (day_index == day) & (hour >= start_hour) & (hour < start_hour + duration)
+        charging[mask] = 1.0
+
+    heatpump = out["power"].to_numpy(dtype=float)
+    ev_watts = charging * ev_kw * 1000.0
+
+    phases = []
+    for i, share in enumerate(phase_split):
+        single_phase = base * share + np.where(appliance_phase == i, appliance, 0.0)
+        phases.append(heatpump / 3.0 + ev_watts / 3.0 + single_phase)
+
+    out["house_l1"], out["house_l2"], out["house_l3"] = phases
+    out["house_power"] = out["house_l1"] + out["house_l2"] + out["house_l3"]
+    out["ev_charging"] = charging
+    out["base_load_true"] = base
+    out["heatpump_power_true"] = heatpump
+    return out
+
+
 def true_params() -> ThermalParams:
     """Ground truth used by the demo: deliberately different from the defaults
     so a successful identification is actually visible."""
@@ -151,6 +223,7 @@ def make_demo_dataset(
     params: ThermalParams | None = None,
     excite: bool = True,
     start: str = "2026-01-05 00:00",
+    whole_house_power: bool = False,
 ) -> tuple[pd.DataFrame, ThermalParams]:
     rng = np.random.default_rng(seed)
     params = params or true_params()
@@ -160,6 +233,9 @@ def make_demo_dataset(
     price = synthetic_prices(index, rng, cfg.site.timezone)
     offsets = excitation_offsets(index, rng) if excite else np.zeros(len(index))
     frame = simulate_house(cfg, params, weather, price, offsets, seed=seed)
+    if whole_house_power:
+        frame = add_house_electricity(frame, cfg, rng, ev_kw=cfg.power.ev_nominal_kw)
+        frame = frame.drop(columns=["power"])   # no dedicated meter in this scenario
     return frame, params
 
 

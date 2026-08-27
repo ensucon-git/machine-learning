@@ -23,6 +23,8 @@ Levereras konfigurerad för **Daikin Altherma LT** (ERLQ016CAW1 + EHVH16S26CB9W)
 - [Arkitektur](#arkitektur)
 - [Värmepumpsmodellen](#värmepumpsmodellen)
 - [Datakällor](#datakällor)
+- [Vad drar värmepumpen?](#vad-drar-värmepumpen)
+- [Ändra inställningar i efterhand](#ändra-inställningar-i-efterhand)
 - [Snabbstart utan Home Assistant](#snabbstart-utan-home-assistant)
 - [Komma igång på riktigt](#komma-igång-på-riktigt)
 - [Excitation — det viktigaste steget](#excitation--det-viktigaste-steget)
@@ -282,6 +284,11 @@ Nord Pools day ahead-priser per elområde, gratis och utan nyckel:
 https://www.elprisetjustnu.se/api/v1/prices/2026/08-26_SE3.json
 ```
 
+Nord Pool avräknar i **kvartstimmar**, så ett dygn är 96 priser. Ingenting i koden
+antar en viss upplösning — parsern läser `time_start` och resten räknar ut spacingen —
+så timpriser fungerar lika bra. Kvartsupplösningen matchar dessutom styrsteget exakt,
+så varje beslutssteg får sitt eget pris.
+
 Morgondagens fil finns **inte** förrän Nord Pool publicerat, strax efter 13:00 svensk
 tid. Det är normalt, inte ett fel: före 13 kortas horisonten av och det sista kända
 priset extrapoleras. `price_extrapolated_hours` i rapporten säger hur mycket.
@@ -293,10 +300,18 @@ lastförflyttning lönar sig är marginalkostnaden:
 marginal = (spot × price_scale + price_addition) × (1 + price_vat_pct/100)
 ```
 
-Sätt `price_addition` till din överföringsavgift plus energiskatt (typiskt 0,50–0,80
-kr/kWh) och `price_vat_pct: 25`. Hoppar man över det överdriver optimeraren den
-*relativa* spridningen mellan billiga och dyra timmar och blir för ivrig.
-`hpmpc providers` varnar om båda står på noll.
+Exempelkonfigurationen sätter `price_addition: 0.8855` (elöverföring plus energiskatt)
+och `price_vat_pct: 25`. **Om dina 0,8855 kr/kWh redan innehåller moms**, sätt momsen
+till noll i stället:
+
+```bash
+hpmpc set control.price_vat_pct 0
+```
+
+Kör `hpmpc providers` — den skriver ut din faktiska marginalkostnad så du kan stämma av
+mot fakturan i ett kommando. Hoppar man över tillägget helt överdriver optimeraren den
+*relativa* spridningen mellan billiga och dyra timmar och blir för ivrig; det varnar
+`hpmpc providers` för.
 
 Verifiera att båda källorna svarar från din maskin:
 
@@ -308,6 +323,137 @@ hpmpc providers
 > utgående trafik dit var blockerad av en policy. Parsning, cachning, felhantering och
 > reservvägar är testade mot mockade svar, men `hpmpc providers` är det första du bör
 > köra.
+
+---
+
+## Vad drar värmepumpen?
+
+Utan en egen mätare på pumpen finns ingen direktmätning att kalibrera verkningsgraden
+mot — bara hela huset, som också innehåller en 11 kW elbilsladdare, en baslast med
+egen dygnsrytm och varje apparat i byggnaden.
+
+Det låter som ett hopplöst separationsproblem. Det är det inte, tack vare tre saker:
+
+**1. Laddaren säger till om sig själv.** En binärsensor visar när den laddar. De
+sampelen kastas helt enkelt bort ur verkningsgradsanpassningen — det finns gott om data
+kvar — så laddarens exakta effekt behöver aldrig vara känd. Den skattas ändå efteråt,
+enbart som kontroll: säger anpassningen 3 kW om en 11 kW-laddare är något annat också
+fel.
+
+**2. Trefaslaster sticker ut.** En 16 kW värmepump och en 11 kW laddare drar ungefär
+balanserat över L1/L2/L3; nästan varje hushållslast är enfas och därmed obalanserad.
+`3 × min(L1, L2, L3)` är den del av lasten som *bevisligen* är balanserad, och med
+laddaren bortplockad är det mest värmepumpen. Att anpassa mot det istället för mot
+totalen tar bort merparten av hushållsbruset innan regressionen ens börjar.
+
+**3. Pumpens effekt förutsägs av fysik, inte av inlärning.** Den termiska modellen vet
+redan hur mycket värme som levereras och prestandakartan vid vilken COP. Bara *nivån*
+är okänd — en enda skalär. Det är inte "hitta värmepumpen i datan" utan "skala en känd
+form", vilket är en långt bättre ställd fråga.
+
+Kvar blir en linjär regression:
+
+```
+P_mätt = c · (Q_kompressor / COP_karta) + Q_elpatron + baslast(timme, helg)
+```
+
+löst för `c = 1/efficiency_scale` och en jämn baslastprofil, med robust Huber-vikt så
+att en bastu på 6 kW inte läses som värmepump.
+
+Baslastmodellen får **medvetet** bara klockan och veckodagen som variabler. Ingen
+utetemperatur, ingen vind, ingen sol. Vilken som helst av dem korrelerar med det som
+driver värmepumpen, och skulle låta baslasttermen suga upp pumpens signal — det enda
+fel som tyst skulle korrumpera hela verkningsgradsuppskattningen.
+
+### Vad det ger
+
+Verifierat mot ett syntetiskt hus där sanningen är känd — 30 dygn, elbilsladdning på
+slumpade kvällar, sex apparathändelser per dygn, ojämn fasfördelning:
+
+| verklig skala | funnen | fel | laddare funnen |
+|---|---|---|---|
+| 1,00 | 1,015 | +1,5 % | 11,2 kW |
+| 0,85 | 0,861 | +1,3 % | 11,2 kW |
+| 1,25 | 1,274 | +1,9 % | 11,2 kW |
+
+Med bastuspikar på 3–6,5 kW två gånger om dygnet: +1,5 %. Med bara 7 dygn data:
++7,5 % — och då varnar rapporten för att datan är för kort.
+
+```bash
+hpmpc power
+```
+```
+Split over 28.3 days, fitted against balanced (3 x min phase)
+
+                                   kWh    share
+heat pump                       1234.1    57.8%
+balanced other load              252.2    11.8%
+whole house measured            2135.3
+
+efficiency scale         0.9997 +/- 0.3%
+car charger inferred     11.2 kW (configured nominal 11.0 kW)
+charging fraction        5.7% of samples, excluded from the fit
+clock confounding        0.26  (1.0 would mean indistinguishable)
+```
+
+Den siffra som är värd mest är **laddaren**: den skattas helt oberoende, och om en
+11 kW-laddare kommer ut nära 11 kW är fasentiteterna och uppdelningen båda rimliga.
+
+`± 0,3 %` är *precision*, inte *träffsäkerhet* — den mäter slumpfelet, inte systematiskt
+fel från modellavvikelser. Därför varnar rapporten separat om mindre än 14 dygn använts,
+även när precisionen ser bra ut.
+
+`clock confounding` är den ärliga svagheten: utetemperaturen har en dygnsrytm och det har
+baslasten också, så de kan handlas mot varandra. Det är ett andra skäl att köra
+`hpmpc excite` — att flytta offseten enligt ett schema som inte har med klockan att göra
+är precis vad som bryter den kopplingen.
+
+---
+
+## Ändra inställningar i efterhand
+
+Två vägar, för två olika situationer.
+
+### Från en Home Assistant-instrumentpanel
+
+Mappa ett fält till en hjälpentitet, så läser regulatorn den vid nästa cykel — ingen
+omstart, ingen filredigering:
+
+```yaml
+runtime_overrides:
+  control.price_addition: input_number.eloverforing_kr_per_kwh
+  control.setpoint: input_number.inne_borvarde
+  control.comfort_min: input_number.komfort_min
+  control.comfort_max: input_number.komfort_max
+  control.max_electric_power_kw: input_number.effekttak_kw
+  control.dry_run: input_boolean.hpmpc_dry_run
+```
+
+`ha/packages/heatpump_mpc.yaml` innehåller hjälparna färdiga.
+
+Varje fält har ett tillåtet intervall. En hjälpentitet som råkar rapportera något
+orimligt kan alltså inte prata regulatorn in i ett 40-gradigt börvärde — värdet
+ignoreras med en notis. Och en ändring som skulle göra konfigurationen inkonsekvent i
+sig (komfortbandet utanför de hårda gränserna) rullas tillbaka **i sin helhet**, aldrig
+halvvägs.
+
+Strukturella inställningar — horisontlängd, blockstorlek, optimerarens form — går
+medvetet inte att ändra så här: de definierar lösaren som redan är byggd.
+
+### Från kommandoraden
+
+```bash
+hpmpc settings                                  # vad som går att ändra, och till vad
+hpmpc set control.price_addition 0.8855         # ändrar config.yaml
+```
+
+`hpmpc set` redigerar bara den enda raden och behåller alla kommentarer — filen är
+mestadels kommentarer som förklarar *varför* varje tal är som det är, och de är värda
+mer än bekvämligheten i att serialisera om dokumentet. Den vägrar också skriva en fil
+som inte skulle gå att läsa in.
+
+En regulator som redan kör läser om `config.yaml` när filen ändras, så du behöver inte
+starta om den heller.
 
 ---
 
@@ -363,9 +509,12 @@ Home Assistant med recorder som sparar minst 3–4 veckor för de aktuella entit
 egen `recorder`-`include`).
 
 Nödvändigt: **innetemperatur** och **utetemperatur**.
+
 Starkt rekommenderat: **framledningstemperatur** (gör modellanpassningen dramatiskt
-bättre) och **elpris**.
-Nyttigt: eleffekt till pumpen (ger COP-anpassning), vind, molnighet, väderentitet.
+bättre) och **någon effektmätning** — antingen en mätare på pumpen, eller husets totala
+effekt per fas plus laddarens laddstatus, se [Vad drar värmepumpen?](#vad-drar-värmepumpen).
+
+Nyttigt: vind, molnighet, luftfuktighet (driver avfrostningsmodellen).
 
 ### 2. Installera
 
@@ -387,7 +536,12 @@ Byt ut entitets-id:n mot dina egna.
 hpmpc check          # entiteter i Home Assistant: värde, ålder, det som saknas
 hpmpc providers      # SMHI och SE3-priser, plus din faktiska marginalkostnad
 hpmpc pump-table     # COP- och kapacitetstabellerna — jämför mot databooken
+hpmpc settings       # vad du kan ändra i efterhand utan att röra koden
 ```
+
+Stäm av `hpmpc providers`-utskriften mot din elfaktura. Den skriver ut
+marginalkostnaden med ditt tillägg och din moms inräknade, och det är den siffran
+optimeraren faktiskt planerar mot.
 
 ### 4. Ställ in värmekurvan och givaren
 
@@ -421,6 +575,7 @@ variation som behövs — se nästa avsnitt.
 hpmpc excite            # ~1 vecka under eldningssäsong
 hpmpc collect --days 45
 hpmpc train
+hpmpc power             # kontrollera effektuppdelningen — laddaren ska hamna nära 11 kW
 hpmpc plan              # visa planen utan att skriva något
 hpmpc run               # skarp drift
 ```
@@ -432,6 +587,9 @@ Alla kommandon:
 | `init-config` | skriv en startkonfiguration |
 | `check` | verifiera Home Assistant och entiteterna |
 | `providers` | verifiera SMHI och SE3-priserna, visa din marginalkostnad |
+| `power` | visa hur husets effekt delas mellan pumpen och resten |
+| `settings` | vad som går att ändra i drift, och till vad |
+| `set` | ändra en inställning i config.yaml |
 | `geocode` | slå upp koordinater för en adress |
 | `curve` | räkna om Daikins tvåpunktskurva till lutning/offset |
 | `pump-table` | visa COP- och kapacitetstabellerna |
@@ -635,6 +793,10 @@ Sex oberoende lager:
 Och i hårdvaran: reläet defaultar till den **riktiga** utegivaren när ESP:n är strömlös.
 Pumpen ska alltid se en trovärdig givare, särskilt när det här projektet inte kör.
 
+Inställningar som ändras i drift går genom samma sorts spärrar: varje fält har ett
+tillåtet intervall, och en ändring som gör konfigurationen inkonsekvent rullas tillbaka
+i sin helhet istället för att tillämpas halvvägs.
+
 Utöver det finns två *ekonomiska* spärrar som skyddar mot att optimeringen slår fel:
 elpatronen är prissatt korrekt i målfunktionen (COP 1,0), och `max_electric_power_kw`
 hindrar planen från att stapla kompressor och elpatron ovanpå varandra.
@@ -756,6 +918,11 @@ Saker som är värda att veta innan du litar på det här:
   mätpunkter för maskinklassen, inte ur Daikins databook — den gick inte att hämta från
   miljön där koden skrevs. Formen är rimlig och nivån kalibreras mot din elmätare, men
   byt tabellen mot den riktiga när du har den.
+- **Effektuppdelningen är en skattning, inte en mätning.** Med en månads data landar den
+  inom ett par procent på syntetisk data där sanningen är känd, men den vilar på att
+  pumpen är den dominerande balanserade lasten. En trefasspis, en varmvattenberedare på
+  trefas eller en andra värmekälla skulle blanda sig i. Kontrollera laddarsiffran i
+  `hpmpc power` — den är den oberoende kontrollen.
 - **Pumpen modelleras kontinuerligt.** Verkliga pumpar taktar, har startspärrar och
   prioriterar varmvatten. Avfrostning, kapacitetsgräns och elpatron finns i modellen;
   taktning och varmvattenprioritering gör det inte.
@@ -790,6 +957,8 @@ src/hpmpc/
 │   ├── smhi.py       SMHI punktprognos
 │   ├── elpris.py     SE3 spotpris (Nord Pool via elprisetjustnu)
 │   └── geocode.py    engångsuppslag av adress
+├── disaggregate.py   dela upp husets effekt: pump, laddare, baslast
+├── settings.py       inställningar i drift + säker redigering av config.yaml
 ├── model/
 │   ├── performance.py COP-/kapacitetskarta, elpatron, avfrostning
 │   ├── heatpump.py   värmekurva, utegivarfilter, effektberäkning

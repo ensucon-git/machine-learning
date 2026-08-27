@@ -83,6 +83,11 @@ class EntityConfig:
     return_temp: str = ""
     heatpump_power: str = ""
     heatpump_energy: str = ""
+    house_power_l1: str = ""
+    house_power_l2: str = ""
+    house_power_l3: str = ""
+    house_power_total: str = ""
+    ev_charging: str = ""
     outdoor_humidity: str = ""
     weather: str = ""
     offset_output: str = ""
@@ -107,6 +112,11 @@ class EntityConfig:
             self.return_temp,
             self.heatpump_power,
             self.heatpump_energy,
+            self.house_power_l1,
+            self.house_power_l2,
+            self.house_power_l3,
+            self.house_power_total,
+            self.ev_charging,
             self.outdoor_humidity,
             self.offset_output,
         ]
@@ -203,6 +213,31 @@ class NTCConfig:
 
 
 @dataclass
+class PowerConfig:
+    """How to work out what the heat pump is drawing.
+
+    With a dedicated meter on the pump this section is irrelevant. Without one,
+    the pump's consumption is separated out of a whole-house measurement; see
+    :mod:`hpmpc.disaggregate`.
+    """
+
+    source: str = "auto"        # "auto" | "heatpump_meter" | "house" | "none"
+    target: str = "balanced"    # "balanced" (3 x min phase) | "total"
+    ev_guard_minutes: float = 15.0
+    ev_nominal_kw: float = 11.0
+    base_harmonics: int = 4
+    asymmetry: float = 1.0
+    """Weight on negative residuals, i.e. the model claiming more power than was
+    measured. Below 1 makes the fit track the lower envelope of the data, which
+    sounds right for a load made of positive spikes but biases the efficiency
+    upward - the base-load term already absorbs the average appliance load.
+    Lower it only if your house has unusually spiky consumption."""
+    huber_scale_w: float = 400.0
+    validation_fraction: float = 0.25
+    min_samples: int = 400
+
+
+@dataclass
 class ControlConfig:
     output_mode: str = "offset"  # "offset" | "fake_temperature" | "resistance"
     offset_min: float = -8.0
@@ -292,10 +327,14 @@ class Config:
     heat_pump: HeatPumpConfig = field(default_factory=HeatPumpConfig)
     ntc: NTCConfig = field(default_factory=NTCConfig)
     control: ControlConfig = field(default_factory=ControlConfig)
+    power: PowerConfig = field(default_factory=PowerConfig)
     optimizer: OptimizerConfig = field(default_factory=OptimizerConfig)
     training: TrainingConfig = field(default_factory=TrainingConfig)
     paths: PathsConfig = field(default_factory=PathsConfig)
     server: ServerConfig = field(default_factory=ServerConfig)
+    runtime_overrides: dict[str, str] = field(default_factory=dict)
+    """Map ``section.field`` to a Home Assistant helper entity, and the
+    controller reads it each cycle. See :mod:`hpmpc.settings`."""
 
     def validate(self) -> None:
         missing = [k for k, v in self.entities.required().items() if not v]
@@ -312,6 +351,13 @@ class Config:
             raise ValueError("control.step_minutes and control.horizon_hours must be positive")
         if self.optimizer.elites >= self.optimizer.population:
             raise ValueError("optimizer.elites must be smaller than optimizer.population")
+        p = self.power
+        if p.source not in {"auto", "heatpump_meter", "house", "none"}:
+            raise ValueError(f"power.source '{p.source}' is not valid")
+        if p.target not in {"balanced", "total"}:
+            raise ValueError(f"power.target '{p.target}' is not valid")
+        if not 0.0 < p.asymmetry <= 1.0:
+            raise ValueError("power.asymmetry must be in (0, 1]")
         f = self.forecast
         if f.weather_source not in {"smhi", "home_assistant"}:
             raise ValueError(f"forecast.weather_source '{f.weather_source}' is not valid")

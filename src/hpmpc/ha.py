@@ -21,6 +21,17 @@ log = logging.getLogger(__name__)
 
 UNAVAILABLE = {"unknown", "unavailable", "none", "", "null"}
 
+# Binary entities report words, not numbers, and different integrations pick
+# different words. Mapping them here means a charging sensor can be recorded
+# and resampled exactly like any other signal.
+BOOLEAN_STATES = {
+    "on": 1.0, "true": 1.0, "yes": 1.0, "open": 1.0, "home": 1.0,
+    "charging": 1.0, "heating": 1.0, "active": 1.0, "running": 1.0,
+    "off": 0.0, "false": 0.0, "no": 0.0, "closed": 0.0, "not_home": 0.0,
+    "not charging": 0.0, "not_charging": 0.0, "idle": 0.0, "disconnected": 0.0,
+    "standby": 0.0, "stopped": 0.0,
+}
+
 
 class HomeAssistantError(RuntimeError):
     pass
@@ -50,8 +61,11 @@ def to_float(value: Any) -> float | None:
     if isinstance(value, (int, float)):
         return float(value)
     text = str(value).strip()
-    if text.lower() in UNAVAILABLE:
+    lowered = text.lower()
+    if lowered in UNAVAILABLE:
         return None
+    if lowered in BOOLEAN_STATES:
+        return BOOLEAN_STATES[lowered]
     try:
         return float(text.replace(",", "."))
     except ValueError:

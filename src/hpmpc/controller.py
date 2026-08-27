@@ -28,7 +28,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from .config import Config
+from .config import Config, load_config
 from .dataset import add_derived, column_map, pivot_history
 from .forecast import build_forecast
 from .ha import HomeAssistant, HomeAssistantError
@@ -37,6 +37,8 @@ from .model.thermal import Exogenous, State, ThermalParams, simulate, steady_sta
 from .mpc import MpcResult, MpcSolver
 from .ntc import temperature_to_resistance
 from .residual import ResidualModel
+from .settings import apply as apply_settings
+from .settings import read_from_home_assistant
 
 log = logging.getLogger(__name__)
 
@@ -93,10 +95,66 @@ class Controller:
         self.residual = residual
         self.pump = build_pump(cfg)
         self.solver = MpcSolver(cfg, params)
+        self._config_mtime: float | None = None
         self.state = ControllerState.load(cfg.paths.state_file) or ControllerState(
             t_indoor=cfg.control.setpoint,
             t_mass=float(steady_state_mass_temp(params, cfg.control.setpoint, 0.0)),
         )
+
+    def refresh_settings(self) -> list[str]:
+        """Pick up any settings mapped to Home Assistant helper entities.
+
+        The solver is updated in place rather than rebuilt, so the warm start
+        from the previous cycle survives a settings change. Only the fields the
+        solver reads per evaluation can change this way; horizon and block size
+        define the solver's shape and are deliberately not overridable.
+        """
+        if not self.cfg.runtime_overrides:
+            return []
+        values = read_from_home_assistant(self.cfg, self.ha)
+        updated, notes = apply_settings(self.cfg, values)
+        if updated is not self.cfg:
+            self.cfg = updated
+            self.pump = build_pump(updated)
+            self.solver.cfg = updated
+            self.solver.pump = self.pump
+            log.info("Settings updated from Home Assistant: %s", "; ".join(notes))
+        return notes
+
+    def reload_config(self, path: str | Path) -> bool:
+        """Re-read config.yaml if it changed on disk. Returns True if it did.
+
+        Editing the file and waiting for the next cycle is the obvious mental
+        model, so make it true rather than silently requiring a restart.
+        """
+        file_path = Path(path)
+        try:
+            stamp = file_path.stat().st_mtime
+        except OSError:
+            return False
+        if self._config_mtime is not None and stamp <= self._config_mtime:
+            return False
+        first_load = self._config_mtime is None
+        self._config_mtime = stamp
+        if first_load:
+            return False
+        try:
+            from .train import load_model
+
+            fresh = load_config(file_path)
+            working, params, residual, _ = load_model(fresh)
+        except Exception as exc:
+            log.error("Reloading %s failed (%s); staying on the previous configuration", file_path, exc)
+            return False
+        self.cfg = working
+        self.params = params
+        self.residual = residual
+        self.pump = build_pump(working)
+        self.solver.cfg = working
+        self.solver.pump = self.pump
+        self.solver.params = params
+        log.info("Reloaded %s", file_path)
+        return True
 
     # ------------------------------------------------------------ readings
 
@@ -303,6 +361,10 @@ class Controller:
         apply = (not self.cfg.control.dry_run) if apply is None else apply
         report: dict[str, Any] = {"timestamp": now.isoformat(), "applied": False, "notes": []}
 
+        setting_notes = self.refresh_settings()
+        if setting_notes:
+            report["settings"] = setting_notes
+
         readings = self.read_sensors()
         report["readings"] = {k: v for k, v in readings.items() if v is not None}
         problems = self.check_readings(readings)
@@ -464,6 +526,8 @@ class Controller:
         mpc = report.get("mpc", {})
         attributes = {
             "backup_heater_kwh_horizon": mpc.get("backup_heater_kwh"),
+            "peak_electric_kw": mpc.get("peak_electric_kw"),
+            "settings": report.get("settings"),
             "friendly_name": "Heat pump MPC",
             "unit_of_measurement": "K",
             "icon": "mdi:heat-pump",

@@ -195,10 +195,27 @@ def summarise(report: dict[str, Any]) -> str:
             f"Pump:      {label} {correction}, standby {cop['standby_power_w']} W, "
             f"observed SCOP {cop['seasonal_cop_observed']}, power RMSE {cop['power_rmse_w']} W"
         )
+        lines.append(f"           measured via {cop.get('method', 'unknown')}")
         if cop.get("backup_heater_hours"):
             lines.append(f"           backup heater active {cop['backup_heater_hours']} h in this data")
         if cop.get("residual_by_ambient"):
             lines.append(f"           power error by outdoor bin (W): {cop['residual_by_ambient']}")
+        disaggregation = cop.get("disaggregation")
+        if disaggregation:
+            uncertainty = disaggregation.get("efficiency_scale_uncertainty")
+            lines.append(
+                f"           heat pump is {100 * (disaggregation.get('heatpump_share_of_measured') or 0):.0f}% "
+                f"of the measured power over {disaggregation.get('span_hours', 0) / 24:.0f} days"
+                + (f", scale precise to +/-{100 * uncertainty:.1f}%" if uncertainty else "")
+            )
+            ev = disaggregation.get("ev_power_estimated_w")
+            if ev:
+                lines.append(
+                    f"           car charger inferred at {ev / 1000:.1f} kW "
+                    f"(ratio to nominal {disaggregation.get('ev_power_ratio')})"
+                )
+        for warning in cop.get("warnings", []):
+            lines.append(f"           WARNING: {warning}")
     residual = report.get("residual")
     if residual and residual.get("accepted"):
         lines.append(

@@ -17,6 +17,94 @@ input_boolean:
     name: MPC control active
     icon: mdi:robot
 
+  hpmpc_dry_run:
+    name: MPC dry run (calculate but do not act)
+    icon: mdi:test-tube
+
+# ---------------------------------------------------------------------------
+# Settings you can change from a dashboard. Map them under runtime_overrides:
+# in config.yaml and the controller reads them on its next cycle - no restart,
+# no file editing. 'hpmpc settings' lists everything that can be mapped and the
+# range each value is allowed to take; anything outside is ignored with a note
+# rather than applied.
+# ---------------------------------------------------------------------------
+input_number:
+  eloverforing_kr_per_kwh:
+    name: Grid transfer + energy tax
+    min: 0
+    max: 3
+    step: 0.0001
+    initial: 0.8855
+    unit_of_measurement: "kr/kWh"
+    icon: mdi:transmission-tower
+    mode: box
+
+  inne_borvarde:
+    name: Indoor setpoint
+    min: 15
+    max: 26
+    step: 0.1
+    initial: 21
+    unit_of_measurement: "°C"
+    icon: mdi:home-thermometer
+    mode: box
+
+  komfort_min:
+    name: Comfort band, lower
+    min: 14
+    max: 26
+    step: 0.1
+    initial: 20.3
+    unit_of_measurement: "°C"
+    mode: box
+
+  komfort_max:
+    name: Comfort band, upper
+    min: 14
+    max: 30
+    step: 0.1
+    initial: 22
+    unit_of_measurement: "°C"
+    mode: box
+
+  offset_min:
+    name: Most negative offset (more heat)
+    min: -15
+    max: 0
+    step: 0.5
+    initial: -6
+    unit_of_measurement: "K"
+    mode: box
+
+  offset_max:
+    name: Most positive offset (less heat)
+    min: 0
+    max: 15
+    step: 0.5
+    initial: 4
+    unit_of_measurement: "K"
+    mode: box
+
+  effekttak_kw:
+    name: Electrical power cap (0 = off)
+    min: 0
+    max: 40
+    step: 0.5
+    initial: 0
+    unit_of_measurement: "kW"
+    icon: mdi:fuse
+    mode: box
+
+  elpatron_avgift:
+    name: Extra charge on backup heat
+    min: 0
+    max: 20
+    step: 0.5
+    initial: 0
+    unit_of_measurement: "kr/kWh"
+    icon: mdi:radiator
+    mode: box
+
 template:
   - sensor:
       # Minutes since the controller last reported in - drives the dead-man switch.
@@ -41,6 +129,13 @@ template:
         unique_id: hpmpc_backup_heater
         unit_of_measurement: "kWh"
         state: "{{ state_attr('sensor.hpmpc_status', 'backup_heater_kwh_horizon') | float(0) }}"
+
+      # What the split says the heat pump is drawing right now, for the energy
+      # dashboard. Only meaningful once 'hpmpc train' has run.
+      - name: "MPC heat pump share of house power"
+        unique_id: hpmpc_heatpump_share
+        unit_of_measurement: "%"
+        state: "{{ (state_attr('sensor.hpmpc_status', 'heatpump_share') | float(0) * 100) | round(0) }}"
 
       - name: "Heat pump perceived outdoor temperature"
         unique_id: hpmpc_perceived_outdoor

@@ -39,6 +39,27 @@ def test_parses_a_bare_hourly_list():
     assert (points[1][0] - points[0][0]) == pd.Timedelta(hours=1)
 
 
+def test_a_bare_full_day_list_is_read_at_its_own_resolution():
+    quarter = parse_price_attributes({"today": [0.1] * 96}, None)
+    assert (quarter[1][0] - quarter[0][0]) == pd.Timedelta(minutes=15)
+    hourly = parse_price_attributes({"today": [0.1] * 24}, None)
+    assert (hourly[1][0] - hourly[0][0]) == pd.Timedelta(hours=1)
+
+
+def test_quarter_hourly_prices_reach_the_horizon(cfg, fake_ha, monkeypatch):
+    """Nord Pool settles in 15-minute periods, which matches the control step."""
+    import hpmpc.forecast as module
+
+    start = pd.Timestamp("2026-01-15", tz="UTC")
+    points = [(start + pd.Timedelta(minutes=15 * i), 0.2 + 0.01 * (i % 96)) for i in range(192)]
+    monkeypatch.setattr(module, "fetch_prices", lambda *a, **k: (points, {"source": "quarter-hourly"}))
+    cfg.forecast.price_source = "elprisetjustnu"
+    frame, sources = build_forecast(cfg, fake_ha, pd.Timestamp("2026-01-15 06:00", tz="UTC").to_pydatetime())
+    assert sources["price_resolution_minutes"] == 15
+    # Every control step gets its own price, not a step-held hourly one.
+    assert frame["spot_price"].nunique() >= len(frame) - 1
+
+
 def test_falls_back_to_the_current_price_when_no_forecast_exists():
     points = parse_price_attributes({}, 1.75)
     assert len(points) == 1 and points[0][1] == pytest.approx(1.75)

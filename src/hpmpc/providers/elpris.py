@@ -9,7 +9,11 @@ Each entry looks like::
 
     {"SEK_per_kWh": 0.26673, "EUR_per_kWh": 0.02308, "EXR": 11.558152,
      "time_start": "2026-08-26T00:00:00+02:00",
-     "time_end":   "2026-08-26T01:00:00+02:00"}
+     "time_end":   "2026-08-26T00:15:00+02:00"}
+
+Nord Pool settles in 15-minute periods, so a day is 96 entries. Nothing here
+assumes a particular spacing - the parser reads ``time_start`` and the rest of
+the pipeline works out the resolution - so hourly files parse just as well.
 
 Two things the caller must get right:
 

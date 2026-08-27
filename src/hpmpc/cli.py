@@ -103,6 +103,112 @@ def cmd_ntc_table(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_power(args: argparse.Namespace) -> int:
+    """Show how whole-house power is being split between the heat pump and the rest."""
+    from .disaggregate import disaggregate, house_power, quality_warnings
+    from .identify import _simulate_period
+    from .train import load_model
+
+    cfg = _load(args)
+    path = Path(args.dataset or cfg.dataset_path)
+    if not path.exists():
+        print(f"No dataset at {path} - run 'hpmpc collect' first")
+        return 1
+    frame = load_dataset(path)
+    try:
+        working, params, _, _ = load_model(cfg)
+    except (OSError, ValueError, KeyError):
+        print("No trained model yet - run 'hpmpc train' first (the split needs the thermal model)")
+        return 1
+
+    context = _simulate_period(frame, working, params)
+    if context is None:
+        print("Not enough data to simulate the period")
+        return 1
+    result = disaggregate(
+        context["data"], working, context["q_compressor"], context["q_backup"], context["cop_base"]
+    )
+    if result is None:
+        print(
+            "No whole-house power data usable for the split. Configure entities.house_power_l1/l2/l3\n"
+            "(or house_power_total) and collect some history."
+        )
+        return 1
+
+    metrics = result.metrics
+    step_hours = (result.base_load_w.index[1] - result.base_load_w.index[0]).total_seconds() / 3600.0
+    total, _ = house_power(context["data"], working)
+    measured_kwh = float(total.sum() * step_hours / 1000.0)
+
+    print(f"Split over {result.span_hours / 24:.1f} days, fitted against {result.target}\n")
+    print(f"{'':28}{'kWh':>10}{'share':>9}")
+    print(f"{'heat pump':28}{metrics['heatpump_kwh']:>10.1f}{metrics['heatpump_kwh'] / measured_kwh:>9.1%}")
+    print(f"{'balanced other load':28}{metrics['base_load_kwh']:>10.1f}{metrics['base_load_kwh'] / measured_kwh:>9.1%}")
+    print(f"{'whole house measured':28}{measured_kwh:>10.1f}")
+    print()
+    print(f"efficiency scale         {result.efficiency_scale:.4f}"
+          + (f" +/- {100 * metrics['efficiency_scale_uncertainty']:.1f}%"
+             if metrics.get("efficiency_scale_uncertainty") else ""))
+    print(f"   relative to the {working.heat_pump.efficiency_scale:.4f} already in the model, so a value")
+    print("   near 1.0 here means the last calibration is still right.")
+    print(f"car charger inferred     {result.ev_power_w / 1000:.1f} kW "
+          f"(configured nominal {working.power.ev_nominal_kw:.1f} kW)")
+    print(f"charging fraction        {metrics['charging_fraction']:.1%} of samples, excluded from the fit")
+    print(f"validation R2            {metrics['validation_r2']}")
+    print(f"clock confounding        {metrics['clock_confounding']:.2f}  (1.0 would mean indistinguishable)")
+
+    warnings = quality_warnings(result)
+    if warnings:
+        print("\nWarnings:")
+        for warning in warnings:
+            print(f"  - {warning}")
+    else:
+        print("\nNo warnings. The car charger figure is the check worth trusting: if an 11 kW")
+        print("charger comes out near 11 kW, the phase entities and the split are both sane.")
+    return 0 if not warnings else 0
+
+
+def cmd_settings(args: argparse.Namespace) -> int:
+    """Show what can be changed at runtime, and what it is set to now."""
+    from . import settings
+
+    cfg = _load(args)
+    mapping = cfg.runtime_overrides or {}
+    print(f"{'field':38}{'value':>12}{'allowed':>18}   entity")
+    for path, low, high in settings.describe():
+        value = settings.get_value(cfg, path)
+        entity = mapping.get(path, "")
+        rendered = f"{value:.4g}" if isinstance(value, (int, float)) and not isinstance(value, bool) else str(value)
+        print(f"{path:38}{rendered:>12}{f'[{low:g}, {high:g}]':>18}   {entity}")
+
+    problems = settings.validate_mapping(cfg)
+    if problems:
+        print("\nProblems with runtime_overrides:")
+        for problem in problems:
+            print(f"  {problem}")
+    print(
+        "\nChange one permanently:   hpmpc set control.price_addition 0.8855\n"
+        "Or map it to a helper entity under runtime_overrides: in config.yaml and\n"
+        "change it from a Home Assistant dashboard; the controller picks it up on\n"
+        "the next cycle."
+    )
+    return 1 if problems else 0
+
+
+def cmd_set(args: argparse.Namespace) -> int:
+    """Change one setting in config.yaml, keeping the comments intact."""
+    from . import settings
+
+    try:
+        previous, new = settings.set_in_file(args.config, args.field, args.value)
+    except settings.SettingError as exc:
+        print(exc)
+        return 1
+    print(f"{args.field}: {previous} -> {new}")
+    print(f"Written to {args.config}. A running controller picks it up at the next cycle.")
+    return 0
+
+
 def cmd_curve(args: argparse.Namespace) -> int:
     """Convert a two-point heating curve into the config's slope/offset form.
 
@@ -442,9 +548,11 @@ def cmd_run(args: argparse.Namespace) -> int:
     apply = not (args.dry_run or cfg.control.dry_run)
     with _connect(working) as ha:
         controller = Controller(working, params, ha, residual)
+        controller.reload_config(args.config)   # record the current mtime
         while True:
             started = datetime.now(timezone.utc)
             try:
+                controller.reload_config(args.config)
                 if args.excite:
                     report = controller.excite_step(apply=apply, hold_hours=args.hold_hours)
                 else:
@@ -608,6 +716,18 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("check", help="validate config and Home Assistant connectivity")
     p.set_defaults(func=cmd_check)
+
+    p = sub.add_parser("power", help="show how whole-house power is split between the pump and the rest")
+    p.add_argument("--dataset", default=None)
+    p.set_defaults(func=cmd_power)
+
+    p = sub.add_parser("settings", help="show the settings you can change at runtime")
+    p.set_defaults(func=cmd_settings)
+
+    p = sub.add_parser("set", help="change one setting in config.yaml")
+    p.add_argument("field", help="for example control.price_addition")
+    p.add_argument("value")
+    p.set_defaults(func=cmd_set)
 
     p = sub.add_parser("curve", help="convert a two-point heating curve to slope/offset")
     p.add_argument("--point", action="append", required=True, metavar="OUTDOOR:SUPPLY",

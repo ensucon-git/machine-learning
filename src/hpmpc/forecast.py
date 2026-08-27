@@ -102,14 +102,23 @@ def parse_price_attributes(attributes: dict[str, Any], fallback: float | None) -
         if not isinstance(raw, list) or not raw:
             continue
         if all(isinstance(x, (int, float)) or x is None for x in raw):
-            # Bare hourly list for a calendar day - anchor it to that day.
+            # A bare list of numbers for one calendar day. The spacing is
+            # whatever divides the day evenly - 24 hourly values or 96
+            # quarter-hourly ones.
             day = pd.Timestamp.now(tz="UTC").normalize()
             if "tomorrow" in key:
                 day += pd.Timedelta(days=1)
-            for hour, value in enumerate(raw):
+            # Only read the length as a resolution when it plausibly covers a
+            # whole day: 24 hourly values, or 96 quarter-hourly ones. A partial
+            # list means hourly, which is what every integration used before
+            # Nord Pool moved to 15-minute settlement.
+            spacing = (
+                pd.Timedelta(days=1) / len(raw) if len(raw) in {24, 48, 96} else pd.Timedelta(hours=1)
+            )
+            for slot, value in enumerate(raw):
                 if value is None:
                     continue
-                points.append((day + pd.Timedelta(hours=hour), float(value)))
+                points.append((day + spacing * slot, float(value)))
             continue
         for item in raw:
             if not isinstance(item, dict):
@@ -270,7 +279,9 @@ def build_forecast(cfg: Config, ha: HomeAssistant, now: datetime | None = None) 
         spot = pd.Series(current_price if current_price is not None else 1.0, index=index)
         sources["price_fallback"] = "flat price"
     elif points:
-        known_until = max(t for t, _ in points)
+        resolution = price_resolution(points)
+        known_until = max(t for t, _ in points) + resolution
+        sources["price_resolution_minutes"] = round(resolution.total_seconds() / 60.0)
         if known_until < index[-1]:
             sources["price_extrapolated_hours"] = round(
                 (index[-1] - known_until).total_seconds() / 3600.0, 1
@@ -292,10 +303,24 @@ def _column_series(
     return _series_from_points(list(values.items()), index, method)
 
 
+def price_resolution(points: Sequence[tuple[pd.Timestamp, float]]) -> pd.Timedelta:
+    """Spacing between published prices.
+
+    Nord Pool settles in 15-minute periods since October 2025, so a day is 96
+    prices rather than 24. Nothing downstream cares, as long as the "known
+    until" boundary uses the real spacing instead of assuming an hour.
+    """
+    if len(points) < 2:
+        return pd.Timedelta(hours=1)
+    stamps = pd.DatetimeIndex([t for t, _ in points]).sort_values()
+    gaps = stamps.to_series().diff().dropna()
+    return pd.Timedelta(gaps.median()) if not gaps.empty else pd.Timedelta(hours=1)
+
+
 def _price_known_mask(points: Sequence[tuple[pd.Timestamp, float]], index: pd.DatetimeIndex) -> np.ndarray:
     if not points:
         return np.zeros(len(index), dtype=bool)
-    last = max(t for t, _ in points) + pd.Timedelta(hours=1)
+    last = max(t for t, _ in points) + price_resolution(points)
     return np.asarray(index <= last, dtype=bool)
 
 

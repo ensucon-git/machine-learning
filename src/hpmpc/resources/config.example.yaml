@@ -30,7 +30,23 @@ entities:
 
   supply_temp: sensor.daikin_framledning          # strongly recommended - transforms the fit
   return_temp: sensor.daikin_retur
-  heatpump_power: sensor.daikin_effekt            # W - this is what calibrates the COP map
+
+  # A meter on the heat pump alone is the easy case. Leave it empty and the
+  # pump's consumption is separated out of the whole-house measurement instead;
+  # see the power: section below.
+  heatpump_power: ""
+
+  # Victron whole-house power, one entity per phase. Per-phase matters: the heat
+  # pump and the car charger are balanced across all three, almost everything
+  # else in a house is not, so the phases are what makes them separable.
+  house_power_l1: sensor.victron_ac_consumption_l1_power
+  house_power_l2: sensor.victron_ac_consumption_l2_power
+  house_power_l3: sensor.victron_ac_consumption_l3_power
+  house_power_total: ""                           # only if you have no per-phase entities
+
+  # Car charger status. Samples where it is charging are dropped from the
+  # efficiency fit entirely, so its exact power never has to be known.
+  ev_charging: binary_sensor.eh6nh5cd_charging
 
   # The digital resistor. Must be a number or input_number entity.
   offset_output: number.utegivare_resistans
@@ -141,14 +157,41 @@ control:
   # here, then VAT. Leaving these at zero makes the optimiser overestimate what
   # load shifting is worth.
   price_scale: 1.0
-  price_addition: 0.60              # grid transfer + energy tax, SEK/kWh - USE YOUR OWN
-  price_vat_pct: 25.0
+  price_addition: 0.8855            # grid transfer + energy tax, SEK/kWh
+  price_vat_pct: 25.0               # set to 0 if price_addition already includes VAT
 
   observer_gain: 1.0
   fallback_offset: 0.0              # used whenever sensors are missing or implausible
   max_data_age_minutes: 45
   warm_start_hours: 24
   dry_run: false                    # true = compute everything, write nothing
+
+# How to work out what the heat pump is drawing. Only relevant when there is no
+# dedicated meter on the pump; see 'hpmpc power' to inspect the result.
+power:
+  source: auto                      # auto | heatpump_meter | house | none
+  target: balanced                  # "balanced" uses 3 x min(phase), which is mostly the pump
+  ev_guard_minutes: 15              # widen the charging mask; the sensor flips before the current does
+  ev_nominal_kw: 11.0               # only a sanity check - the fit infers it independently
+  base_harmonics: 4                 # smoothness of the daily base-load shape
+  asymmetry: 1.0                    # < 1 tracks the lower envelope; biases efficiency upward
+  huber_scale_w: 400                # above this, a residual is treated as an appliance, not an error
+  validation_fraction: 0.25
+  min_samples: 400
+
+# Map settings to Home Assistant helper entities and change them from a
+# dashboard - the controller picks up the new value on the next cycle. Run
+# 'hpmpc settings' to see everything that can be mapped, and its allowed range.
+runtime_overrides:
+  control.price_addition: input_number.eloverforing_kr_per_kwh
+  control.setpoint: input_number.inne_borvarde
+  control.comfort_min: input_number.komfort_min
+  control.comfort_max: input_number.komfort_max
+  control.offset_min: input_number.offset_min
+  control.offset_max: input_number.offset_max
+  control.max_electric_power_kw: input_number.effekttak_kw
+  control.weight_backup_heater: input_number.elpatron_avgift
+  control.dry_run: input_boolean.hpmpc_dry_run
 
 optimizer:
   population: 256

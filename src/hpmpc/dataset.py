@@ -24,10 +24,10 @@ log = logging.getLogger(__name__)
 # Signals that are physically continuous and may be interpolated across gaps.
 CONTINUOUS = [
     "t_indoor", "t_outdoor", "wind", "cloud", "humidity", "solar_radiation",
-    "t_supply", "t_return", "power",
+    "t_supply", "t_return", "power", "house_l1", "house_l2", "house_l3", "house_power",
 ]
 # Signals that hold their value until explicitly changed.
-STEPWISE = ["price", "output_raw"]
+STEPWISE = ["price", "output_raw", "ev_charging"]
 
 REQUIRED = ["t_indoor", "t_outdoor"]
 
@@ -45,6 +45,11 @@ def column_map(cfg: Config) -> dict[str, str]:
         e.return_temp: "t_return",
         e.heatpump_power: "power",
         e.outdoor_humidity: "humidity",
+        e.house_power_l1: "house_l1",
+        e.house_power_l2: "house_l2",
+        e.house_power_l3: "house_l3",
+        e.house_power_total: "house_power",
+        e.ev_charging: "ev_charging",
         e.price: "price",
         e.offset_output: "output_raw",
     }
