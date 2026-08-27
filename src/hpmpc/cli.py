@@ -686,11 +686,31 @@ def cmd_demo(args: argparse.Namespace) -> int:
 
 
 def _print_plan(report: dict[str, Any]) -> None:
+    out = report.get("output", {})
     mpc = report.get("mpc")
     if not mpc:
-        print(json.dumps(report, indent=2, default=str))
+        # No plan means the controller fell back. Say why in words: a JSON dump
+        # is the least helpful thing to hand someone whose heating just stopped
+        # being optimised.
+        print(
+            f"\nNo plan this cycle - the controller fell back to {report.get('offset', 0.0):+.2f} K"
+            f"  [{report.get('mode')}]"
+        )
+        print(f"Would write: {out.get('entity_id', '(no entity)')} = {out.get('value')} {out.get('unit')}")
+        for problem in report.get("problems", []):
+            print(f"  problem: {problem}")
+        for note in report.get("notes", []):
+            print(f"  note: {note}")
+        readings = report.get("readings", {})
+        if readings:
+            print("\nLast readings:")
+            for key, value in readings.items():
+                if key.endswith("_age_min"):
+                    continue
+                age = readings.get(f"{key}_age_min")
+                suffix = f"   ({age:.0f} min old)" if isinstance(age, (int, float)) else ""
+                print(f"  {key:16}{value}{suffix}")
         return
-    out = report.get("output", {})
     print(
         f"\nOffset now: {report['offset']:+.2f} K  ->  {out.get('entity_id', '(no entity)')} "
         f"= {out.get('value')} {out.get('unit')}   [{report.get('mode')}]"

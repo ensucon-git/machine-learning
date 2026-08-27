@@ -94,6 +94,12 @@ class FakeHomeAssistant:
     def close(self) -> None:
         pass
 
+    def __enter__(self) -> "FakeHomeAssistant":
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.close()
+
     def get_state(self, entity_id: str) -> EntityState | None:
         return self._states.get(entity_id)
 

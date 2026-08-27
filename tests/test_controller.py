@@ -137,8 +137,17 @@ def test_observer_keeps_the_slab_estimate_physical(controller):
 
 def test_excitation_holds_a_value_within_a_block(controller, cfg, fake_ha):
     cfg.control.max_change_per_cycle = 99.0
-    first = controller.excite_step(now=fake_ha.now, hold_hours=6.0)
-    second = controller.excite_step(now=fake_ha.now + timedelta(minutes=15), hold_hours=6.0)
+    hold_hours = 6.0
+    block = fake_ha.now.timestamp() // (hold_hours * 3600)
+    # Step to another moment in the same block. Stepping forward would
+    # occasionally cross a boundary depending on when the test happens to run,
+    # so fall back to stepping backwards - the sensors stay fresh either way.
+    other = fake_ha.now + timedelta(minutes=15)
+    if other.timestamp() // (hold_hours * 3600) != block:
+        other = fake_ha.now - timedelta(minutes=15)
+
+    first = controller.excite_step(now=fake_ha.now, hold_hours=hold_hours)
+    second = controller.excite_step(now=other, hold_hours=hold_hours)
     assert first["mode"] == "excitation"
     assert first["offset"] == pytest.approx(second["offset"])
 

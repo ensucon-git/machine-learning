@@ -19,6 +19,7 @@ Levereras konfigurerad för **Daikin Altherma LT** (ERLQ016CAW1 + EHVH16S26CB9W)
 
 ## Innehåll
 
+- [Så här ser det ut](#så-här-ser-det-ut)
 - [Idén](#idén)
 - [Arkitektur](#arkitektur)
 - [Värmepumpsmodellen](#värmepumpsmodellen)
@@ -37,6 +38,50 @@ Levereras konfigurerad för **Daikin Altherma LT** (ERLQ016CAW1 + EHVH16S26CB9W)
 - [Vad kan man realistiskt spara?](#vad-kan-man-realistiskt-spara)
 - [Begränsningar](#begränsningar)
 - [Utveckling](#utveckling)
+
+---
+
+## Så här ser det ut
+
+Systemet är ett kommandoradsverktyg plus en styrslinga som skriver till Home
+Assistant. Bilderna nedan är **verklig utdata** från kommandona, körd mot det
+syntetiska demohuset (`hpmpc demo`) — inte mot en riktig anläggning.
+
+### Dygnsplanen
+
+![hpmpc plan](docs/screenshots/01-plan.png)
+
+Offset uppåt (mindre värme) när elen är dyr 17–20, nedåt under den billiga
+natten, och tillbaka upp inför morgonens pristopp. Kolumnen `price` är
+marginalkostnaden med överföring, energiskatt och moms inräknade — det är den
+optimeraren faktiskt planerar mot. Jämförelsen görs mot det konstanta offset som
+ger samma medelinnetemperatur.
+
+### Vad modellen lärt sig
+
+![hpmpc train och hpmpc power](docs/screenshots/02-train-power.png)
+
+`train` rapporterar både träffsäkerhet och *identifierbarhet* — vilka parametrar
+datan faktiskt bestämmer. `power` visar hur husets totala effekt delats upp.
+Den siffra som är värd mest är laddaren: den skattas helt oberoende, så att en
+11 kW-laddare kommer ut på 11,2 kW säger att fasentiteterna och uppdelningen
+båda är rimliga.
+
+### Värmepumpens prestandakarta
+
+![hpmpc pump-table](docs/screenshots/03-pump-table.png)
+
+COP och kapacitet över hela driftområdet, plus elpatronen. Det är den här
+tabellen som gör att optimeraren inte kan "spara" pengar genom att omedvetet
+tvinga in systemet i resistiv tillsatsvärme vid COP 1,0.
+
+### Komfortlägen och skyddsnätet
+
+![hpmpc mode och fallback](docs/screenshots/04-modes-safety.png)
+
+Överst lägena; underst vad som händer när givardata blir för gammal — regulatorn
+går mot `fallback_offset` i stället för att sitta kvar på ett gammalt extremvärde,
+och säger rakt ut varför.
 
 ---
 

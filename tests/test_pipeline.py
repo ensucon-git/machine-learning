@@ -268,3 +268,25 @@ def test_pump_table_says_so_when_no_map_is_configured(tmp_path, monkeypatch, cap
 def test_ntc_table_flags_coarse_resolution(config_file, capsys):
     assert main(["--config", str(config_file), "ntc-table", "--step-ohm", "20000"]) == 0
     assert "coarse" in capsys.readouterr().out
+
+
+def test_plan_output_explains_a_fallback_instead_of_dumping_json(capsys):
+    """Somebody whose heating just stopped being optimised deserves a sentence,
+    not a JSON blob."""
+    from hpmpc.cli import _print_plan
+
+    _print_plan(
+        {
+            "mode": "fallback",
+            "offset": 0.0,
+            "problems": ["t_indoor is stale (95 min > 45 min)"],
+            "notes": ["dry run - nothing written to Home Assistant"],
+            "readings": {"t_indoor": 21.1, "t_indoor_age_min": 95.2, "t_outdoor": 3.6},
+            "output": {"entity_id": "number.utegivare_resistans", "value": 49763.2, "unit": "ohm"},
+        }
+    )
+    out = capsys.readouterr().out
+    assert "fell back" in out
+    assert "problem: t_indoor is stale" in out
+    assert "(95 min old)" in out
+    assert "{" not in out          # no raw JSON
