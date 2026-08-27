@@ -20,6 +20,7 @@ from typing import Any
 
 import numpy as np
 
+from .comfort import ComfortSchedule
 from .config import Config
 from .model import build_pump
 from .model.thermal import Exogenous, State, ThermalParams, simulate, steady_state_mass_temp
@@ -166,6 +167,7 @@ class MpcSolver:
         self.dt = cfg.control.step_minutes / 60.0
         self._previous: np.ndarray | None = None
         self._rng = np.random.default_rng(cfg.optimizer.seed)
+        self.comfort = ComfortSchedule.flat(cfg.control, self.steps)
 
     # ------------------------------------------------------------- costing
 
@@ -180,12 +182,16 @@ class MpcSolver:
         energy_kwh = traj["p_electric"] * self.dt / 1000.0
         energy_sek = np.sum(energy_kwh * exog.price, axis=1)
 
-        below = np.maximum(c.comfort_min - ti, 0.0)
-        above = np.maximum(ti - c.comfort_max, 0.0)
+        # The comfort band is a schedule, not a constant: coming home from a
+        # holiday setback is exactly the case where the target has to change
+        # partway through the horizon, and the optimiser has to see it coming.
+        band = self.comfort
+        below = np.maximum(band.comfort_min[None, :] - ti, 0.0)
+        above = np.maximum(ti - band.comfort_max[None, :], 0.0)
         comfort = c.weight_comfort * np.sum(below**2 + above**2, axis=1) * self.dt
 
-        hard_below = np.maximum(c.hard_min - ti, 0.0)
-        hard_above = np.maximum(ti - c.hard_max, 0.0)
+        hard_below = np.maximum(band.hard_min[None, :] - ti, 0.0)
+        hard_above = np.maximum(ti - band.hard_max[None, :], 0.0)
         hard = c.weight_hard * np.sum(hard_below**2 + hard_above**2, axis=1) * self.dt
 
         blocks2d = np.atleast_2d(blocks)
@@ -194,7 +200,8 @@ class MpcSolver:
         smoothness = c.weight_offset_change * np.sum(deltas**2, axis=1)
 
         stored_value = self._stored_energy_value(traj, exog)
-        terminal = c.weight_terminal * (ti[:, -1] - c.setpoint) ** 2 - stored_value
+        final_setpoint = float(band.setpoint[-1])
+        terminal = c.weight_terminal * (ti[:, -1] - final_setpoint) ** 2 - stored_value
 
         # The backup heater is already priced correctly through its COP of 1;
         # this is the extra aversion for those who would rather not run resistive
@@ -240,14 +247,14 @@ class MpcSolver:
         incentive entirely - and correctly rewards genuinely pre-storing heat
         while electricity is cheap.
         """
-        c = self.cfg.control
         tail = max(1, int(round(6.0 / self.dt)))
         t_end = float(np.mean(np.asarray(exog.t_outdoor, dtype=float)[..., -tail:]))
         price_ref = float(np.mean(np.asarray(exog.price, dtype=float)[..., -tail:]))
+        final_setpoint = float(self.comfort.setpoint[-1])
 
-        tm_target = float(steady_state_mass_temp(self.params, c.setpoint, t_end))
+        tm_target = float(steady_state_mass_temp(self.params, final_setpoint, t_end))
         stored_wh = self.params.Cm * (traj["t_mass"][:, -1] - tm_target) + self.params.Ci * (
-            traj["t_indoor"][:, -1] - c.setpoint
+            traj["t_indoor"][:, -1] - final_setpoint
         )
         cop_ref = np.maximum(
             self.pump.cop(traj["t_supply"][:, -1], np.full_like(stored_wh, t_end)), 1e-3
@@ -321,9 +328,16 @@ class MpcSolver:
         state: State,
         previous_offset: float = 0.0,
         baseline_offset: float | None = None,
+        comfort: ComfortSchedule | None = None,
     ) -> MpcResult:
         if len(exog) != self.steps:
             raise ValueError(f"forecast has {len(exog)} steps, solver expects {self.steps}")
+        if comfort is not None:
+            if len(comfort) != self.steps:
+                raise ValueError(f"comfort schedule has {len(comfort)} steps, solver expects {self.steps}")
+            self.comfort = comfort
+        elif len(self.comfort) != self.steps or self.comfort.setpoint[0] != self.cfg.control.setpoint:
+            self.comfort = ComfortSchedule.flat(self.cfg.control, self.steps)
         c = self.cfg.control
         o = self.cfg.optimizer
 
@@ -379,6 +393,7 @@ class MpcSolver:
             baseline_flat=baselines[0],
             baseline_matched=baselines[1],
             diagnostics={
+                "comfort": self.comfort.summary(),
                 "iterations": o.iterations,
                 "population": o.population,
                 "polished": polished,

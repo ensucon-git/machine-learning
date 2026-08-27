@@ -31,12 +31,12 @@ log = logging.getLogger(__name__)
 # field path -> (minimum, maximum). Bounds are sanity rails, not preferences.
 OVERRIDABLE: dict[str, tuple[float, float]] = {
     "control.setpoint": (15.0, 26.0),
-    "control.comfort_min": (14.0, 26.0),
-    "control.comfort_max": (14.0, 30.0),
-    "control.hard_min": (10.0, 25.0),
-    "control.hard_max": (15.0, 35.0),
+    "control.comfort_below": (0.0, 6.0),
+    "control.comfort_above": (0.0, 6.0),
+    "control.hard_below": (0.2, 10.0),
+    "control.hard_above": (0.2, 10.0),
     "control.offset_min": (-15.0, 0.0),
-    "control.offset_max": (0.0, 15.0),
+    "control.offset_max": (0.0, 30.0),
     "control.max_change_per_cycle": (0.05, 10.0),
     "control.fallback_offset": (-10.0, 10.0),
     "control.price_scale": (0.0, 1000.0),

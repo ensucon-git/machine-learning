@@ -24,6 +24,7 @@ Levereras konfigurerad för **Daikin Altherma LT** (ERLQ016CAW1 + EHVH16S26CB9W)
 - [Värmepumpsmodellen](#värmepumpsmodellen)
 - [Datakällor](#datakällor)
 - [Vad drar värmepumpen?](#vad-drar-värmepumpen)
+- [Temperatur och lägen](#temperatur-och-lägen)
 - [Ändra inställningar i efterhand](#ändra-inställningar-i-efterhand)
 - [Snabbstart utan Home Assistant](#snabbstart-utan-home-assistant)
 - [Komma igång på riktigt](#komma-igång-på-riktigt)
@@ -410,6 +411,103 @@ baslasten också, så de kan handlas mot varandra. Det är ett andra skäl att k
 
 ---
 
+## Temperatur och lägen
+
+Börvärdet är **det enda talet**. Allt annat om komfort uttrycks relativt det:
+
+```yaml
+control:
+  setpoint: 21.0
+  comfort_below: 0.7      # optimeraren rör sig fritt mellan 20,3 ...
+  comfort_above: 1.0      # ... och 22,0
+  hard_below: 2.0         # och straffas hårt utanför 19,0 ...
+  hard_above: 2.5         # ... till 23,5
+```
+
+Det är inte bara prydlighet. Med absoluta gränser går det att sätta ett
+semesterbörvärde på 16 och lämna kvar ett komfortband som fortfarande kräver
+20,3 — huset kyls aldrig ner och inställningen ser ut att inte göra någonting.
+Relativa gränser gör det omöjligt att uttrycka.
+
+Ändra börvärdet från en HA-instrumentpanel (`input_number.inne_borvarde`) eller
+från kommandoraden:
+
+```bash
+hpmpc set control.setpoint 21.5
+```
+
+### Lägen
+
+Ett läge är ett namngivet börvärde. Semesterläget är alltså ett tal.
+
+```yaml
+modes:
+  default: normal
+  holiday_entity: input_boolean.semesterlage    # brytaren du slår av på väg ut
+  entity: input_select.varmepump_lage           # eller en väljare med alla lägen
+  profiles:
+    normal:  {setpoint: 21.0}
+    away:    {setpoint: 18.0, comfort_below: 1.5, comfort_above: 3.0, ...}
+    holiday: {setpoint: 16.0, comfort_below: 1.5, comfort_above: 5.0, ...}
+```
+
+```bash
+hpmpc mode holiday      # eller slå brytaren i Home Assistant
+hpmpc mode              # visa aktivt läge och alla profiler
+```
+
+Semesterbrytaren vinner över väljaren — det är den man når i en hast, och de
+två ska inte kunna säga emot varandra. Ett aktivt läge vinner också över
+börvärdeshjälparen, så en glömd panelinställning kan inte tyst avbryta
+semesterläget.
+
+Två detaljer i profilerna som är lätta att få fel och som kostar dyrt:
+
+**Nedsänkningsband är medvetet osymmetriska.** När ingen är hemma är *för kallt*
+det enda som spelar roll; att det är varmare än nedsänkningsmålet kostar pengar
+och pristermen avskräcker redan. En snäv övre gräns skulle dessutom *förbjuda*
+återuppvärmning av plattan inför en hemkomst — vilket är hela poängen med att
+ange en hemkomsttid.
+
+**En djup nedsänkning kräver mycket mer offsetauktoritet än daglig finjustering.**
+Värmekurvan är byggd för att hålla 21 °C. För att glida ner till 16 °C vid
+−6 °C ute måste pumpen visas ungefär **+14 °C** — alltså tjugo kelvins offset,
+inte fyra:
+
+```
+för att hålla 16 °C vid −6 °C ute:  platta 19,8 °C, framledning 25,3 °C
+kurvan ger den framledningen vid en upplevd utetemperatur på +14,3 °C
+→ krävd offset: +20,3 K, mot konfigurerade offset_max på +4 K
+```
+
+Därför får semesterprofilen sin egen `offset_max: 25`. Den absoluta gränsen för
+vad pumpen någonsin får se (`heat_pump.perceived_max_c`) gäller fortfarande, och
+det är den inställningen som håller det säkert. Skulle gränsen ändå ta slut
+säger kontrollern det rakt ut i sina `notes` istället för att tyst sitta fast.
+
+### Hemkomst
+
+En betongplatta har tio timmars tidskonstant. Ett hus som stått på 16 grader
+värms inte upp när du kommer hem — det värms upp dagen därpå.
+
+Tala om när du är tillbaka (`input_datetime.hemkomst`), så återgår komfortbandet
+till det normala i det ögonblicket. Optimeraren, som planerar 36 timmar framåt,
+ser gränsen komma och räknar själv ut när uppvärmningen ska börja och vilka
+timmar värmen ska köpas i. Ingen förvärmningsheuristik, ingen fast framförhållning:
+
+```
+hemkomst om 20 h → återuppvärmningen startar direkt (den behöver hela sträckan)
+                   innetemperatur vid hemkomst: 20,2 °C mot komfortgolv 20,3 °C
+
+hemkomst om 30 h → återuppvärmningen startar först vid t+16 h
+                   den har mer slack, glider längre och köper värmen billigare
+```
+
+Samma sak fungerar för `away` under arbetsdagen, om du har en pålitlig
+hemkomsttid.
+
+---
+
 ## Ändra inställningar i efterhand
 
 Två vägar, för två olika situationer.
@@ -588,6 +686,7 @@ Alla kommandon:
 | `check` | verifiera Home Assistant och entiteterna |
 | `providers` | verifiera SMHI och SE3-priserna, visa din marginalkostnad |
 | `power` | visa hur husets effekt delas mellan pumpen och resten |
+| `mode` | visa eller byta komfortläge (normal / away / holiday) |
 | `settings` | vad som går att ändra i drift, och till vad |
 | `set` | ändra en inställning i config.yaml |
 | `geocode` | slå upp koordinater för en adress |
@@ -704,22 +803,28 @@ halvan av sanningen och rapporteras av `hpmpc train`.
 
 ## Drift
 
-### Docker
+### Docker på en egen maskin
+
+**[INSTALL.md](INSTALL.md) har hela genomgången** för en NUC med Docker och
+Portainer, inklusive recorder-inställningar, verifiering innan skarp drift och
+säkerhetskopiering. Kortversionen:
 
 ```bash
-echo "HA_TOKEN=<token>" > .env
+git clone <repo> /opt/hpmpc && cd /opt/hpmpc
+mkdir -p config && echo "HA_TOKEN=<token>" > .env
+docker compose build
+docker compose run --rm hpmpc init-config      # skriver config/config.yaml
 docker compose up -d
-docker compose run --rm trainer     # samla + träna på begäran
+docker compose exec hpmpc hpmpc check
 ```
 
-Sätt i så fall `paths` i `config.yaml` till volymen:
+Imagen sätter `HPMPC_CONFIG` och datasökvägarna till de monterade volymerna, och
+exempelkonfigurationen läser dem — samma fil fungerar alltså både i containern
+och från en utcheckning, utan redigering.
 
-```yaml
-paths:
-  data_dir: /data
-  model_dir: /data/models
-  state_file: /data/controller_state.json
-```
+Omträningen sköter sig själv: `training.retrain_days: 30` gör att tjänsten
+tränar om när modellen blivit en månad gammal, vid en lugn timme. Ingen cron
+behövs.
 
 ### systemd
 
@@ -741,7 +846,8 @@ RestartSec=30
 WantedBy=multi-user.target
 ```
 
-Träna om en gång i månaden under säsong:
+Träna om en gång i månaden under säsong — eller låt `training.retrain_days`
+göra det åt dig:
 
 ```
 0 4 1 * *  cd /opt/hpmpc && .venv/bin/hpmpc collect && .venv/bin/hpmpc train
@@ -939,8 +1045,11 @@ Saker som är värda att veta innan du litar på det här:
   kan gå ner. Prognoser cachas och Home Assistant är reservväg för båda; ingenting
   däremot är AI-tjänster, och ingen husdata lämnar nätverket.
 - **Backtestets besparing är en övre gräns.** Se avsnittet ovan.
-- **Modellen åldras.** Träna om varje månad under säsong; huset ändrar sig med lövverk,
-  vind, snötäcke och hur ni faktiskt bor.
+- **Modellen åldras.** `training.retrain_days` sköter det automatiskt när den kör som
+  tjänst; huset ändrar sig med lövverk, vind, snötäcke och hur ni faktiskt bor.
+- **Hemkomstplaneringen ser bara 36 timmar.** Kommer du hem om tre dagar hjälper
+  hemkomsttiden ingenting förrän den kommer in i horisonten — vilket är rätt beteende,
+  men värt att veta.
 
 ---
 
@@ -957,6 +1066,7 @@ src/hpmpc/
 │   ├── smhi.py       SMHI punktprognos
 │   ├── elpris.py     SE3 spotpris (Nord Pool via elprisetjustnu)
 │   └── geocode.py    engångsuppslag av adress
+├── comfort.py        börvärde, lägen, komfortschema över horisonten
 ├── disaggregate.py   dela upp husets effekt: pump, laddare, baslast
 ├── settings.py       inställningar i drift + säker redigering av config.yaml
 ├── model/

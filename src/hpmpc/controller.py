@@ -28,6 +28,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from .comfort import apply_mode, build_schedule, read_return_time, resolve_mode
 from .config import Config, load_config
 from .dataset import add_derived, column_map, pivot_history
 from .forecast import build_forecast
@@ -44,6 +45,19 @@ log = logging.getLogger(__name__)
 
 SANE_INDOOR = (0.0, 40.0)
 SANE_OUTDOOR = (-50.0, 50.0)
+
+# Fields a comfort mode owns outright. While a non-default mode is active these
+# are taken from the profile, so the setpoint helper on the dashboard cannot
+# quietly cancel holiday mode.
+MODE_OWNED = {
+    "control.setpoint",
+    "control.comfort_below",
+    "control.comfort_above",
+    "control.hard_below",
+    "control.hard_above",
+    "control.offset_min",
+    "control.offset_max",
+}
 
 
 @dataclass
@@ -93,32 +107,55 @@ class Controller:
         self.params = params
         self.ha = ha
         self.residual = residual
+        self.base_cfg = cfg
         self.pump = build_pump(cfg)
         self.solver = MpcSolver(cfg, params)
         self._config_mtime: float | None = None
+        self.mode = cfg.modes.default
         self.state = ControllerState.load(cfg.paths.state_file) or ControllerState(
             t_indoor=cfg.control.setpoint,
             t_mass=float(steady_state_mass_temp(params, cfg.control.setpoint, 0.0)),
         )
 
     def refresh_settings(self) -> list[str]:
-        """Pick up any settings mapped to Home Assistant helper entities.
+        """Re-derive the active configuration from the file, the mode and the helpers.
+
+        Always starts from the configuration as loaded, never from last cycle's
+        result - otherwise switching out of holiday mode would never restore the
+        normal setpoint. Precedence: the file, then the active mode's profile,
+        then the mapped helper entities, except that a non-default mode keeps
+        the comfort fields it owns.
 
         The solver is updated in place rather than rebuilt, so the warm start
-        from the previous cycle survives a settings change. Only the fields the
-        solver reads per evaluation can change this way; horizon and block size
-        define the solver's shape and are deliberately not overridable.
+        from the previous cycle survives. Horizon and block size define the
+        solver's shape and are deliberately not changeable this way.
         """
-        if not self.cfg.runtime_overrides:
-            return []
-        values = read_from_home_assistant(self.cfg, self.ha)
-        updated, notes = apply_settings(self.cfg, values)
-        if updated is not self.cfg:
-            self.cfg = updated
+        base = self.base_cfg
+        mode, notes = resolve_mode(base, self.ha)
+        candidate = apply_mode(base, mode)
+
+        values = read_from_home_assistant(base, self.ha)
+        if mode != base.modes.default:
+            ignored = sorted(set(values) & MODE_OWNED)
+            if ignored:
+                notes.append(f"'{mode}' mode overrides {', '.join(ignored)}")
+            values = {k: v for k, v in values.items() if k not in MODE_OWNED}
+
+        updated, applied = apply_settings(candidate, values)
+        notes.extend(applied)
+
+        changed = mode != self.mode or updated.control != self.cfg.control or updated.heat_pump != self.cfg.heat_pump
+        self.mode = mode
+        self.cfg = updated
+        if changed:
             self.pump = build_pump(updated)
             self.solver.cfg = updated
             self.solver.pump = self.pump
-            log.info("Settings updated from Home Assistant: %s", "; ".join(notes))
+            log.info(
+                "Active settings: mode '%s', setpoint %.1f C, comfort %.1f-%.1f C%s",
+                mode, updated.control.setpoint, updated.control.comfort_min, updated.control.comfort_max,
+                f" ({'; '.join(notes)})" if notes else "",
+            )
         return notes
 
     def reload_config(self, path: str | Path) -> bool:
@@ -147,6 +184,7 @@ class Controller:
             log.error("Reloading %s failed (%s); staying on the previous configuration", file_path, exc)
             return False
         self.cfg = working
+        self.base_cfg = working
         self.params = params
         self.residual = residual
         self.pump = build_pump(working)
@@ -343,6 +381,36 @@ class Controller:
             notes.append(f"rate limited to {c.max_change_per_cycle} K/cycle")
         return float(clamped), notes
 
+    def _saturation_notes(self, result: MpcResult, comfort: Any) -> list[str]:
+        """Warn when the offset limits make the requested temperature unreachable.
+
+        The heating curve is designed around the normal setpoint, so a deep
+        setback needs far more offset authority than day-to-day trimming - about
+        twenty kelvin to coast to 16 C in a Swedish winter, not four. Without
+        that headroom the controller sits pinned at its limit and the setpoint
+        silently does nothing, which is exactly the kind of failure that looks
+        like the model being wrong.
+        """
+        c = self.cfg.control
+        notes: list[str] = []
+        indoor = result.trajectory["t_indoor"]
+        pinned_high = float(np.mean(result.offset_schedule >= c.offset_max - 0.05))
+        pinned_low = float(np.mean(result.offset_schedule <= c.offset_min + 0.05))
+
+        if pinned_high > 0.6 and float(np.min(indoor)) > float(np.max(comfort.comfort_max)) + 0.2:
+            notes.append(
+                f"cannot cool the house to {c.setpoint:.1f} C: the offset is pinned at "
+                f"+{c.offset_max:.1f} K and the plan still stays above {float(np.min(indoor)):.1f} C. "
+                "Raise offset_max for this mode, or lower the heating curve."
+            )
+        if pinned_low > 0.6 and float(np.max(indoor)) < float(np.min(comfort.comfort_min)) - 0.2:
+            notes.append(
+                f"cannot heat the house to {c.setpoint:.1f} C: the offset is pinned at "
+                f"{c.offset_min:.1f} K and the plan still stays below {float(np.max(indoor)):.1f} C. "
+                "Raise the heating curve, or check for a capacity limit in 'hpmpc pump-table'."
+            )
+        return notes
+
     def _safety_override(self, readings: dict[str, Any]) -> tuple[float | None, str]:
         c = self.cfg.control
         indoor = readings.get("t_indoor")
@@ -407,10 +475,18 @@ class Controller:
             indoor_bias=bias,
         )
 
-        result: MpcResult = self.solver.solve(exog, self.state.to_state(), self.state.last_offset)
+        comfort = build_schedule(
+            self.cfg, forecast.index, self.mode, read_return_time(self.base_cfg, self.ha)
+        )
+        report["comfort"] = comfort.summary()
+        result: MpcResult = self.solver.solve(
+            exog, self.state.to_state(), self.state.last_offset, comfort=comfort
+        )
         report["mpc"] = result.summary()
         report["plan"] = _plan_table(forecast, result)
         report["mode"] = "mpc"
+
+        report["notes"].extend(self._saturation_notes(result, comfort))
 
         target = result.offset_now
         override, reason = self._safety_override(readings)
@@ -531,7 +607,7 @@ class Controller:
             "friendly_name": "Heat pump MPC",
             "unit_of_measurement": "K",
             "icon": "mdi:heat-pump",
-            "mode": report.get("mode"),
+            "control_mode": report.get("mode"),
             "applied": report.get("applied"),
             "notes": report.get("notes"),
             "predicted_indoor_min": mpc.get("predicted_indoor_min"),
@@ -540,6 +616,9 @@ class Controller:
             "predicted_saving_sek": mpc.get("predicted_saving_sek"),
             "predicted_saving_pct": mpc.get("predicted_saving_pct"),
             "offset_blocks": mpc.get("offset_blocks"),
+            "mode": report.get("comfort", {}).get("mode"),
+            "setpoint": report.get("comfort", {}).get("setpoint_now"),
+            "comfort_band": report.get("comfort", {}).get("comfort_band_now"),
             "slab_temperature": round(self.state.t_mass, 2),
             "updated": report.get("timestamp"),
         }

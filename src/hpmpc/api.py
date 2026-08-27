@@ -12,6 +12,7 @@ import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from contextlib import asynccontextmanager
 
@@ -21,8 +22,9 @@ from fastapi.responses import PlainTextResponse
 from . import __version__
 from .config import Config, load_config
 from .controller import Controller
+from .dataset import build_dataset, save_dataset
 from .ha import HomeAssistant, HomeAssistantError
-from .train import load_model
+from .train import load_model, train
 
 log = logging.getLogger(__name__)
 
@@ -36,6 +38,7 @@ class ControllerService:
         self.stop_event = threading.Event()
         self.last_report: dict[str, Any] = {}
         self.last_error: str | None = None
+        self.last_training: dict[str, Any] | None = None
         self.started_at = datetime.now(timezone.utc)
         self.cycles = 0
         self.cfg: Config = load_config(self.config_path)
@@ -61,11 +64,59 @@ class ControllerService:
                 self.cycles += 1
             return report
 
+    def model_age_days(self) -> float | None:
+        try:
+            stamp = Path(self.cfg.model_path).stat().st_mtime
+        except OSError:
+            return None
+        return (datetime.now(timezone.utc).timestamp() - stamp) / 86400.0
+
+    def maybe_retrain(self) -> None:
+        """Refit the model when it gets stale, without needing a cron job.
+
+        A house is not the same house in March as it was in November - leaves,
+        snow cover, how it is actually lived in. Retraining takes a minute or
+        two of one core, so it waits for a quiet hour rather than interrupting
+        an evening.
+        """
+        days = self.cfg.training.retrain_days
+        if days <= 0:
+            return
+        age = self.model_age_days()
+        if age is None or age < days:
+            return
+        local_hour = datetime.now(ZoneInfo(self.cfg.site.timezone)).hour
+        if local_hour != self.cfg.training.retrain_hour:
+            return
+        log.info("Model is %.0f days old; retraining", age)
+        try:
+            with self.lock:
+                frame = build_dataset(self.cfg, self.ha)
+                save_dataset(frame, self.cfg.dataset_path)
+                report = train(self.cfg, frame)
+                working, params, residual, metadata = load_model(self.cfg)
+                self.cfg = working
+                self.controller.base_cfg = working
+                self.controller.cfg = working
+                self.controller.params = params
+                self.controller.residual = residual
+                self.controller.solver.params = params
+                self.model_metadata = metadata
+            self.last_training = {
+                "at": datetime.now(timezone.utc).isoformat(),
+                "validation_rmse_c": report.get("thermal", {}).get("validation", {}).get("rmse_c"),
+            }
+            log.info("Retrained: validation RMSE %s C", self.last_training["validation_rmse_c"])
+        except Exception as exc:  # pragma: no cover - never take control down for this
+            log.error("Automatic retraining failed (%s); continuing on the previous model", exc)
+            self.last_training = {"at": datetime.now(timezone.utc).isoformat(), "error": str(exc)}
+
     def loop(self) -> None:
         cycle = timedelta(minutes=self.cfg.control.cycle_minutes)
         while not self.stop_event.is_set():
             try:
                 self.step()
+                self.maybe_retrain()
             except Exception as exc:  # pragma: no cover - keep the loop alive
                 log.error("Scheduler cycle failed: %s", exc)
             now = datetime.now(timezone.utc)
@@ -108,6 +159,10 @@ def create_app(config_path: str | Path = "config/config.yaml", run_scheduler: bo
             "last_error": service.last_error,
             "last_cycle": service.last_report.get("timestamp"),
             "scheduler": run_scheduler,
+            "model_age_days": (
+                round(service.model_age_days(), 1) if service.model_age_days() is not None else None
+            ),
+            "last_training": service.last_training,
         }
 
     @app.get("/status", dependencies=[Depends(require_key)])

@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import sys
 import time
 from datetime import datetime, timedelta, timezone
@@ -100,6 +101,52 @@ def cmd_ntc_table(args: argparse.Namespace) -> int:
         "Size the digital potentiometer (or its series resistor) around the outdoor\n"
         "temperatures you actually see, not the whole curve."
     )
+    return 0
+
+
+def cmd_mode(args: argparse.Namespace) -> int:
+    """Show or switch the comfort mode."""
+    from .comfort import apply_mode, resolve_mode, set_mode
+
+    cfg = _load(args)
+    with _connect(cfg) as ha:
+        if args.name:
+            try:
+                actions = set_mode(cfg, ha, args.name)
+            except ValueError as exc:
+                print(exc)
+                return 1
+            for action in actions:
+                print(action)
+            print(f"\nMode set to '{args.name}'. The controller applies it on its next cycle.")
+
+        active, notes = resolve_mode(cfg, ha)
+        control = apply_mode(cfg, active).control
+        print(f"\nActive mode: {active}")
+        print(f"  setpoint      {control.setpoint:.1f} C")
+        print(f"  comfort band  {control.comfort_min:.1f} - {control.comfort_max:.1f} C")
+        print(f"  hard band     {control.hard_min:.1f} - {control.hard_max:.1f} C")
+        print(f"  offset range  {control.offset_min:+.1f} .. {control.offset_max:+.1f} K")
+        for note in notes:
+            print(f"  note: {note}")
+
+        print(f"\n{'profile':12}{'setpoint':>10}{'comfort':>16}{'offset max':>12}")
+        for name in cfg.modes.names():
+            profile = apply_mode(cfg, name).control
+            marker = " *" if name == active else "  "
+            print(
+                f"{marker}{name:10}{profile.setpoint:>10.1f}"
+                f"{f'{profile.comfort_min:.1f} - {profile.comfort_max:.1f}':>16}{profile.offset_max:>12.1f}"
+            )
+        if cfg.modes.return_entity:
+            from .comfort import read_return_time
+
+            back = read_return_time(cfg, ha)
+            print(f"\nBack home at: {back if back else 'not set'} ({cfg.modes.return_entity})")
+            print(
+                "The comfort band returns to normal at that moment; the optimiser decides on its\n"
+                "own when to start reheating the slab, which for a deep setback is many hours."
+            )
     return 0
 
 
@@ -705,7 +752,11 @@ def _sleep_until_next_cycle(started: datetime, cycle_minutes: int) -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="hpmpc", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--config", default="config/config.yaml", help="path to config.yaml")
+    parser.add_argument(
+        "--config",
+        default=os.environ.get("HPMPC_CONFIG", "config/config.yaml"),
+        help="path to config.yaml (default: $HPMPC_CONFIG, then config/config.yaml)",
+    )
     parser.add_argument("-v", "--verbose", action="store_true")
     parser.add_argument("--version", action="version", version=f"hpmpc {__version__}")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -716,6 +767,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("check", help="validate config and Home Assistant connectivity")
     p.set_defaults(func=cmd_check)
+
+    p = sub.add_parser("mode", help="show or switch the comfort mode (normal / away / holiday)")
+    p.add_argument("name", nargs="?", default=None)
+    p.set_defaults(func=cmd_mode)
 
     p = sub.add_parser("power", help="show how whole-house power is split between the pump and the rest")
     p.add_argument("--dataset", default=None)

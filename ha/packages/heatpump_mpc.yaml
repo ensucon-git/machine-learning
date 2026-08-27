@@ -21,6 +21,27 @@ input_boolean:
     name: MPC dry run (calculate but do not act)
     icon: mdi:test-tube
 
+  semesterlage:
+    name: Holiday mode
+    icon: mdi:bag-suitcase
+
+input_select:
+  varmepump_lage:
+    name: Heat pump comfort mode
+    icon: mdi:home-thermometer
+    options:
+      - normal
+      - away
+      - holiday
+    initial: normal
+
+input_datetime:
+  hemkomst:
+    name: Back home at
+    has_date: true
+    has_time: true
+    icon: mdi:home-clock
+
 # ---------------------------------------------------------------------------
 # Settings you can change from a dashboard. Map them under runtime_overrides:
 # in config.yaml and the controller reads them on its next cycle - no restart,
@@ -49,22 +70,24 @@ input_number:
     icon: mdi:home-thermometer
     mode: box
 
-  komfort_min:
-    name: Comfort band, lower
-    min: 14
-    max: 26
+  # The band is relative to the setpoint, so moving the setpoint moves the
+  # whole band. That is what makes holiday mode one number instead of four.
+  komfort_under:
+    name: Comfort band, degrees below setpoint
+    min: 0
+    max: 6
     step: 0.1
-    initial: 20.3
-    unit_of_measurement: "°C"
+    initial: 0.7
+    unit_of_measurement: "K"
     mode: box
 
-  komfort_max:
-    name: Comfort band, upper
-    min: 14
-    max: 30
+  komfort_over:
+    name: Comfort band, degrees above setpoint
+    min: 0
+    max: 6
     step: 0.1
-    initial: 22
-    unit_of_measurement: "°C"
+    initial: 1.0
+    unit_of_measurement: "K"
     mode: box
 
   offset_min:
@@ -137,6 +160,14 @@ template:
         unit_of_measurement: "%"
         state: "{{ (state_attr('sensor.hpmpc_status', 'heatpump_share') | float(0) * 100) | round(0) }}"
 
+      - name: "MPC comfort mode"
+        unique_id: hpmpc_mode
+        icon: mdi:home-thermometer
+        state: "{{ state_attr('sensor.hpmpc_status', 'mode') or 'unknown' }}"
+        attributes:
+          setpoint: "{{ state_attr('sensor.hpmpc_status', 'setpoint') }}"
+          comfort_band: "{{ state_attr('sensor.hpmpc_status', 'comfort_band') }}"
+
       - name: "Heat pump perceived outdoor temperature"
         unique_id: hpmpc_perceived_outdoor
         unit_of_measurement: "°C"
@@ -208,6 +239,31 @@ automation:
             The pump was being shown {{ states('sensor.emulated_outdoor_temperature') }} °C
             while the real outdoor temperature is {{ states('sensor.ute_temperatur') }} °C.
             The emulator has been released and MPC control switched off.
+
+  # ---- Come home from holiday ------------------------------------------
+  # The controller already ramps the comfort band back at the return time, and
+  # decides for itself when to start reheating the slab - which for a deep
+  # setback is many hours ahead. This just tidies up the switch afterwards so
+  # the two do not disagree.
+  - alias: "MPC leave holiday mode on arrival"
+    id: hpmpc_return_home
+    mode: single
+    trigger:
+      - platform: time
+        at: input_datetime.hemkomst
+    condition:
+      - condition: state
+        entity_id: input_boolean.semesterlage
+        state: "on"
+    action:
+      - service: input_boolean.turn_off
+        target:
+          entity_id: input_boolean.semesterlage
+      - service: input_select.select_option
+        target:
+          entity_id: input_select.varmepump_lage
+        data:
+          option: normal
 
   # ---- Backup heater warning -------------------------------------------
   - alias: "MPC backup heater warning"

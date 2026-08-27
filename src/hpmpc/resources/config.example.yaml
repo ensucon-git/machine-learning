@@ -134,11 +134,14 @@ control:
   step_minutes: 15
   block_hours: 3
 
+  # The one number. Everything else about comfort is relative to it, so moving
+  # the setpoint moves the whole band - there is no way to set 16 degrees and
+  # leave a comfort band that still insists on 20.3.
   setpoint: 21.0
-  comfort_min: 20.3                 # the optimiser roams freely inside this band ...
-  comfort_max: 22.0
-  hard_min: 19.0                    # ... and is heavily penalised outside this one
-  hard_max: 23.5
+  comfort_below: 0.7                # the optimiser roams freely from setpoint-0.7 ...
+  comfort_above: 1.0                # ... to setpoint+1.0
+  hard_below: 2.0                   # and is heavily penalised outside setpoint-2.0 ...
+  hard_above: 2.5                   # ... to setpoint+2.5
 
   weight_comfort: 40.0
   weight_hard: 400.0
@@ -157,14 +160,59 @@ control:
   # here, then VAT. Leaving these at zero makes the optimiser overestimate what
   # load shifting is worth.
   price_scale: 1.0
-  price_addition: 0.8855            # grid transfer + energy tax, SEK/kWh
-  price_vat_pct: 25.0               # set to 0 if price_addition already includes VAT
+  price_addition: 0.7084            # grid transfer + energy tax, SEK/kWh, EXCLUDING VAT
+  price_vat_pct: 25.0               # ... so VAT lands on the whole thing: 0.7084 * 1.25 = 0.8855
 
   observer_gain: 1.0
   fallback_offset: 0.0              # used whenever sensors are missing or implausible
   max_data_age_minutes: 45
   warm_start_hours: 24
   dry_run: false                    # true = compute everything, write nothing
+
+# Named comfort profiles. Selecting one replaces the setpoint (and optionally
+# the band widths); because the band is relative, a holiday profile is one
+# number and cannot leave the configuration self-contradictory.
+modes:
+  default: normal
+  entity: input_select.varmepump_lage       # optional: a selector with the profile names
+  holiday_entity: input_boolean.semesterlage  # the switch you reach for on the way out
+  holiday_profile: holiday
+
+  # When you are back. The comfort band returns to normal at that moment and
+  # the optimiser - which plans 36 hours ahead - works out for itself when to
+  # start reheating the slab and which hours to buy the heat in. With a ten-hour
+  # slab time constant this is the difference between walking into a warm house
+  # and waiting a day for one. Leave empty if you would rather flip the switch
+  # manually when you set off home.
+  return_entity: input_datetime.hemkomst
+  return_ramp_hours: 2.0
+
+  profiles:
+    normal:
+      setpoint: 21.0
+    # Setback bands are deliberately lopsided. While nobody is home, too cold is
+    # the only thing that matters; being warmer than the setback target costs
+    # money and the price term already discourages it. A tight upper bound would
+    # also forbid reheating the slab ahead of a return - which is the point.
+    away:
+      setpoint: 18.0
+      comfort_below: 1.5
+      comfort_above: 3.0
+      hard_below: 3.0
+      hard_above: 6.0
+      offset_max: 15.0
+    holiday:
+      setpoint: 16.0
+      comfort_below: 1.5
+      comfort_above: 5.0
+      hard_below: 3.0
+      hard_above: 8.0
+      # A deep setback needs far more authority than day-to-day trimming. The
+      # heating curve is designed to hold 21 C, so coasting down to 16 C at
+      # -6 C outdoors means showing the pump about +14 C - twenty kelvin of
+      # offset, not four. heat_pump.perceived_max_c still caps the absolute
+      # value the pump ever sees, and is what keeps this safe.
+      offset_max: 25.0
 
 # How to work out what the heat pump is drawing. Only relevant when there is no
 # dedicated meter on the pump; see 'hpmpc power' to inspect the result.
@@ -184,9 +232,9 @@ power:
 # 'hpmpc settings' to see everything that can be mapped, and its allowed range.
 runtime_overrides:
   control.price_addition: input_number.eloverforing_kr_per_kwh
-  control.setpoint: input_number.inne_borvarde
-  control.comfort_min: input_number.komfort_min
-  control.comfort_max: input_number.komfort_max
+  control.setpoint: input_number.inne_borvarde      # ignored while a non-default mode is active
+  control.comfort_below: input_number.komfort_under
+  control.comfort_above: input_number.komfort_over
   control.offset_min: input_number.offset_min
   control.offset_max: input_number.offset_max
   control.max_electric_power_kw: input_number.effekttak_kw
@@ -216,10 +264,13 @@ training:
   residual_max_correction: 0.4      # K/h - hard cap on what the learned residual may do
   seed: 0
 
+# The defaults are for running from a source checkout. In Docker the image sets
+# HPMPC_DATA_DIR and friends to the mounted volume, so the same file works in
+# both places without editing.
 paths:
-  data_dir: data
-  model_dir: models
-  state_file: data/controller_state.json
+  data_dir: ${HPMPC_DATA_DIR:-data}
+  model_dir: ${HPMPC_MODEL_DIR:-models}
+  state_file: ${HPMPC_STATE_FILE:-data/controller_state.json}
 
 server:
   host: 0.0.0.0

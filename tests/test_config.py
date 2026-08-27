@@ -60,7 +60,8 @@ def test_missing_required_entity(tmp_path):
     [
         ("control", {"output_mode": "magic"}, "output_mode"),
         ("control", {"offset_min": 5.0, "offset_max": -5.0}, "offset_min"),
-        ("control", {"comfort_min": 25.0}, "comfort band"),
+        ("control", {"comfort_below": 5.0}, "comfort_below"),
+        ("control", {"comfort_above": 9.0}, "comfort_above"),
         ("optimizer", {"elites": 999}, "elites"),
     ],
 )

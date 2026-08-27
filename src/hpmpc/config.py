@@ -248,10 +248,13 @@ class ControlConfig:
     step_minutes: int = 15
     block_hours: float = 3.0
     setpoint: float = 21.0
-    comfort_min: float = 20.3
-    comfort_max: float = 22.0
-    hard_min: float = 19.0
-    hard_max: float = 23.5
+    """The one number. Everything else about comfort is expressed relative to
+    it, so changing it moves the whole band and there is no way to end up with
+    a setpoint of 16 and a comfort band that still insists on 20.3."""
+    comfort_below: float = 0.7
+    comfort_above: float = 1.0
+    hard_below: float = 2.0
+    hard_above: float = 2.5
     weight_comfort: float = 40.0
     weight_hard: float = 400.0
     weight_offset_change: float = 0.05
@@ -265,6 +268,22 @@ class ControlConfig:
     fuse: a 16 kW compressor plus a 9 kW backup heater can trip a 25 A service,
     and a preheat plan is exactly when they would run together."""
     weight_power_limit: float = 25.0
+
+    @property
+    def comfort_min(self) -> float:
+        return self.setpoint - self.comfort_below
+
+    @property
+    def comfort_max(self) -> float:
+        return self.setpoint + self.comfort_above
+
+    @property
+    def hard_min(self) -> float:
+        return self.setpoint - self.hard_below
+
+    @property
+    def hard_max(self) -> float:
+        return self.setpoint + self.hard_above
     price_scale: float = 1.0
     price_addition: float = 0.0
     price_vat_pct: float = 0.0
@@ -275,6 +294,71 @@ class ControlConfig:
     observer_gain: float = 1.0
     fallback_offset: float = 0.0
     warm_start_hours: float = 24.0
+
+
+@dataclass
+class ModesConfig:
+    """Named comfort profiles - home, away, holiday.
+
+    Selecting a mode replaces the setpoint and, optionally, the band widths.
+    Because the band is relative to the setpoint, a holiday profile is one
+    number and cannot leave the configuration self-contradictory.
+    """
+
+    entity: str = ""
+    """An ``input_select`` whose state names the active profile."""
+    holiday_entity: str = ""
+    """An ``input_boolean`` shortcut: on means the holiday profile, whatever
+    the selector says. Simpler to automate and simpler to reach in a hurry."""
+    holiday_profile: str = "holiday"
+    default: str = "normal"
+    return_entity: str = ""
+    """An ``input_datetime`` for when you are back. The comfort band returns to
+    normal at that moment, and the optimiser - which can see it coming - works
+    out for itself when to start reheating the slab. With a ten-hour slab time
+    constant that is the difference between walking into a warm house and
+    waiting a day for one."""
+    return_ramp_hours: float = 2.0
+    profiles: dict[str, dict[str, float]] = field(
+        default_factory=lambda: {
+            "normal": {"setpoint": 21.0},
+            # Setback bands are deliberately lopsided. While nobody is home,
+            # too cold is the only thing that matters; being warmer than the
+            # setback target costs money and the price term already discourages
+            # it. A tight upper bound here would also forbid reheating the slab
+            # ahead of a return, which is the whole point of the return time.
+            "away": {
+                "setpoint": 18.0, "comfort_below": 1.5, "comfort_above": 3.0,
+                "hard_below": 3.0, "hard_above": 6.0, "offset_max": 15.0,
+            },
+            "holiday": {
+                "setpoint": 16.0, "comfort_below": 1.5, "comfort_above": 5.0,
+                "hard_below": 3.0, "hard_above": 8.0, "offset_max": 25.0,
+            },
+        }
+    )
+
+    PROFILE_KEYS = (
+        "setpoint",
+        "comfort_below",
+        "comfort_above",
+        "hard_below",
+        "hard_above",
+        # A deep setback needs far more authority than day-to-day trimming. The
+        # heating curve is designed to hold the normal setpoint, so coasting
+        # down to 16 C in winter means telling the pump it is well above its
+        # heating cut-off - twenty kelvin of offset, not four. The absolute
+        # limit on what the pump may be shown (heat_pump.perceived_max_c) still
+        # applies, and is the setting that actually keeps this safe.
+        "offset_min",
+        "offset_max",
+    )
+
+    def profile(self, name: str) -> dict[str, float] | None:
+        return self.profiles.get(str(name).strip().lower())
+
+    def names(self) -> list[str]:
+        return sorted(self.profiles)
 
 
 @dataclass
@@ -299,6 +383,13 @@ class TrainingConfig:
     restarts: int = 3
     max_windows: int = 900
     validation_fraction: float = 0.25
+    retrain_days: int = 30
+    """Retrain automatically when the model is older than this, if the
+    controller is running as a service. 0 disables it. The house changes with
+    the seasons - leaves, snow cover, how you actually live in it - and a model
+    fitted in November is not the same house in March."""
+    retrain_hour: int = 3
+    """Local hour to do it at. Training pins a core for a minute or two."""
     use_residual_model: bool = True
     residual_max_correction: float = 0.4
     seed: int = 0
@@ -327,6 +418,7 @@ class Config:
     heat_pump: HeatPumpConfig = field(default_factory=HeatPumpConfig)
     ntc: NTCConfig = field(default_factory=NTCConfig)
     control: ControlConfig = field(default_factory=ControlConfig)
+    modes: ModesConfig = field(default_factory=ModesConfig)
     power: PowerConfig = field(default_factory=PowerConfig)
     optimizer: OptimizerConfig = field(default_factory=OptimizerConfig)
     training: TrainingConfig = field(default_factory=TrainingConfig)
@@ -345,8 +437,20 @@ class Config:
             raise ValueError(f"control.output_mode '{c.output_mode}' is not valid")
         if c.offset_min >= c.offset_max:
             raise ValueError("control.offset_min must be below control.offset_max")
-        if not (c.hard_min <= c.comfort_min <= c.comfort_max <= c.hard_max):
-            raise ValueError("comfort band must sit inside the hard band")
+        if not 0.0 <= c.comfort_below <= c.hard_below:
+            raise ValueError("control.comfort_below must be between 0 and control.hard_below")
+        if not 0.0 <= c.comfort_above <= c.hard_above:
+            raise ValueError("control.comfort_above must be between 0 and control.hard_above")
+        for name, profile in (self.modes.profiles or {}).items():
+            unknown = set(profile) - set(ModesConfig.PROFILE_KEYS)
+            if unknown:
+                raise ValueError(f"modes.profiles['{name}'] has unknown keys: {', '.join(sorted(unknown))}")
+            if "setpoint" not in profile:
+                raise ValueError(f"modes.profiles['{name}'] must set a setpoint")
+        if self.modes.default not in (self.modes.profiles or {}):
+            raise ValueError(f"modes.default '{self.modes.default}' is not one of the defined profiles")
+        if self.modes.holiday_profile not in (self.modes.profiles or {}):
+            raise ValueError(f"modes.holiday_profile '{self.modes.holiday_profile}' is not defined")
         if c.step_minutes <= 0 or c.horizon_hours <= 0:
             raise ValueError("control.step_minutes and control.horizon_hours must be positive")
         if self.optimizer.elites >= self.optimizer.population:
