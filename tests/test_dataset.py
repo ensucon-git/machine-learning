@@ -65,20 +65,32 @@ def test_add_derived_prefers_a_measured_pyranometer(cfg):
     assert add_derived(frame, cfg)["solar_ghi"].eq(123.0).all()
 
 
-@pytest.mark.parametrize("mode", ["offset", "fake_temperature", "resistance"])
-def test_applied_offset_inverts_every_output_mode(cfg, mode):
-    cfg.control.output_mode = mode
+@pytest.mark.parametrize("column", ["output_offset", "output_fake_temp", "output_resistance"])
+def test_applied_offset_is_recovered_from_whichever_output_was_logged(cfg, column):
     index = pd.date_range("2026-01-15", periods=3, freq="15min", tz="UTC")
     outdoor = np.array([-5.0, -6.0, -7.0])
     offset = np.array([-2.0, 1.0, 0.0])
-    if mode == "offset":
-        raw = offset
-    elif mode == "fake_temperature":
-        raw = outdoor + offset
-    else:
-        raw = temperature_to_resistance(outdoor + offset, cfg.ntc)
-    frame = pd.DataFrame({"t_outdoor": outdoor, "output_raw": raw}, index=index)
+    logged = {
+        "output_offset": offset,
+        "output_fake_temp": outdoor + offset,
+        "output_resistance": temperature_to_resistance(outdoor + offset, cfg.ntc),
+    }[column]
+    frame = pd.DataFrame({"t_outdoor": outdoor, column: logged}, index=index)
     assert applied_offset(frame, cfg).to_numpy() == pytest.approx(offset, abs=1e-4)
+
+
+def test_the_kelvin_entity_wins_when_several_were_logged(cfg):
+    """It needs no conversion, so it cannot disagree with what was decided."""
+    index = pd.date_range("2026-01-15", periods=2, freq="15min", tz="UTC")
+    frame = pd.DataFrame(
+        {
+            "t_outdoor": [-5.0, -5.0],
+            "output_offset": [-2.0, -2.0],
+            "output_fake_temp": [99.0, 99.0],      # deliberately inconsistent
+        },
+        index=index,
+    )
+    assert applied_offset(frame, cfg).to_numpy() == pytest.approx([-2.0, -2.0])
 
 
 def test_applied_offset_defaults_to_zero_without_an_output_entity(cfg):

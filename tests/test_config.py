@@ -49,16 +49,27 @@ def test_unknown_key_is_rejected(tmp_path):
         load_config(path)
 
 
-def test_missing_required_entity(tmp_path):
+def test_a_retired_key_says_what_replaced_it(tmp_path):
+    path = write(tmp_path, BASE + "control:\n  output_mode: resistance\n")
+    with pytest.raises(ValueError, match="writes every output entity"):
+        load_config(path)
+
+
+def test_the_outdoor_temperature_must_come_from_somewhere(tmp_path):
     path = write(tmp_path, "entities:\n  indoor_temp: sensor.a\n")
-    with pytest.raises(ValueError, match="outdoor_temp"):
+    with pytest.raises(ValueError, match="outdoor temperature has to come from"):
+        load_config(path)
+
+
+def test_missing_required_entity(tmp_path):
+    path = write(tmp_path, "control:\n  setpoint: 21\n")
+    with pytest.raises(ValueError, match="indoor_temp"):
         load_config(path)
 
 
 @pytest.mark.parametrize(
     "section,changes,message",
     [
-        ("control", {"output_mode": "magic"}, "output_mode"),
         ("control", {"offset_min": 5.0, "offset_max": -5.0}, "offset_min"),
         ("control", {"comfort_below": 5.0}, "comfort_below"),
         ("control", {"comfort_above": 9.0}, "comfort_above"),

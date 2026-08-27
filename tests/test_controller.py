@@ -18,7 +18,7 @@ def test_normal_cycle_writes_a_bounded_offset(controller, cfg, fake_ha):
     report = controller.step(now=fake_ha.now)
     assert report["mode"] == "mpc"
     assert report["applied"] is True
-    assert fake_ha.written and fake_ha.written[-1][0] == "number.offset"
+    assert "number.offset" in dict(fake_ha.written)
     assert cfg.control.offset_min <= report["offset"] <= cfg.control.offset_max
     assert report["mpc"]["predicted_indoor_min"] > 0
 
@@ -31,10 +31,13 @@ def test_dry_run_computes_everything_but_writes_nothing(controller, fake_ha):
 
 
 def test_rate_limit_caps_the_change_per_cycle(controller, cfg, fake_ha):
-    controller.state.last_offset = 0.0
+    # Start far from anything the optimiser could want, so the limiter has to
+    # engage whatever it decides - the decision itself depends on the price
+    # profile, which depends on the time of day the tests happen to run.
+    controller.state.last_offset = 5.0
     cfg.control.max_change_per_cycle = 0.25
     report = controller.step(now=fake_ha.now)
-    assert abs(report["offset"]) <= 0.25 + 1e-9
+    assert report["offset"] >= 5.0 - 0.25 - 1e-9
     assert any("rate limited" in note for note in report["notes"])
 
 
@@ -84,17 +87,50 @@ def test_fallback_is_reached_gradually_not_in_one_jump(controller, cfg, fake_ha)
     assert report["offset"] == pytest.approx(-5.0)
 
 
-@pytest.mark.parametrize("mode", ["offset", "fake_temperature", "resistance"])
-def test_output_modes_translate_the_offset_correctly(controller, cfg, mode):
-    cfg.control.output_mode = mode
-    value, unit = controller.output_value(-3.0, -5.0)
-    if mode == "offset":
-        assert (value, unit) == (-3.0, "K")
-    elif mode == "fake_temperature":
-        assert (value, unit) == (-8.0, "degC")
-    else:
-        assert unit == "ohm"
-        assert float(resistance_to_temperature(value, cfg.ntc)) == pytest.approx(-8.0, abs=0.05)
+def test_every_configured_output_gets_the_same_decision(controller, cfg):
+    """Kelvin, degrees and ohm are one number in three units. Writing them all
+    means the one you act on and the one you look at cannot disagree."""
+    cfg.entities.resistance_output = "number.resistans"
+    outputs = {o["kind"]: o for o in controller.outputs(-3.0, -5.0)}
+    assert outputs["offset"]["value"] == pytest.approx(-3.0)
+    assert outputs["offset"]["unit"] == "K"
+    assert outputs["fake_temperature"]["value"] == pytest.approx(-8.0)
+    assert outputs["resistance"]["unit"] == "ohm"
+    assert float(resistance_to_temperature(outputs["resistance"]["value"], cfg.ntc)) == pytest.approx(
+        -8.0, abs=0.05
+    )
+
+
+def test_only_configured_outputs_are_produced(controller, cfg):
+    cfg.entities.fake_temperature_output = ""
+    cfg.entities.resistance_output = ""
+    assert [o["kind"] for o in controller.outputs(-3.0, -5.0)] == ["offset"]
+
+
+def test_all_outputs_are_written_each_cycle(controller, cfg, fake_ha):
+    controller.step(now=fake_ha.now)
+    written = dict(fake_ha.written)
+    assert set(written) == {"number.offset", "number.fake_temp"}
+    # The pair is self-consistent: fake temperature is outdoor plus offset.
+    assert written["number.fake_temp"] == pytest.approx(
+        written["number.offset"] + float(fake_ha.get_state("sensor.outdoor").numeric), abs=0.01
+    )
+
+
+def test_one_failing_output_does_not_stop_the_others(controller, cfg, fake_ha):
+    original = fake_ha.set_number
+
+    def flaky(entity_id, value):
+        if entity_id == "number.offset":
+            from hpmpc.ha import HomeAssistantError
+
+            raise HomeAssistantError("nope")
+        original(entity_id, value)
+
+    fake_ha.set_number = flaky
+    report = controller.step(now=fake_ha.now)
+    assert report["applied"] is True                       # the other one landed
+    assert any("failed to write number.offset" in n for n in report["notes"])
 
 
 def test_write_failure_is_reported_not_raised(controller, fake_ha):
@@ -102,6 +138,20 @@ def test_write_failure_is_reported_not_raised(controller, fake_ha):
     report = controller.step(now=fake_ha.now)
     assert report["applied"] is False
     assert any("failed to write" in note for note in report["notes"])
+
+
+def test_the_outdoor_temperature_can_come_from_the_forecast(cfg, fake_ha):
+    """No outdoor sensor means Home Assistant is not in the loop for it at all."""
+    from hpmpc.controller import Controller
+    from hpmpc.model.thermal import ThermalParams
+
+    cfg.entities.outdoor_temp = ""
+    fake_ha.drop("sensor.outdoor")
+    controller = Controller(cfg, ThermalParams(), fake_ha)
+    report = controller.step(now=fake_ha.now, apply=False)
+    assert report["mode"] == "mpc"
+    assert "forecast" in report["readings"]["t_outdoor_source"]
+    assert report["readings"]["t_outdoor"] is not None
 
 
 def test_status_entity_is_published(controller, cfg, fake_ha):
@@ -223,3 +273,73 @@ def test_backup_heater_energy_reaches_the_status_entity(controller, cfg, fake_ha
     controller.step(now=fake_ha.now)
     posted = dict(fake_ha.posted)["/api/states/sensor.hpmpc_status"]
     assert "backup_heater_kwh_horizon" in posted["attributes"]
+
+
+# ------------------------------------------- closed-loop actuator check
+
+
+def test_actuator_check_is_silent_without_the_entity(controller, fake_ha):
+    report = controller.step(now=fake_ha.now, apply=False)
+    assert "actuator" not in report
+
+
+def test_actuator_check_reports_the_discrepancy(controller, cfg, fake_ha):
+    cfg.entities.pump_outdoor_temp = "sensor.daikin_utetemp"
+    controller.state.last_offset = -2.0
+    fake_ha.set("sensor.outdoor", -5.0)
+    fake_ha.set("sensor.daikin_utetemp", -7.0)          # exactly what -5 + -2 should give
+    report = controller.step(now=fake_ha.now, apply=False)
+    actuator = report["actuator"]
+    assert actuator["commanded_c"] == pytest.approx(-7.0)
+    assert actuator["error_now_c"] == pytest.approx(0.0)
+    assert "warning" not in actuator
+
+
+def test_a_persistent_actuator_error_eventually_warns(controller, cfg, fake_ha):
+    cfg.entities.pump_outdoor_temp = "sensor.daikin_utetemp"
+    cfg.control.actuator_error_smoothing = 0.5           # settle quickly for the test
+    controller.state.last_offset = 0.0
+    fake_ha.set("sensor.outdoor", -5.0)
+    fake_ha.set("sensor.daikin_utetemp", -1.5)          # the pump is 3.5 K off
+
+    warning = None
+    for _ in range(10):
+        actuator = controller.check_actuator(controller.read_sensors())
+        warning = actuator.get("warning")
+    assert controller.state.actuator_error_c == pytest.approx(3.5, abs=0.1)
+    assert warning is not None and "does not match the sensor" in warning
+
+
+def test_a_brief_excursion_does_not_warn(controller, cfg, fake_ha):
+    """The pump filters its outdoor reading, so single cycles are lag, not bias.
+
+    Run at the real smoothing constant: one wild sample must not be enough to
+    accuse the calibration of being wrong.
+    """
+    cfg.entities.pump_outdoor_temp = "sensor.daikin_utetemp"
+    controller.state.last_offset = 0.0
+    fake_ha.set("sensor.outdoor", -5.0)
+    fake_ha.set("sensor.daikin_utetemp", -5.0)
+
+    settled = None
+    for _ in range(80):
+        settled = controller.check_actuator(controller.read_sensors())
+    assert settled["settled"] is True and "warning" not in settled
+
+    fake_ha.set("sensor.daikin_utetemp", 1.0)           # one wild sample
+    actuator = controller.check_actuator(controller.read_sensors())
+    assert actuator["error_now_c"] == pytest.approx(6.0)
+    assert abs(actuator["error_smoothed_c"]) < 0.5
+    assert "warning" not in actuator
+
+
+def test_the_check_respects_the_absolute_clamp(controller, cfg, fake_ha):
+    """The commanded value is what the pump was actually shown, limits included."""
+    cfg.entities.pump_outdoor_temp = "sensor.daikin_utetemp"
+    cfg.heat_pump.perceived_max_c = 10.0
+    controller.state.last_offset = 20.0                  # would be +15, but clamped to +10
+    fake_ha.set("sensor.outdoor", -5.0)
+    fake_ha.set("sensor.daikin_utetemp", 10.0)
+    actuator = controller.check_actuator(controller.read_sensors())
+    assert actuator["commanded_c"] == pytest.approx(10.0)
+    assert actuator["error_now_c"] == pytest.approx(0.0)

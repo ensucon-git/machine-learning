@@ -179,7 +179,7 @@ def test_init_config_writes_a_loadable_file(tmp_path, monkeypatch):
     from hpmpc.config import load_config
 
     loaded = load_config(target)
-    assert loaded.control.output_mode == "resistance"
+    assert loaded.entities.fake_temperature_output          # the one you plug into HA
     assert loaded.heat_pump.model == "daikin_erlq016caw1"
     assert loaded.forecast.price_area == "SE3"
     # A second call must not silently clobber an edited config.

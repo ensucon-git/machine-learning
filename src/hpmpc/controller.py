@@ -69,6 +69,8 @@ class ControllerState:
     t_filtered_outdoor: float = 0.0
     last_offset: float = 0.0
     updated_at: str = ""
+    actuator_error_c: float = 0.0
+    actuator_samples: int = 0
     warm_started: bool = False
     consecutive_failures: int = 0
     last_summary: dict[str, Any] = field(default_factory=dict)
@@ -200,7 +202,7 @@ class Controller:
         e = self.cfg.entities
         ids = [
             e.indoor_temp, e.outdoor_temp, e.wind_speed, e.outdoor_humidity,
-            e.supply_temp, e.price, e.offset_output,
+            e.supply_temp, e.price, e.offset_output, e.pump_outdoor_temp,
         ]
         states = self.ha.get_states([i for i in ids if i])
         now = datetime.now(timezone.utc)
@@ -221,10 +223,28 @@ class Controller:
             "t_outdoor_age_min": outdoor_age,
             "wind": value(e.wind_speed)[0],
             "humidity": value(e.outdoor_humidity)[0],
+            "pump_outdoor": value(e.pump_outdoor_temp)[0],
             "t_supply": value(e.supply_temp)[0],
             "price": value(e.price)[0],
             "output_raw": value(e.offset_output)[0],
         }
+
+    def resolve_outdoor(
+        self, readings: dict[str, Any], forecast: pd.DataFrame | None
+    ) -> tuple[float | None, str]:
+        """The current outdoor temperature, from a sensor or from the forecast.
+
+        A sensor at the house is better - it measures the air the building
+        actually loses heat to - so it wins when configured. Without one the
+        forecast's first step stands in, which keeps the controller from needing
+        Home Assistant as a middleman at all.
+        """
+        measured = readings.get("t_outdoor")
+        if measured is not None:
+            return float(measured), f"sensor {self.cfg.entities.outdoor_temp}"
+        if forecast is not None and len(forecast):
+            return float(forecast["t_outdoor"].iloc[0]), "forecast (no outdoor sensor configured)"
+        return None, "unavailable"
 
     def check_readings(self, readings: dict[str, Any]) -> list[str]:
         problems: list[str] = []
@@ -349,15 +369,35 @@ class Controller:
 
     # -------------------------------------------------------------- output
 
-    def output_value(self, offset: float, t_outdoor: float) -> tuple[float, str]:
-        """Translate an offset in kelvin into the number written to the entity."""
-        mode = self.cfg.control.output_mode
-        if mode == "offset":
-            return round(float(offset), 2), "K"
-        fake = float(t_outdoor) + float(offset)
-        if mode == "fake_temperature":
-            return round(fake, 2), "degC"
-        return round(float(temperature_to_resistance(fake, self.cfg.ntc)), 1), "ohm"
+    def outputs(self, offset: float, t_outdoor: float) -> list[dict[str, Any]]:
+        """Every representation of the decision, for every entity configured.
+
+        The controller decides one thing - an offset in kelvin - and publishes it
+        in as many forms as you have somewhere to put. There is no "mode" to pick
+        between them: they are the same number, and writing them all means the
+        one you consume and the one you read on a dashboard can never disagree.
+
+        ``fake_temperature`` is the useful one when the resistor curve is
+        calibrated in Home Assistant against what the pump's display actually
+        shows, which for most pumps is the only place that number exists.
+        """
+        entities = self.cfg.entities
+        fake = float(t_outdoor) + float(offset)      # already inside perceived_min/max
+        candidates = [
+            ("offset", entities.offset_output, round(float(offset), 2), "K"),
+            ("fake_temperature", entities.fake_temperature_output, round(fake, 2), "degC"),
+            (
+                "resistance",
+                entities.resistance_output,
+                round(float(temperature_to_resistance(fake, self.cfg.ntc)), 1),
+                "ohm",
+            ),
+        ]
+        return [
+            {"kind": kind, "entity_id": entity_id, "value": value, "unit": unit}
+            for kind, entity_id, value, unit in candidates
+            if entity_id
+        ]
 
     def _limit(self, target: float, t_outdoor: float | None = None) -> tuple[float, list[str]]:
         c = self.cfg.control
@@ -380,6 +420,58 @@ class Controller:
             clamped = self.state.last_offset + np.sign(delta) * c.max_change_per_cycle
             notes.append(f"rate limited to {c.max_change_per_cycle} K/cycle")
         return float(clamped), notes
+
+    def check_actuator(self, readings: dict[str, Any]) -> dict[str, Any] | None:
+        """Compare what the pump believes against what was commanded.
+
+        This is the only closed-loop check on the whole actuator chain - the
+        resistor, the wiring, the connector, the NTC table and the pump's own
+        linearisation. Everything else about the offset is open loop: we command
+        a resistance and trust that it means what the table says.
+
+        The comparison is smoothed hard, over many hours. The pump filters its
+        outdoor reading, so any single cycle is dominated by lag rather than by
+        bias; only the long-run mean says anything about calibration.
+
+        Deliberately reports rather than corrects. Closing a feedback loop on an
+        actuator estimate would let one wrong entity walk the offset away
+        quietly, which is exactly the failure this check exists to catch.
+        """
+        reported = readings.get("pump_outdoor")
+        outdoor = readings.get("t_outdoor")
+        if reported is None or outdoor is None:
+            return None
+
+        pump = self.cfg.heat_pump
+        commanded = float(
+            np.clip(outdoor + self.state.last_offset, pump.perceived_min_c, pump.perceived_max_c)
+        )
+        error = float(reported) - commanded
+        alpha = self.cfg.control.actuator_error_smoothing
+        if self.state.actuator_samples == 0:
+            self.state.actuator_error_c = error
+        else:
+            self.state.actuator_error_c = (1 - alpha) * self.state.actuator_error_c + alpha * error
+        self.state.actuator_samples += 1
+
+        settled = self.state.actuator_samples >= int(2.0 / max(alpha, 1e-6))
+        result: dict[str, Any] = {
+            "pump_believes_c": round(float(reported), 2),
+            "commanded_c": round(commanded, 2),
+            "error_now_c": round(error, 2),
+            "error_smoothed_c": round(self.state.actuator_error_c, 2),
+            "samples": self.state.actuator_samples,
+            "settled": settled,
+        }
+        threshold = self.cfg.control.actuator_error_warn_c
+        if settled and abs(self.state.actuator_error_c) > threshold:
+            result["warning"] = (
+                f"The pump believes it is {self.state.actuator_error_c:+.1f} C away from what was "
+                f"commanded, averaged over {self.state.actuator_samples} cycles. The NTC table does "
+                "not match the sensor the pump is actually reading. Run 'hpmpc calibrate-ntc' with "
+                "pairs taken from the pump's own display."
+            )
+        return result
 
     def _saturation_notes(self, result: MpcResult, comfort: Any) -> list[str]:
         """Warn when the offset limits make the requested temperature unreachable.
@@ -434,8 +526,29 @@ class Controller:
             report["settings"] = setting_notes
 
         readings = self.read_sensors()
+
+        # The forecast comes first: without an outdoor sensor it is also where
+        # the current outdoor temperature comes from, and the offset means
+        # nothing until we know what it is being added to.
+        forecast: pd.DataFrame | None = None
+        sources: dict[str, Any] = {}
+        try:
+            forecast, sources = build_forecast(self.cfg, self.ha, now)
+        except (HomeAssistantError, ValueError) as exc:
+            log.error("Could not build the forecast: %s", exc)
+            report["forecast_error"] = str(exc)
+        report["forecast_sources"] = sources
+
+        outdoor, outdoor_source = self.resolve_outdoor(readings, forecast)
+        readings["t_outdoor"] = outdoor
+        readings["t_outdoor_source"] = outdoor_source
+        if outdoor is not None and not self.cfg.entities.outdoor_temp:
+            readings["t_outdoor_age_min"] = 0.0      # a forecast for now is, by definition, now
+
         report["readings"] = {k: v for k, v in readings.items() if v is not None}
         problems = self.check_readings(readings)
+        if forecast is None:
+            problems.append("no weather or price forecast available")
 
         if problems:
             self.state.consecutive_failures += 1
@@ -463,8 +576,13 @@ class Controller:
 
         self.update_estimate(readings, float(np.clip(elapsed_raw, 0.0, 6.0)))
 
-        forecast, sources = build_forecast(self.cfg, self.ha, now)
-        report["forecast_sources"] = sources
+        actuator = self.check_actuator(readings)
+        if actuator:
+            report["actuator"] = actuator
+            if actuator.get("warning"):
+                report["notes"].append(actuator["warning"])
+                log.warning("%s", actuator["warning"])
+
         bias = self._residual_bias(forecast)
         exog = Exogenous(
             forecast["t_outdoor"].to_numpy(dtype=float),
@@ -573,26 +691,33 @@ class Controller:
             return np.zeros(len(forecast))
 
     def _write(self, offset: float, t_outdoor: float, report: dict[str, Any], apply: bool) -> None:
-        value, unit = self.output_value(offset, t_outdoor)
-        report["output"] = {
-            "entity_id": self.cfg.entities.offset_output,
-            "value": value,
-            "unit": unit,
-            "mode": self.cfg.control.output_mode,
-        }
+        outputs = self.outputs(offset, t_outdoor)
+        report["outputs"] = outputs
         if not apply:
             report["notes"].append("dry run - nothing written to Home Assistant")
             return
-        if not self.cfg.entities.offset_output:
+        if not outputs:
             report["notes"].append("no output entity configured - nothing written")
             return
-        try:
-            self.ha.set_number(self.cfg.entities.offset_output, value)
-            report["applied"] = True
-            log.info("Offset %+.2f K -> %s = %s %s", offset, self.cfg.entities.offset_output, value, unit)
-        except HomeAssistantError as exc:
-            report["notes"].append(f"failed to write output: {exc}")
-            log.error("Could not write %s: %s", self.cfg.entities.offset_output, exc)
+
+        written = 0
+        for output in outputs:
+            try:
+                self.ha.set_number(output["entity_id"], output["value"])
+                output["written"] = True
+                written += 1
+            except HomeAssistantError as exc:
+                output["written"] = False
+                output["error"] = str(exc)
+                report["notes"].append(f"failed to write {output['entity_id']}: {exc}")
+                log.error("Could not write %s: %s", output["entity_id"], exc)
+        report["applied"] = written > 0
+        if written:
+            log.info(
+                "Offset %+.2f K -> %s",
+                offset,
+                ", ".join(f"{o['entity_id']} = {o['value']} {o['unit']}" for o in outputs if o.get("written")),
+            )
         self._publish_status(report)
 
     def _publish_status(self, report: dict[str, Any]) -> None:
@@ -619,6 +744,7 @@ class Controller:
             "mode": report.get("comfort", {}).get("mode"),
             "setpoint": report.get("comfort", {}).get("setpoint_now"),
             "comfort_band": report.get("comfort", {}).get("comfort_band_now"),
+            "actuator_error_c": report.get("actuator", {}).get("error_smoothed_c"),
             "slab_temperature": round(self.state.t_mass, 2),
             "updated": report.get("timestamp"),
         }

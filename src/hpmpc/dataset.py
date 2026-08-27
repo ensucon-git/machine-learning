@@ -27,7 +27,7 @@ CONTINUOUS = [
     "t_supply", "t_return", "power", "house_l1", "house_l2", "house_l3", "house_power",
 ]
 # Signals that hold their value until explicitly changed.
-STEPWISE = ["price", "output_raw", "ev_charging"]
+STEPWISE = ["price", "output_offset", "output_fake_temp", "output_resistance", "ev_charging"]
 
 REQUIRED = ["t_indoor", "t_outdoor"]
 
@@ -51,7 +51,9 @@ def column_map(cfg: Config) -> dict[str, str]:
         e.house_power_total: "house_power",
         e.ev_charging: "ev_charging",
         e.price: "price",
-        e.offset_output: "output_raw",
+        e.offset_output: "output_offset",
+        e.fake_temperature_output: "output_fake_temp",
+        e.resistance_output: "output_resistance",
     }
     return {k: v for k, v in pairs.items() if k}
 
@@ -119,18 +121,23 @@ def add_derived(frame: pd.DataFrame, cfg: Config) -> pd.DataFrame:
 
 
 def applied_offset(frame: pd.DataFrame, cfg: Config) -> pd.Series:
-    """Reconstruct the commanded offset in kelvin from the logged output entity."""
+    """Reconstruct the commanded offset in kelvin from whichever output was logged.
+
+    The kelvin entity is preferred because it needs no conversion and therefore
+    cannot disagree with what the controller decided. The others are recovered by
+    subtracting the outdoor temperature, which is exact for degrees and
+    only as good as the NTC table for ohm.
+    """
     zeros = pd.Series(0.0, index=frame.index, name="offset")
-    if "output_raw" not in frame:
-        return zeros
-    raw = frame["output_raw"]
-    mode = cfg.control.output_mode
-    if mode == "offset":
-        value = raw
-    elif mode == "fake_temperature":
-        value = raw - frame["t_outdoor"]
-    elif mode == "resistance":
-        fake = pd.Series(resistance_to_temperature(raw.to_numpy(dtype=float), cfg.ntc), index=frame.index)
+    if "output_offset" in frame and frame["output_offset"].notna().any():
+        value = frame["output_offset"]
+    elif "output_fake_temp" in frame and frame["output_fake_temp"].notna().any():
+        value = frame["output_fake_temp"] - frame["t_outdoor"]
+    elif "output_resistance" in frame and frame["output_resistance"].notna().any():
+        fake = pd.Series(
+            resistance_to_temperature(frame["output_resistance"].to_numpy(dtype=float), cfg.ntc),
+            index=frame.index,
+        )
         value = fake - frame["t_outdoor"]
     else:
         return zeros

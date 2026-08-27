@@ -52,7 +52,7 @@ Home Assistant ──historik──►  dataset ──►  systemidentifiering �
 | `residual.py` | Lärd residual (scikit-learn), enbart exogena särdrag |
 | `mpc.py` | CEM-optimerare med batchade utrullningar |
 | `comfort.py` | Börvärde, lägen, komfortschema över horisonten |
-| `controller.py` | Styrslinga, observatör, säkerhet, lägen |
+| `controller.py` | Styrslinga, observatör, säkerhet, lägen, utgångar |
 | `providers/` | SMHI-prognos, SE3-spotpris, geokodning |
 | `settings.py` | Inställningar i drift + säker redigering av `config.yaml` |
 | `evaluate.py` | Backtest |
@@ -151,7 +151,8 @@ terminalvärderingen fixar, fast i utvärderingen.
   reservvägar är testade mot mockade svar. `hpmpc providers` är första
   kommandot att köra på riktig maskin.
 - **NTC-tabellen är en typisk Daikin 20 kΩ-givare**, inte uppmätt på den
-  faktiska givaren. `hpmpc calibrate-ntc` finns för att rätta det.
+  faktiska givaren. `hpmpc calibrate-ntc` finns för att rätta det, och
+  `entities.pump_outdoor_temp` för att verifiera det kontinuerligt.
 - **Docker-imagen är inte byggd** — ingen docker-daemon i utvecklingsmiljön. Den
   motsvarande wheel-installationen är verifierad, inklusive paketdata.
 - **Ingenting har körts mot en riktig Home Assistant.** HA-klienten är testad mot
@@ -178,6 +179,21 @@ terminalvärderingen fixar, fast i utvärderingen.
   värmepumpens effekt och klockan i effektuppdelningen.
 - **`hpmpc power` visar skalan *relativt* den som redan sitter i modellen.** Ett
   värde nära 1,0 betyder att förra kalibreringen fortfarande stämmer.
+- **Ett jämnt fel i NTC-tabellen absorberas av kurvanpassningen.**
+  `fit_heating_curve` regresserar uppmätt framledning mot *kommenderad* offset,
+  så konstant fel och skalfel hamnar i `curve_offset`/`curve_slope` och
+  styrningen predikterar ändå rätt. Det som *inte* absorberas är allt som hänger
+  på ett absolut tröskelvärde: pumpens `heat_stop_temp`, `perceived_min_c/max_c`
+  och semesterläget — som fungerar just genom att passera värmestoppet.
+- **Regulatorn skriver alla konfigurerade utgångar samtidigt**, inget `output_mode`.
+  Samma beslut i kelvin, grader och ohm — då kan de inte säga emot varandra. Historiken
+  läses tillbaka från kelvin-entiteten eftersom den inte kräver någon omräkning.
+- **Utetemperaturen får komma från SMHI** om ingen givare är konfigurerad. En givare
+  vid huset är bättre när den finns — den mäter luften byggnaden faktiskt förlorar
+  värme till — men det ska inte vara ett krav att ha HA i loopen för det.
+- **Kalibrera mot pumpens display, inte mot givaren.** Ett par avlästa som
+  "jag skickade R, pumpen säger T" innefattar kabelresistans, kontakt och
+  pumpens egen linjärisering. En bänkmätning av termistorn missar allt det.
 
 ---
 

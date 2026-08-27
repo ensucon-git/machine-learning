@@ -19,12 +19,24 @@ home_assistant:
 # improves the model; leave unused entries empty and they are skipped.
 entities:
   indoor_temp: sensor.vardagsrum_temperatur       # required
-  outdoor_temp: sensor.ute_temperatur             # required - the REAL outdoor temperature
+
+  # The REAL outdoor temperature. Optional: leave it empty and the current value
+  # comes from the SMHI forecast instead, so Home Assistant is not in the loop
+  # for it at all. A sensor at the house is still better when you have one - it
+  # measures the air the building actually loses heat to.
+  outdoor_temp: sensor.ute_temperatur
   price: sensor.nordpool_kwh_se3_sek_3_10_025     # only a fallback; see forecast.price_source
 
   wind_speed: sensor.vindhastighet                # m/s
   cloud_cover: sensor.molnighet                   # %, 0-100
   outdoor_humidity: sensor.ute_luftfuktighet      # %, drives the defrost derate
+
+  # What the pump itself reports as the outdoor temperature. This is the ONLY
+  # closed-loop check on the whole actuator chain - the resistor, the wiring,
+  # the connector, the NTC table and the pump's own linearisation. Without it
+  # the offset is pure open loop: we command a resistance and hope.
+  # It must be the reading for the sensor you are emulating.
+  pump_outdoor_temp: sensor.daikin_utetemperatur
   solar_radiation: ""                             # W/m2 if you own a pyranometer
   weather: weather.hemma                          # fallback if SMHI is unreachable
 
@@ -48,8 +60,20 @@ entities:
   # efficiency fit entirely, so its exact power never has to be known.
   ev_charging: binary_sensor.eh6nh5cd_charging
 
-  # The digital resistor. Must be a number or input_number entity.
-  offset_output: number.utegivare_resistans
+  # Outputs. Every one you configure is written every cycle - they are the same
+  # decision in different units, so the one you act on and the one you look at
+  # cannot disagree. All must be number or input_number entities.
+  #
+  #   offset_output            the decision itself, in kelvin
+  #   fake_temperature_output  real outdoor + offset: the temperature to show the
+  #                            pump. Feed this to your resistor conversion in
+  #                            Home Assistant, where you can calibrate the curve
+  #                            against what the pump's display actually reads.
+  #   resistance_output        ohm, converted here through the ntc: section
+  #                            below. Only if you want hpmpc to own that curve.
+  offset_output: input_number.varmepump_offset
+  fake_temperature_output: input_number.varmepump_fiktiv_utetemp
+  resistance_output: ""
   # Optional: the controller publishes its own status here.
   status_entity: sensor.hpmpc_status
 
@@ -105,10 +129,23 @@ heat_pump:
   cop_max: 8.0
   defrost_penalty: 0.12
 
-# The digital resistor. These values describe a typical Daikin 20 kohm outdoor
-# thermistor. VERIFY THEM: measure your own sensor at two or three temperatures
-# and run 'hpmpc calibrate-ntc', or take the table from the service manual.
-# Getting this wrong biases every decision the controller makes.
+# The digital resistor. These values describe a TYPICAL Daikin 20 kohm outdoor
+# thermistor. They are not measured on yours, so treat them as a starting point.
+#
+# What a wrong table actually costs, which is less than it looks:
+#   - A smooth bias is largely absorbed. 'hpmpc train' fits the heating curve by
+#     regressing measured supply temperature against the COMMANDED offset, so a
+#     constant or linear error lands in curve_slope/curve_offset and the control
+#     loop still predicts correctly.
+#   - What is NOT absorbed is anything tied to an absolute threshold: the pump's
+#     own heat_stop_temp, perceived_min_c/perceived_max_c, and holiday mode,
+#     which works precisely by pushing the pump past its heating cut-off.
+#
+# So calibrate, and verify continuously with entities.pump_outdoor_temp above.
+# The best calibration pairs are read off the pump's own display while you
+# command a known resistance - not measured on the sensor with a multimeter,
+# because the display includes the wiring, the connector and the pump's own
+# curve. 'hpmpc check' prints a ready-made --point for the current resistance.
 ntc:
   model: table
   table_temp_c: [-30, -25, -20, -15, -10, -5, 0, 5, 10, 15, 20, 25, 30]
@@ -119,12 +156,6 @@ ntc:
   resistance_max: 500000
 
 control:
-  # How the offset reaches the pump:
-  #   offset            write the offset in kelvin to a number entity
-  #   fake_temperature  write the faked outdoor temperature in degC
-  #   resistance        write the resistance in ohm for the digital potentiometer
-  output_mode: resistance
-
   offset_min: -6.0                  # more negative = pump thinks it is colder = more heat
   offset_max: 4.0
   max_change_per_cycle: 1.0         # kelvin per cycle; keeps the pump from hunting
@@ -162,6 +193,12 @@ control:
   price_scale: 1.0
   price_addition: 0.7084            # grid transfer + energy tax, SEK/kWh, EXCLUDING VAT
   price_vat_pct: 25.0               # ... so VAT lands on the whole thing: 0.7084 * 1.25 = 0.8855
+
+  # Warn when what the pump believes drifts from what was commanded, averaged
+  # over many hours. Reported, never corrected: closing a feedback loop on an
+  # actuator estimate would let one wrong entity walk the offset away quietly.
+  actuator_error_warn_c: 1.5
+  actuator_error_smoothing: 0.03    # about eight hours at a 15-minute cycle
 
   observer_gain: 1.0
   fallback_offset: 0.0              # used whenever sensors are missing or implausible

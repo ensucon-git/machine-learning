@@ -17,6 +17,15 @@ import yaml
 
 _ENV_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
 
+# Keys that used to exist. Saying what replaced them beats "unknown key".
+RETIRED_KEYS: dict[str, str] = {
+    "output_mode": (
+        "control.output_mode is gone - the controller now writes every output entity you "
+        "configure, at the same time. Set entities.offset_output (kelvin), "
+        "entities.fake_temperature_output (degrees) and/or entities.resistance_output (ohm)."
+    ),
+}
+
 
 def _expand(value: Any) -> Any:
     """Recursively expand ``${VAR}`` / ``${VAR:-default}`` in strings."""
@@ -47,6 +56,8 @@ def _build(cls: type, data: dict[str, Any] | None):
     known = {f.name for f in fields(cls)}
     for key, value in data.items():
         if key not in known:
+            if key in RETIRED_KEYS:
+                raise ValueError(RETIRED_KEYS[key])
             raise ValueError(f"Unknown configuration key '{key}' in section '{cls.__name__}'")
         ftype = hints.get(key)
         if is_dataclass(ftype) and isinstance(value, dict):
@@ -89,15 +100,33 @@ class EntityConfig:
     house_power_total: str = ""
     ev_charging: str = ""
     outdoor_humidity: str = ""
+    pump_outdoor_temp: str = ""
+    """What the heat pump itself reports as the outdoor temperature - the Daikin
+    integration exposes this. It must be the reading for the sensor you are
+    emulating; if you emulate the indoor unit's external sensor but this entity
+    reports the outdoor unit's own R1T, the comparison is meaningless."""
     weather: str = ""
     offset_output: str = ""
+    """The controller's decision, in kelvin. Always written when configured, and
+    what the history is read back from - no conversion, so nothing can drift."""
+    fake_temperature_output: str = ""
+    """The temperature to show the pump: real outdoor + offset, in degrees. This
+    is the one to feed a digital resistor whose curve you calibrate yourself
+    against the pump's display."""
+    resistance_output: str = ""
+    """Ohm, converted here through the NTC table. Only useful if you would
+    rather hpmpc owned the sensor curve than Home Assistant."""
     status_entity: str = ""
     extra: list[str] = field(default_factory=list)
 
     def required(self) -> dict[str, str]:
+        return {"indoor_temp": self.indoor_temp}
+
+    def outputs(self) -> dict[str, str]:
         return {
-            "indoor_temp": self.indoor_temp,
-            "outdoor_temp": self.outdoor_temp,
+            "offset": self.offset_output,
+            "fake_temperature": self.fake_temperature_output,
+            "resistance": self.resistance_output,
         }
 
     def all_sensor_ids(self) -> list[str]:
@@ -118,7 +147,10 @@ class EntityConfig:
             self.house_power_total,
             self.ev_charging,
             self.outdoor_humidity,
+            self.pump_outdoor_temp,
             self.offset_output,
+            self.fake_temperature_output,
+            self.resistance_output,
         ]
         return [n for n in [*names, *self.extra] if n]
 
@@ -239,7 +271,6 @@ class PowerConfig:
 
 @dataclass
 class ControlConfig:
-    output_mode: str = "offset"  # "offset" | "fake_temperature" | "resistance"
     offset_min: float = -8.0
     offset_max: float = 5.0
     max_change_per_cycle: float = 1.5
@@ -291,6 +322,11 @@ class ControlConfig:
     Leave at 0 when the price entity already includes VAT."""
     dry_run: bool = False
     max_data_age_minutes: float = 45.0
+    actuator_error_warn_c: float = 1.5
+    """Warn when what the pump believes differs from what was commanded by more
+    than this, averaged over many cycles. This is the only closed-loop check on
+    the resistor and the NTC table; without it the actuator is pure open loop."""
+    actuator_error_smoothing: float = 0.03
     observer_gain: float = 1.0
     fallback_offset: float = 0.0
     warm_start_hours: float = 24.0
@@ -433,8 +469,6 @@ class Config:
         if missing:
             raise ValueError(f"entities.{', entities.'.join(missing)} must be configured")
         c = self.control
-        if c.output_mode not in {"offset", "fake_temperature", "resistance"}:
-            raise ValueError(f"control.output_mode '{c.output_mode}' is not valid")
         if c.offset_min >= c.offset_max:
             raise ValueError("control.offset_min must be below control.offset_max")
         if not 0.0 <= c.comfort_below <= c.hard_below:
@@ -455,6 +489,11 @@ class Config:
             raise ValueError("control.step_minutes and control.horizon_hours must be positive")
         if self.optimizer.elites >= self.optimizer.population:
             raise ValueError("optimizer.elites must be smaller than optimizer.population")
+        if not self.entities.outdoor_temp and self.forecast.weather_source != "smhi":
+            raise ValueError(
+                "Without entities.outdoor_temp the current outdoor temperature has to come from "
+                "somewhere: set forecast.weather_source to 'smhi', or configure the sensor."
+            )
         p = self.power
         if p.source not in {"auto", "heatpump_meter", "house", "none"}:
             raise ValueError(f"power.source '{p.source}' is not valid")

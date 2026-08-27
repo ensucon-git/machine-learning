@@ -494,6 +494,12 @@ def cmd_calibrate_ntc(args: argparse.Namespace) -> int:
     print("  model: beta")
     print(f"  r25: {r25:.0f}")
     print(f"  beta: {beta:.0f}")
+    print(
+        "\nThe best pairs are not measured on the sensor with a multimeter - they are read off\n"
+        "the pump's own display while you command a known resistance. That closes the loop over\n"
+        "the wiring, the connector and the pump's own linearisation, which a bench measurement\n"
+        "misses. 'hpmpc check' prints a ready-made --point for the resistance in effect now."
+    )
     return 0
 
 
@@ -519,17 +525,24 @@ def cmd_check(args: argparse.Namespace) -> int:
         age_txt = f"{age.total_seconds() / 60:.0f} min ago" if age else "unknown age"
         print(f"  ok       {name:16} {entity_id} = {state.state} ({age_txt})")
 
-    if cfg.entities.offset_output:
-        domain = cfg.entities.offset_output.split(".", 1)[0]
-        if domain not in {"number", "input_number"}:
-            print(f"  WARNING  offset_output must be a number/input_number entity, got '{domain}'")
-            ok = False
+    configured = {k: v for k, v in cfg.entities.outputs().items() if v}
+    if configured:
+        for kind, entity_id in configured.items():
+            domain = entity_id.split(".", 1)[0]
+            if domain not in {"number", "input_number"}:
+                print(f"  WARNING  {kind} output must be a number/input_number entity, got '{domain}'")
+                ok = False
     else:
-        print("  WARNING  no offset_output entity configured - the controller will run read-only")
+        print("  WARNING  no output entity configured - the controller will run read-only")
+
+    if not cfg.entities.outdoor_temp:
+        print("  note     no outdoor sensor; the current outdoor temperature comes from the forecast")
 
     if cfg.entities.weather:
         forecast = ha.weather_forecast(cfg.entities.weather)
         print(f"  {'ok' if forecast else 'WARNING'}       weather forecast: {len(forecast)} hourly entries")
+
+    _check_actuator_calibration(cfg, ha)
 
     try:
         _, params, residual, metadata = load_model(cfg)
@@ -540,6 +553,59 @@ def cmd_check(args: argparse.Namespace) -> int:
 
     print("\nAll checks passed." if ok else "\nSome checks failed; see above.")
     return 0 if ok else 1
+
+
+def _check_actuator_calibration(cfg: Config, ha: HomeAssistant) -> None:
+    """Compare what the pump believes with what the offset says it should.
+
+    Everything else about the actuator is open loop: we command a resistance and
+    trust the NTC table. This is the one place the loop closes.
+    """
+    from .controller import ControllerState
+    from .ntc import resistance_to_temperature
+
+    if not cfg.entities.pump_outdoor_temp:
+        print(
+            "\nActuator: entities.pump_outdoor_temp is not set, so nothing verifies that the pump\n"
+            "          really sees what was commanded. Many pumps only show that number on their\n"
+            "          own display, in which case this stays a job you do by eye at commissioning:\n"
+            "          command a known value, read the display, and check that they agree.\n"
+            "          'hpmpc plan' prints the temperature the pump should be seeing right now."
+        )
+        return
+
+    reported = ha.get_state(cfg.entities.pump_outdoor_temp)
+    outdoor = ha.get_state(cfg.entities.outdoor_temp) if cfg.entities.outdoor_temp else None
+    if reported is None or reported.numeric is None or outdoor is None or outdoor.numeric is None:
+        print("\nActuator: pump or outdoor temperature unavailable, cannot check calibration")
+        return
+
+    state = ControllerState.load(cfg.paths.state_file)
+    offset = state.last_offset if state else 0.0
+    commanded = outdoor.numeric + offset
+    error = reported.numeric - commanded
+
+    print("\nActuator calibration")
+    print(f"  real outdoor        {outdoor.numeric:+.2f} C")
+    print(f"  offset applied      {offset:+.2f} K")
+    print(f"  should be showing   {commanded:+.2f} C")
+    print(f"  pump believes       {reported.numeric:+.2f} C   ({cfg.entities.pump_outdoor_temp})")
+    print(f"  error               {error:+.2f} K")
+    if state and state.actuator_samples > 20:
+        print(f"  error, smoothed     {state.actuator_error_c:+.2f} K over {state.actuator_samples} cycles")
+
+    raw = ha.get_state(cfg.entities.resistance_output) if cfg.entities.resistance_output else None
+    if raw is not None and raw.numeric:
+        implied = float(resistance_to_temperature(raw.numeric, cfg.ntc))
+        print(f"  we sent             {raw.numeric:.0f} ohm, which our table calls {implied:+.2f} C")
+        print(
+            f"\n  -> a calibration pair for your pump: --point={reported.numeric:.1f}:{raw.numeric:.0f}\n"
+            "     Collect two or three at different outdoor temperatures and feed them to\n"
+            "     'hpmpc calibrate-ntc'. Pairs taken from the pump's own display beat measuring\n"
+            "     the sensor: they include the wiring, the connector and the pump's own curve."
+        )
+    elif abs(error) > cfg.control.actuator_error_warn_c:
+        print(f"\n  WARNING: {abs(error):.1f} K off. Check the NTC table before running for real.")
 
 
 def cmd_collect(args: argparse.Namespace) -> int:
@@ -685,8 +751,16 @@ def cmd_demo(args: argparse.Namespace) -> int:
 # ---------------------------------------------------------------- helpers
 
 
+def _format_outputs(report: dict[str, Any]) -> str:
+    outputs = report.get("outputs") or []
+    if not outputs:
+        return "(no output entity configured)"
+    return "\n".join(
+        f"    {o['entity_id']:44} {o['value']:>12} {o['unit']}" for o in outputs
+    )
+
+
 def _print_plan(report: dict[str, Any]) -> None:
-    out = report.get("output", {})
     mpc = report.get("mpc")
     if not mpc:
         # No plan means the controller fell back. Say why in words: a JSON dump
@@ -696,7 +770,8 @@ def _print_plan(report: dict[str, Any]) -> None:
             f"\nNo plan this cycle - the controller fell back to {report.get('offset', 0.0):+.2f} K"
             f"  [{report.get('mode')}]"
         )
-        print(f"Would write: {out.get('entity_id', '(no entity)')} = {out.get('value')} {out.get('unit')}")
+        print("Would write:")
+        print(_format_outputs(report))
         for problem in report.get("problems", []):
             print(f"  problem: {problem}")
         for note in report.get("notes", []):
@@ -711,10 +786,11 @@ def _print_plan(report: dict[str, Any]) -> None:
                 suffix = f"   ({age:.0f} min old)" if isinstance(age, (int, float)) else ""
                 print(f"  {key:16}{value}{suffix}")
         return
-    print(
-        f"\nOffset now: {report['offset']:+.2f} K  ->  {out.get('entity_id', '(no entity)')} "
-        f"= {out.get('value')} {out.get('unit')}   [{report.get('mode')}]"
-    )
+    print(f"\nOffset now: {report['offset']:+.2f} K   [{report.get('mode')}]")
+    print(_format_outputs(report))
+    source = report.get("readings", {}).get("t_outdoor_source")
+    if source:
+        print(f"    outdoor temperature from {source}")
     print(
         f"Horizon: {mpc['horizon_kwh']} kWh / {mpc['horizon_cost_sek']} SEK; "
         f"indoor {mpc['predicted_indoor_min']}-{mpc['predicted_indoor_max']} C "
@@ -739,7 +815,7 @@ def _print_plan(report: dict[str, Any]) -> None:
 
 def _print_cycle(report: dict[str, Any]) -> None:
     mpc = report.get("mpc", {})
-    out = report.get("output", {})
+    outputs = report.get("outputs") or []
     stamp = report["timestamp"][11:16]
     extra = ""
     if mpc:
@@ -749,9 +825,10 @@ def _print_cycle(report: dict[str, Any]) -> None:
             f" | {mpc.get('horizon_cost_sek')} SEK/horizon"
             f" | saves {mpc.get('predicted_saving_pct')} %"
         )
+    rendered = ", ".join(f"{o['value']} {o['unit']}" for o in outputs) or "nothing"
     print(
         f"[{stamp}] {report.get('mode'):18} offset {report.get('offset', 0.0):+5.2f} K"
-        f" -> {out.get('value')} {out.get('unit')}"
+        f" -> {rendered}"
         f" {'(written)' if report.get('applied') else '(not written)'}{extra}"
     )
     for note in report.get("notes", []):

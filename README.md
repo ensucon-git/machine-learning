@@ -1011,17 +1011,102 @@ minuter utan kommando.
 reläet för att ta över. Strömavbrott, wifi-tapp, kraschad firmware — pumpen faller
 tillbaka på sin egen givare.
 
-### Tre sätt att få ut styrsignalen
+### Utgångarna
 
-| `control.output_mode` | Skriver | Använd när |
+Regulatorn fattar **ett** beslut — en offset i kelvin — och publicerar det i så många
+former som du har någonstans att lägga dem. Det finns inget läge att välja mellan:
+alla konfigurerade entiteter skrivs varje cykel, för det är samma tal i olika enheter,
+och då kan den du agerar på och den du tittar på aldrig säga emot varandra.
+
+| entitet | enhet | vad det är |
 |---|---|---|
-| `offset` | kelvin | pumpen har en egen offset-parameter |
-| `fake_temperature` | °C | din hårdvara tar emot en temperatur |
-| `resistance` | ohm | hpmpc räknar om via NTC-kurvan åt dig — **det här är läget för ESP32-uppsättningen** |
+| `offset_output` | K | beslutet självt. Historiken läses tillbaka härifrån, utan omräkning |
+| `fake_temperature_output` | °C | verklig utetemperatur + offset — **temperaturen att visa pumpen** |
+| `resistance_output` | Ω | omräknat här via `ntc:`-sektionen, om du hellre vill att hpmpc äger den kurvan |
 
-För `resistance`: ta hellre tabellen ur pumpens servicemanual (`ntc.model: table`) än
-beta-modellen. Riktiga givare följer inte en tvåparametersmodell över hela spannet —
-`hpmpc calibrate-ntc` säger till när den märker det.
+**För din uppsättning är `fake_temperature_output` den intressanta.** Den ger dig en
+färdig temperatur; omräkningen till ohm gör du i Home Assistant, där du kan justera
+kurvan mot vad pumpens display faktiskt visar. `ha/packages/heatpump_mpc.yaml`
+innehåller den mallsensorn med R25 och B som du kan ändra på plats.
+
+Det är också det praktiska svaret på att pumpens egen avläsning oftast bara finns på
+displayen: kalibreringen blir en engångssak du gör med ögonen, och den bor på det
+ställe där du kan justera den utan att röra regulatorn.
+
+### Kalibreringen — och varför den är mindre skör än den låter
+
+Tabellen som levereras är en *typisk* Daikin 20 kΩ-givare. Den är inte mätt på
+din. Det låter som ett problem, och det är delvis ett — men mindre än man tror,
+av ett skäl som är värt att förstå:
+
+**Ett jämnt fel absorberas av modellanpassningen.** `hpmpc train` anpassar
+värmekurvan genom att regressera *uppmätt framledningstemperatur* mot
+*kommenderad offset*. Har ställdonet en konstant förskjutning eller ett skalfel
+hamnar det i `curve_offset` och `curve_slope`, och styrningen predikterar ändå
+rätt framledning för en given kommenderad offset. Loopen sluts i anpassningen.
+
+Räknat på det, med vår tabell mot olika verkliga givare:
+
+| verklig givare | fel vid −15 °C | vid 0 °C | vid +10 °C |
+|---|---|---|---|
+| 20 kΩ / B=3950 (det tabellen approximerar) | +0,7 K | −0,1 K | −0,3 K |
+| 20 kΩ / B=3700 (annan batch) | −1,6 K | −1,7 K | −1,3 K |
+| 22 kΩ / B=3950 (5 % tolerans) | +2,3 K | +1,7 K | +1,6 K |
+| **10 kΩ / B=3950 (fel givarfamilj)** | **−10,5 K** | **−12,6 K** | **−13,7 K** |
+
+De tre översta är nästan rena förskjutningar — de äts upp av kurvanpassningen.
+Den fjärde är katastrofal, men den märks omedelbart.
+
+**Det som inte absorberas är allt som hänger på ett absolut tröskelvärde:**
+pumpens eget `heat_stop_temp`, `perceived_min_c`/`perceived_max_c`, och
+semesterläget — som fungerar just genom att visa pumpen en temperatur ovanför
+värmestoppet. Tror du att du visar +14 °C men pumpen ser +1 °C, slutar den
+aldrig värma och nedsänkningen uteblir tyst.
+
+### Kalibrera mot pumpen, inte mot givaren
+
+Det naturliga är att mäta termistorn med multimeter. Gör inte det. Gör så här
+i stället:
+
+```bash
+hpmpc check
+```
+```
+Actuator calibration
+  real outdoor        -6.40 C
+  offset applied      +1.50 K
+  should be showing   -4.90 C
+  pump believes       -4.80 C   (sensor.daikin_utetemperatur)
+  error               +0.10 K
+  we sent             88184 ohm, which our table calls -4.90 C
+
+  -> a calibration pair for your pump: --point=-4.8:88184
+```
+
+Ett par avläst så — "jag skickade R ohm, pumpen säger T grader" — innefattar
+kabelresistansen, kontakten och pumpens egen linjärisering. En bänkmätning av
+termistorn missar allt det. Samla två eller tre vid väl åtskilda temperaturer
+och mata in dem:
+
+```bash
+hpmpc calibrate-ntc --point=-8.4:120000 --point=2.1:58000 --point=9.6:41000
+```
+
+### Och om pumpens avläsning går att komma åt
+
+Kan du få ut pumpens egen utetemperatur som en entitet — vissa integrationer
+exponerar den — så sätt `entities.pump_outdoor_temp`. Regulatorn jämför då varje cykel vad pumpen tror mot vad den
+kommenderades, glidande medelvärdesbildat över cirka åtta timmar — pumpen filtrerar
+sin egen avläsning, så en enskild cykel säger inget om kalibrering, bara om
+eftersläpning.
+
+Det är **den enda återkopplade kontrollen** på hela ställdonskedjan: motståndet,
+kablaget, kontakten, NTC-tabellen och pumpens linjärisering. Utan den är offseten
+ren öppen styrning — vi skickar en resistans och hoppas.
+
+Den *rapporterar*, den korrigerar aldrig. Att sluta en återkopplingsslinga på en
+ställdonsskattning skulle låta en felaktig entitet tyst vandra iväg med offseten,
+vilket är precis det fel kontrollen finns för att fånga.
 
 ### Idrifttagning
 

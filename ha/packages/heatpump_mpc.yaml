@@ -50,6 +50,28 @@ input_datetime:
 # rather than applied.
 # ---------------------------------------------------------------------------
 input_number:
+  # ---------------------------------------------------------------------
+  # What the controller writes. Both are the same decision in different units;
+  # act on the one that suits your hardware and read the other on a dashboard.
+  # ---------------------------------------------------------------------
+  varmepump_offset:
+    name: MPC offset
+    min: -25
+    max: 25
+    step: 0.01
+    unit_of_measurement: "K"
+    icon: mdi:thermometer-lines
+    mode: box
+
+  varmepump_fiktiv_utetemp:
+    name: MPC fictitious outdoor temperature
+    min: -40
+    max: 40
+    step: 0.01
+    unit_of_measurement: "°C"
+    icon: mdi:thermometer
+    mode: box
+
   eloverforing_kr_per_kwh:
     name: Grid transfer + energy tax
     min: 0
@@ -130,6 +152,27 @@ input_number:
 
 template:
   - sensor:
+      # Your own calibration lives here: the curve that turns the fictitious
+      # temperature into a resistance for the digital pot. Fit it against what
+      # the pump's DISPLAY reads, not against a bench measurement of the
+      # thermistor - the display includes the wiring, the connector and the
+      # pump's own linearisation.
+      #
+      # This example is a 20 kohm / B=3950 NTC. Adjust R25 and B until commanding
+      # a value makes the pump's display agree with it.
+      - name: "Utegivare mAlresistans"
+        unique_id: hpmpc_target_resistance
+        unit_of_measurement: "Ω"
+        state: >
+          {% set t = states('input_number.varmepump_fiktiv_utetemp') | float(none) %}
+          {% if t is none %}
+            {{ none }}
+          {% else %}
+            {% set r25 = 20000 %}
+            {% set beta = 3950 %}
+            {{ (r25 * (2.718281828459045 ** (beta * (1/(t + 273.15) - 1/298.15)))) | round(0) }}
+          {% endif %}
+
       # Minutes since the controller last reported in - drives the dead-man switch.
       - name: "MPC age"
         unique_id: hpmpc_age_minutes
@@ -168,11 +211,19 @@ template:
           setpoint: "{{ state_attr('sensor.hpmpc_status', 'setpoint') }}"
           comfort_band: "{{ state_attr('sensor.hpmpc_status', 'comfort_band') }}"
 
+      # The one closed-loop check on the actuator. A steady non-zero value means
+      # the NTC table does not match what the pump is really reading.
+      - name: "MPC actuator error"
+        unique_id: hpmpc_actuator_error
+        unit_of_measurement: "K"
+        state_class: measurement
+        state: "{{ state_attr('sensor.hpmpc_status', 'actuator_error_c') | float(0) }}"
+
       - name: "Heat pump perceived outdoor temperature"
         unique_id: hpmpc_perceived_outdoor
         unit_of_measurement: "°C"
         device_class: temperature
-        state: "{{ states('sensor.emulated_outdoor_temperature') }}"
+        state: "{{ states('input_number.varmepump_fiktiv_utetemp') }}"
 
   - binary_sensor:
       - name: "MPC healthy"
@@ -264,6 +315,56 @@ automation:
           entity_id: input_select.varmepump_lage
         data:
           option: normal
+
+  # ---- Push the calibrated resistance to the emulator -------------------
+  # hpmpc gives the fictitious temperature; the curve above turns it into ohm.
+  # Keeping the curve here means you can adjust it against the pump's display
+  # without touching the controller.
+  - alias: "MPC to digital resistor"
+    id: hpmpc_to_resistor
+    mode: single
+    trigger:
+      - platform: state
+        entity_id: sensor.utegivare_malresistans
+    condition:
+      - condition: state
+        entity_id: input_boolean.varmepump_mpc_aktiv
+        state: "on"
+      - condition: template
+        value_template: "{{ states('sensor.utegivare_malresistans') | float(0) > 0 }}"
+    action:
+      - service: number.set_value
+        target:
+          entity_id: number.utegivare_resistans
+        data:
+          value: "{{ states('sensor.utegivare_malresistans') | float }}"
+
+  # ---- Actuator calibration drift --------------------------------------
+  # Everything about the offset is open loop except this. If what the pump
+  # believes drifts from what was commanded, either the NTC table is wrong or
+  # the hardware has changed - a wiper failing, a connector corroding.
+  - alias: "MPC actuator calibration drift"
+    id: hpmpc_actuator_drift
+    mode: single
+    trigger:
+      - platform: numeric_state
+        entity_id: sensor.mpc_actuator_error
+        above: 1.5
+        for: "02:00:00"
+      - platform: numeric_state
+        entity_id: sensor.mpc_actuator_error
+        below: -1.5
+        for: "02:00:00"
+    action:
+      - service: persistent_notification.create
+        data:
+          title: "Heat pump MPC"
+          message: >
+            The pump believes it is {{ states('sensor.mpc_actuator_error') }} K away from
+            what the controller commanded. Either the NTC table does not match the sensor
+            the pump reads, or something in the resistor chain has changed. Run
+            'hpmpc check' - it prints a calibration pair you can feed straight to
+            'hpmpc calibrate-ntc'.
 
   # ---- Backup heater warning -------------------------------------------
   - alias: "MPC backup heater warning"

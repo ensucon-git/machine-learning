@@ -21,6 +21,7 @@ def cfg(tmp_path) -> Config:
     config.entities.wind_speed = "sensor.wind"
     config.entities.weather = "weather.home"
     config.entities.offset_output = "number.offset"
+    config.entities.fake_temperature_output = "number.fake_temp"
     config.control.horizon_hours = 12.0
     config.control.block_hours = 3.0
     config.control.warm_start_hours = 0.0

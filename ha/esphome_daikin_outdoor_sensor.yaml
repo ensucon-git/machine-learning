@@ -2,8 +2,15 @@
 # ESP32 outdoor-sensor emulator for a Daikin Altherma
 # (ERLQ016CAW1 outdoor unit + EHVH16S26CB9W hydrobox)
 #
-# hpmpc writes a resistance in ohm to number.utegivare_resistans (control.
-# output_mode: resistance) and this node presents it to the pump.
+# Two ways to drive this node:
+#
+#   a) hpmpc writes ohm straight here (entities.resistance_output), owning the
+#      NTC curve itself; or
+#   b) hpmpc writes the fictitious temperature (entities.fake_temperature_output)
+#      and Home Assistant converts it, which is usually easier because the curve
+#      then lives where you can adjust it against the pump's display.
+#
+# The HA package ships the template sensor for (b).
 #
 #
 # WHICH SENSOR TO FAKE - read this first, it matters more than the wiring
@@ -204,14 +211,19 @@ output:
 #    output with a multimeter. The two rheostats have real wiper resistance
 #    (tens of ohms each) and a tolerance of a few percent - measure, do not
 #    assume.
-# 2. Measure the pump's OWN thermistor at two or three known temperatures
-#    (ice water is a free and accurate 0 C) and fit the curve:
-#       hpmpc calibrate-ntc --point=0:66800 --point=20:25354
-#    Paste the result into config.yaml. This calibration is what makes the
-#    faked temperature mean what you think it means.
+# 2. Calibrate against the PUMP, not against the sensor. Connect the emulator,
+#    command a resistance, and read what the pump's display says it means.
+#    Repeat at two or three well-separated values:
+#       hpmpc calibrate-ntc --point=-8.4:120000 --point=2.1:58000 --point=9.6:41000
+#    Pairs taken this way include the wiring resistance, the connector and the
+#    pump's own linearisation - all of which a bench measurement of the
+#    thermistor misses. 'hpmpc check' prints a ready-made --point for whatever
+#    resistance is in effect right now.
 # 3. Connect the pump with control.dry_run: true and offset 0. The pump's own
 #    display should read the real outdoor temperature. If it does not, the
-#    calibration is wrong - fix it before going further.
+#    calibration is wrong - fix it before going further. Then set
+#    entities.pump_outdoor_temp so the controller keeps checking this by itself
+#    forever, instead of you having to remember to.
 # 4. Command a steady -2 K offset for a day and check that the leaving water
 #    temperature rises by about slope * 2 K. Only then let the controller run.
 # ---------------------------------------------------------------------------
