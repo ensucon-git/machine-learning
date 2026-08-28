@@ -214,6 +214,28 @@ class HomeAssistant:
             )
         self.call_service(domain, "set_value", {"entity_id": entity_id, "value": float(value)})
 
+    def publish_state(self, entity_id: str, state: Any,
+                      attributes: dict[str, Any] | None = None) -> None:
+        """Create or update an entity directly, without a helper to write into.
+
+        Home Assistant's states API lets an outside program put an entity into
+        the state machine. Nothing has to exist first - the entity appears on
+        the first call - which is what makes this the easy way to get a reading
+        out of hpmpc and onto a dashboard.
+
+        The catch, and it matters for anything in the control path: an entity
+        published this way lives only in memory. A Home Assistant restart
+        forgets it until the next control cycle writes it again, and it has no
+        unique_id, so it cannot be renamed or assigned to an area in the UI. A
+        helper you define in YAML restores its value across a restart; this does
+        not.
+        """
+        self._request(
+            "POST",
+            f"/api/states/{entity_id}",
+            json={"state": state, "attributes": attributes or {}},
+        )
+
     def weather_forecast(self, entity_id: str, forecast_type: str = "hourly") -> list[dict[str, Any]]:
         """Return the hourly forecast for a weather entity.
 

@@ -153,7 +153,7 @@ terminalvärderingen fixar, fast i utvärderingen.
 
 ## Verifierat kontra antaget
 
-**Verifierat** (311 tester, syntetiskt hus med känd sanning):
+**Verifierat** (315 tester, syntetiskt hus med känd sanning):
 - Identifieringen återfinner värmekurva (lutning 0,3495 mot 0,35, R² 0,997) och
   husparametrar (UA +3 %, Ci +4 %, `k_wind` +3 %, plattans tidskonstant inom 8 %).
 - Prediktionsfel 0,085 °C över 12 h, 0,066 °C över 48 h (persistensbaslinje 1,01 °C).
@@ -239,7 +239,13 @@ terminalvärderingen fixar, fast i utvärderingen.
   styrningen predikterar ändå rätt. Det som *inte* absorberas är allt som hänger
   på ett absolut tröskelvärde: pumpens `heat_stop_temp`, `perceived_min_c/max_c`
   och semesterläget — som fungerar just genom att passera värmestoppet.
-- **hpmpc skapar inga entiteter i HA** — det skriver in i hjälpare som
+- **Utgångar kan vara `sensor.*` som hpmpc skapar själv** via states-API:t, eller
+  hjälpare som redan finns. Skillnaden är hållbarhet: en publicerad sensor lever
+  bara i minnet och glöms vid HA-omstart tills nästa cykel. Därför ska ställdonet
+  drivas från en `input_number`, som återställer sitt värde — sensorer är för
+  instrumentpaneler. `hpmpc check` säger `pending`, inte `MISSING`, för en sensor
+  som ännu inte skapats.
+- **Normalfallet: hpmpc skapar inga entiteter i HA** — det skriver in i hjälpare som
   `ha/packages/heatpump_mpc.yaml` skapar (`input_number.varmepump_offset`,
   `input_number.varmepump_fiktiv_utetemp`). De står på `unknown` tills första
   cykeln kört; därför faller resistansmallen tillbaka på den riktiga

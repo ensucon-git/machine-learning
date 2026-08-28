@@ -18,6 +18,16 @@ import yaml
 _ENV_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
 
 # Keys that used to exist. Saying what replaced them beats "unknown key".
+OUTPUT_DOMAINS = {"number", "input_number", "sensor"}
+"""Where the controller may write its decision.
+
+``number``/``input_number`` are helpers that have to exist first, and that keep
+their value across a Home Assistant restart - which is what the actuator should
+be driven from. ``sensor`` entities are created by hpmpc itself through the
+states API, so nothing has to be defined first, at the cost of vanishing on a
+restart until the next cycle.
+"""
+
 RETIRED_KEYS: dict[str, str] = {
     "output_mode": (
         "control.output_mode is gone - the controller now writes every output entity you "
@@ -542,6 +552,12 @@ class Config:
             raise ValueError("control.step_minutes and control.horizon_hours must be positive")
         if self.optimizer.elites >= self.optimizer.population:
             raise ValueError("optimizer.elites must be smaller than optimizer.population")
+        for kind, entity_id in self.entities.outputs().items():
+            if entity_id and entity_id.split(".", 1)[0] not in OUTPUT_DOMAINS:
+                raise ValueError(
+                    f"entities.{kind}_output '{entity_id}' must be a "
+                    f"{', '.join(sorted(OUTPUT_DOMAINS))} entity"
+                )
         t = self.training
         if t.archive and 0 < t.archive_keep_days < t.history_days:
             raise ValueError(

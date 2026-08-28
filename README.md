@@ -1159,6 +1159,17 @@ och då kan den du agerar på och den du tittar på aldrig säga emot varandra.
 | `resistance_output` | Ω | omräknat här via `ntc:`-sektionen, om du hellre vill att hpmpc äger den kurvan |
 | `wiper_output` | steg | potentiometerposition, via `ntc:` **och** `pot:`, om hpmpc ska äga båda kurvorna |
 
+Varje utgång kan peka på **antingen** en hjälpare du definierat (`input_number.*`
+eller `number.*`) **eller** en `sensor.*` som hpmpc skapar åt sig själv. Det
+senare kräver ingen YAML alls — entiteten dyker upp vid första styrcykeln, med
+enhet och device class satta. Priset är att den bara lever i minnet: en
+HA-omstart glömmer den tills nästa cykel, och den går inte att döpa om i
+gränssnittet.
+
+Därför: **driv ställdonet från en hjälpare**, som återställer sitt värde efter en
+omstart, och publicera gärna resten som sensorer så slipper du definiera dem. Att
+blanda är helt normalt.
+
 Och åt andra hållet finns en avläsning: `entities.pot_wiper` — vad ESP32:n rapporterar
 att den faktiskt driver potentiometern till. Utan pumpens egen avläsning är det den enda
 återkopplingen som finns i hela ställdonskedjan, och den fångar det en korrekt NTC-tabell

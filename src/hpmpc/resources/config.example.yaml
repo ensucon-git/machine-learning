@@ -72,7 +72,23 @@ entities:
 
   # Outputs. Every one you configure is written every cycle - they are the same
   # decision in different units, so the one you act on and the one you look at
-  # cannot disagree. All must be number or input_number entities.
+  # cannot disagree.
+  #
+  # Two kinds of entity are accepted, and the difference matters:
+  #
+  #   input_number.* / number.*  a helper you define first (the shipped Home
+  #                              Assistant package defines both of these). It
+  #                              keeps its value across a restart, so this is
+  #                              what the actuator should be driven from.
+  #   sensor.*                   hpmpc creates it itself on the first cycle -
+  #                              nothing to define, it just appears. But it
+  #                              lives only in memory: a Home Assistant restart
+  #                              forgets it until the next cycle, and it cannot
+  #                              be renamed in the UI. Good for dashboards,
+  #                              wrong for the control path.
+  #
+  # Mixing them is fine and often right: drive the resistor from the helper,
+  # publish the rest as sensors so they need no YAML.
   #
   #   offset_output            the decision itself, in kelvin
   #   fake_temperature_output  real outdoor + offset: the temperature to show the
@@ -87,6 +103,8 @@ entities:
   fake_temperature_output: input_number.varmepump_fiktiv_utetemp
   resistance_output: ""
   wiper_output: ""
+  # Example of a published one, needing no helper at all:
+  #   resistance_output: sensor.hpmpc_target_resistance
   # Optional: the controller publishes its own status here.
   status_entity: sensor.hpmpc_status
 

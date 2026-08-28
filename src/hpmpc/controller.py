@@ -841,7 +841,12 @@ class Controller:
         written = 0
         for output in outputs:
             try:
-                self.ha.set_number(output["entity_id"], output["value"])
+                if output["entity_id"].split(".", 1)[0] == "sensor":
+                    self.ha.publish_state(
+                        output["entity_id"], output["value"], _output_attributes(output)
+                    )
+                else:
+                    self.ha.set_number(output["entity_id"], output["value"])
                 output["written"] = True
                 written += 1
             except HomeAssistantError as exc:
@@ -888,11 +893,7 @@ class Controller:
             "updated": report.get("timestamp"),
         }
         try:
-            self.ha._request(  # noqa: SLF001 - deliberate use of the raw states endpoint
-                "POST",
-                f"/api/states/{entity_id}",
-                json={"state": round(float(report.get("offset", 0.0)), 2), "attributes": attributes},
-            )
+            self.ha.publish_state(entity_id, round(float(report.get("offset", 0.0)), 2), attributes)
         except HomeAssistantError as exc:
             log.debug("Could not publish status entity: %s", exc)
 
@@ -901,6 +902,27 @@ class Controller:
         self.state.updated_at = now.isoformat()
         self.state.last_summary = report.get("mpc", {})
         self.state.save(self.cfg.paths.state_file)
+
+
+# Enough for Home Assistant to render a published output properly: the unit
+# drives the graph axis, the device class the icon and the history card.
+OUTPUT_METADATA: dict[str, dict[str, str]] = {
+    "offset": {"friendly_name": "MPC offset", "icon": "mdi:thermometer-lines",
+               "state_class": "measurement"},
+    "fake_temperature": {"friendly_name": "MPC fictitious outdoor temperature",
+                         "device_class": "temperature", "state_class": "measurement"},
+    "resistance": {"friendly_name": "MPC target resistance", "icon": "mdi:resistor",
+                   "state_class": "measurement"},
+    "wiper": {"friendly_name": "MPC target wiper position", "icon": "mdi:tune-variant",
+              "state_class": "measurement"},
+}
+
+
+def _output_attributes(output: dict[str, Any]) -> dict[str, Any]:
+    units = {"K": "K", "degC": "°C", "ohm": "Ω", "step": "step"}
+    attributes = dict(OUTPUT_METADATA.get(str(output["kind"]), {}))
+    attributes["unit_of_measurement"] = units.get(str(output["unit"]), str(output["unit"]))
+    return attributes
 
 
 def _plan_table(forecast: pd.DataFrame, result: MpcResult) -> list[dict[str, Any]]:

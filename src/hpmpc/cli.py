@@ -28,7 +28,7 @@ from typing import Any
 import numpy as np
 
 from . import __version__
-from .config import Config, load_config
+from .config import OUTPUT_DOMAINS, Config, load_config
 from .controller import Controller
 from .archive import build_training_frame, open_archive
 from .dataset import describe, load_dataset, save_dataset
@@ -618,11 +618,17 @@ def cmd_check(args: argparse.Namespace) -> int:
     print(f"Home Assistant reachable at {cfg.home_assistant.base_url}")
 
     ok = True
+    published = {v for v in cfg.entities.outputs().values() if v.startswith("sensor.")}
     for name, entity_id in vars(cfg.entities).items():
         if not entity_id or name == "extra":
             continue
         state = ha.get_state(entity_id)
         if state is None:
+            if entity_id in published:
+                # hpmpc creates these itself on the first cycle; not existing
+                # yet is the normal state of a fresh install, not a fault.
+                print(f"  pending  {name:16} {entity_id} (hpmpc creates it on the first cycle)")
+                continue
             print(f"  MISSING  {name:16} {entity_id}")
             ok = False
             continue
@@ -634,9 +640,14 @@ def cmd_check(args: argparse.Namespace) -> int:
     if configured:
         for kind, entity_id in configured.items():
             domain = entity_id.split(".", 1)[0]
-            if domain not in {"number", "input_number"}:
-                print(f"  WARNING  {kind} output must be a number/input_number entity, got '{domain}'")
+            if domain not in OUTPUT_DOMAINS:
+                print(f"  WARNING  {kind} output must be a "
+                      f"{'/'.join(sorted(OUTPUT_DOMAINS))} entity, got '{domain}'")
                 ok = False
+        if published:
+            print("  note     sensor outputs are published by hpmpc, so no helper is needed - but\n"
+                  "           they are forgotten on a Home Assistant restart until the next cycle.\n"
+                  "           Drive the actuator from an input_number, which restores its value.")
     else:
         print("  WARNING  no output entity configured - the controller will run read-only")
 

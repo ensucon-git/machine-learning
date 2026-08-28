@@ -75,6 +75,26 @@ firmware:
 Kolla entitets-id:t under **Utvecklarverktyg → Tillstånd** — det beror på vad din
 nod heter, inte på vad som står här.
 
+#### Vill du hellre att hpmpc skapar sensorerna själv?
+
+Det går. Peka en utgång på en `sensor.*` i stället för en hjälpare, så skapar
+hpmpc entiteten vid första cykeln — ingen YAML, ingen hjälpare:
+
+```yaml
+entities:
+  offset_output: sensor.hpmpc_offset
+  fake_temperature_output: sensor.hpmpc_fiktiv_utetemp
+```
+
+De dyker upp med enhet och device class satta, så de ritas rätt i historiken.
+Men de lever bara i minnet: **en omstart av Home Assistant glömmer dem** tills
+nästa styrcykel, och de går inte att döpa om i gränssnittet. En hjälpare
+återställer sitt värde direkt vid uppstart.
+
+Så: driv ställdonet från `input_number.varmepump_fiktiv_utetemp`, och publicera
+gärna resten som sensorer. `hpmpc check` skriver `pending` i stället för
+`MISSING` för sensorer som ännu inte hunnit skapas.
+
 ### Recorder
 
 **hpmpc sparar sin egen historik.** Varje styrcykel kopierar det recordern har

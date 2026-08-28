@@ -136,6 +136,18 @@ class FakeHomeAssistant:
         self.posted.append((url, kwargs.get("json", {})))
         return {}
 
+    def publish_state(self, entity_id: str, state: Any,
+                      attributes: dict[str, Any] | None = None) -> None:
+        if self.fail_write:
+            from hpmpc.ha import HomeAssistantError
+
+            raise HomeAssistantError("publish refused")
+        self._request("POST", f"/api/states/{entity_id}",
+                      json={"state": state, "attributes": attributes or {}})
+        # A published entity really does appear in the state machine, so the
+        # fake has to start answering for it too.
+        self.set(entity_id, state, attributes=attributes or {})
+
 
 class RecorderHomeAssistant(FakeHomeAssistant):
     """A fake whose history really is a rolling window, like the real recorder.

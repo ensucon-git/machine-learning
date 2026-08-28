@@ -343,3 +343,53 @@ def test_the_check_respects_the_absolute_clamp(controller, cfg, fake_ha):
     actuator = controller.check_actuator(controller.read_sensors())
     assert actuator["commanded_c"] == pytest.approx(10.0)
     assert actuator["error_now_c"] == pytest.approx(0.0)
+
+
+# --------------------------------------------- outputs hpmpc creates itself
+
+
+def test_a_sensor_output_is_published_rather_than_written(cfg, fake_ha):
+    """No helper has to exist first: hpmpc puts the entity into Home Assistant."""
+    cfg.entities.offset_output = ""
+    cfg.entities.fake_temperature_output = "sensor.hpmpc_fake_outdoor"
+    controller = Controller(cfg, ThermalParams(), fake_ha)
+    controller.step(apply=True)
+
+    assert fake_ha.written == [], "a sensor is not a number service call"
+    posted = [(url, body) for url, body in fake_ha.posted if "hpmpc_fake_outdoor" in url]
+    assert posted, "the entity should have been published"
+    assert posted[-1][1]["attributes"]["device_class"] == "temperature"
+    assert posted[-1][1]["attributes"]["unit_of_measurement"] == "°C"
+    assert fake_ha.get_state("sensor.hpmpc_fake_outdoor") is not None
+
+
+def test_helpers_and_published_sensors_can_be_mixed(cfg, fake_ha):
+    """Drive the actuator from the durable helper, watch the rest on a dashboard."""
+    cfg.entities.offset_output = "input_number.offset"
+    cfg.entities.fake_temperature_output = "sensor.hpmpc_fake_outdoor"
+    controller = Controller(cfg, ThermalParams(), fake_ha)
+    report = controller.step(apply=True)
+
+    assert [e for e, _ in fake_ha.written] == ["input_number.offset"]
+    assert any("hpmpc_fake_outdoor" in url for url, _ in fake_ha.posted)
+    assert all(o.get("written") for o in report["outputs"])
+
+
+def test_the_published_value_is_the_same_decision(cfg, fake_ha):
+    cfg.entities.offset_output = "input_number.offset"
+    cfg.entities.fake_temperature_output = "sensor.hpmpc_fake_outdoor"
+    controller = Controller(cfg, ThermalParams(), fake_ha)
+    report = controller.step(apply=True)
+
+    outputs = {o["kind"]: o["value"] for o in report["outputs"]}
+    posted = [body for url, body in fake_ha.posted if "hpmpc_fake_outdoor" in url][-1]
+    assert posted["state"] == outputs["fake_temperature"]
+    assert outputs["fake_temperature"] == pytest.approx(
+        outputs["offset"] + report["readings"]["t_outdoor"], abs=0.01
+    )
+
+
+def test_an_output_domain_that_cannot_be_written_is_refused(cfg):
+    cfg.entities.fake_temperature_output = "climate.living_room"
+    with pytest.raises(ValueError, match="fake_temperature_output"):
+        cfg.validate()
