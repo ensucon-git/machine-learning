@@ -11,8 +11,14 @@ services:
     container_name: hpmpc
     restart: unless-stopped
     environment:
+      # Where Home Assistant is. Use an IP address: .local names are mDNS and a
+      # container has no resolver for them, so they fail here even though they
+      # work in your browser.
+      HA_URL: ${HA_URL:-http://192.168.1.42:8123}
       # Long-lived access token from your Home Assistant profile page.
       HA_TOKEN: ${HA_TOKEN:?set HA_TOKEN in .env}
+      # Optional, and unrelated to Home Assistant: it protects hpmpc's own HTTP
+      # API on port 8129.
       HPMPC_API_KEY: ${HPMPC_API_KEY:-}
       # Local time matters: electricity prices, the base-load profile and the
       # holiday schedule are all wall-clock things.

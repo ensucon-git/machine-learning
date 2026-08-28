@@ -12,6 +12,8 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable, Sequence
 
+from urllib.parse import urlsplit
+
 import httpx
 import pandas as pd
 
@@ -90,8 +92,14 @@ class HomeAssistant:
 
     def __init__(self, cfg: HomeAssistantConfig, client: httpx.Client | None = None) -> None:
         self.cfg = cfg
+        self.last_error: str | None = None
         if not cfg.token:
-            raise HomeAssistantError("No Home Assistant token configured (home_assistant.token)")
+            raise HomeAssistantError(
+                "No Home Assistant token configured. Set HA_TOKEN to a long-lived access token "
+                "from your Home Assistant profile page (Security -> Long-lived access tokens). "
+                "HPMPC_API_KEY is a different thing: it protects hpmpc's own HTTP API and is "
+                "never sent to Home Assistant."
+            )
         self._client = client or httpx.Client(
             base_url=cfg.base_url.rstrip("/"),
             headers={"Authorization": f"Bearer {cfg.token}", "Content-Type": "application/json"},
@@ -125,8 +133,70 @@ class HomeAssistant:
             return response.text
 
     def ping(self) -> bool:
-        payload = self._request("GET", "/api/")
+        """Is Home Assistant answering? Never raises - see :meth:`diagnose`."""
+        try:
+            payload = self._request("GET", "/api/")
+        except HomeAssistantError as exc:
+            self.last_error = str(exc)
+            return False
+        self.last_error = None
         return isinstance(payload, dict) and "message" in payload
+
+    def diagnose(self) -> str:
+        """Turn a failed connection into something a person can act on.
+
+        The underlying errors are accurate and useless: "[Errno -3] Temporary
+        failure in name resolution" is a correct description of a DNS lookup
+        that did not happen, and says nothing about the .local hostname in a
+        Docker container that caused it.
+        """
+        error = getattr(self, "last_error", None) or ""
+        lowered = error.lower()
+        host = urlsplit(self.cfg.base_url).hostname or self.cfg.base_url
+        lines = [f"Could not reach Home Assistant at {self.cfg.base_url}", f"  {error}"]
+
+        if "name resolution" in lowered or "nodename nor servname" in lowered \
+                or "getaddrinfo" in lowered or "name or service not known" in lowered:
+            lines.append(f"\nThat is DNS: the name '{host}' did not resolve. It is not the token,")
+            lines.append("and not the API key - neither has been used yet at this point.")
+            if host.endswith(".local"):
+                lines.append(
+                    f"\n'{host}' is an mDNS name. Your laptop resolves those through Bonjour or\n"
+                    "Avahi; a Docker container normally has neither, so the lookup fails inside\n"
+                    "the container even though the same URL works from your browser.\n"
+                    "\nUse the IP address instead - find it in Home Assistant under\n"
+                    "Settings -> System -> Network:\n"
+                    "\n  home_assistant:\n"
+                    "    base_url: http://192.168.1.42:8123\n"
+                    "\nA hostname from your router's DNS works too; only .local is the problem."
+                )
+            else:
+                lines.append(
+                    f"\nCheck the spelling of '{host}', and that whatever resolves it is reachable\n"
+                    "from inside the container. An IP address sidesteps the question entirely."
+                )
+        elif "connection refused" in lowered:
+            lines.append(
+                f"\nThe name resolved but nothing answered on that port. Check the port (8123 by\n"
+                f"default), and that Home Assistant is running on {host}."
+            )
+        elif "timed out" in lowered or "timeout" in lowered:
+            lines.append(
+                "\nThe connection hung rather than being refused, which usually means a firewall\n"
+                "is dropping it, or the container is on a network that cannot reach that address."
+            )
+        elif "401" in error or "403" in error:
+            lines.append(
+                "\nHome Assistant answered but rejected the credentials. That is HA_TOKEN - a\n"
+                "long-lived access token from your HA profile page, not HPMPC_API_KEY, which\n"
+                "only protects hpmpc's own HTTP API and is never sent to Home Assistant."
+            )
+        elif "certificate" in lowered or "ssl" in lowered:
+            lines.append(
+                "\nTLS could not be verified. For a self-signed certificate on your own LAN, set\n"
+                "home_assistant.verify_ssl: false - or use http:// over the LAN."
+            )
+        return "\n".join(lines)
 
     def get_state(self, entity_id: str) -> EntityState | None:
         try:

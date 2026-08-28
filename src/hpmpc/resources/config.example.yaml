@@ -10,9 +10,19 @@
 # ---------------------------------------------------------------------------
 
 home_assistant:
-  base_url: http://homeassistant.local:8123
+  # Use the IP ADDRESS, not homeassistant.local, if hpmpc runs in Docker.
+  # .local names are mDNS: your laptop resolves them through Bonjour or Avahi,
+  # a container normally has neither, and the lookup fails inside the container
+  # with "Temporary failure in name resolution" even though the same URL works
+  # in your browser. Find the address under Settings -> System -> Network.
+  base_url: ${HA_URL:-http://192.168.1.42:8123}
+
+  # A long-lived access token from your Home Assistant profile page, under
+  # Security. This is NOT the same thing as HPMPC_API_KEY, which protects
+  # hpmpc's own HTTP API and is never sent to Home Assistant.
   token: ${HA_TOKEN}
-  verify_ssl: true
+
+  verify_ssl: true                  # false for a self-signed certificate on your LAN
   timeout: 30
 
 # Only indoor_temp is strictly required. Everything else improves the model;

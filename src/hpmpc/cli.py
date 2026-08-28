@@ -69,7 +69,7 @@ def _load(args: argparse.Namespace) -> Config:
 def _connect(cfg: Config) -> HomeAssistant:
     ha = HomeAssistant(cfg.home_assistant)
     if not ha.ping():
-        raise SystemExit(f"Could not reach Home Assistant at {cfg.home_assistant.base_url}")
+        raise SystemExit(f"\n{ha.diagnose()}")
     return ha
 
 
@@ -620,7 +620,7 @@ def cmd_check(args: argparse.Namespace) -> int:
     print(f"Config OK: {args.config}")
     ha = HomeAssistant(cfg.home_assistant)
     if not ha.ping():
-        print(f"FAIL: no response from {cfg.home_assistant.base_url}")
+        print(ha.diagnose())
         return 1
     print(f"Home Assistant reachable at {cfg.home_assistant.base_url}")
 

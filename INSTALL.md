@@ -154,8 +154,9 @@ cd /opt/hpmpc
 
 mkdir -p config
 cat > .env <<'EOF'
+HA_URL=http://192.168.1.42:8123
 HA_TOKEN=<din long-lived token>
-HPMPC_API_KEY=<valfri, skyddar API:et>
+HPMPC_API_KEY=<valfri, skyddar hpmpc:s eget API>
 TZ=Europe/Stockholm
 EOF
 chmod 600 .env
@@ -167,6 +168,20 @@ docker compose run --rm hpmpc init-config
 Det sista skriver `config/config.yaml` — redan ifylld för den här anläggningen:
 Daikin Altherma LT, Norrköping, SE3, Victrons faseffekter och MCP41100-proxyn.
 Öppna den och kontrollera entitets-id:na.
+
+**`HA_URL` ska vara en IP-adress, inte `homeassistant.local`.** Det är den
+vanligaste snubbeltråden i Docker: `.local` är mDNS, som din laptop slår upp via
+Bonjour eller Avahi men som en container normalt inte har. Samma URL fungerar
+alltså i din webbläsare men ger `Temporary failure in name resolution` inne i
+containern. Adressen hittar du i Home Assistant under **Inställningar → System →
+Nätverk**.
+
+De två nycklarna gör olika saker, och det är lätt att blanda ihop dem:
+
+| variabel | vad den är |
+|---|---|
+| `HA_TOKEN` | long-lived access token från din HA-profil. Utan den kommer hpmpc ingenstans |
+| `HPMPC_API_KEY` | skyddar **hpmpc:s eget** HTTP-API på port 8129. Skickas aldrig till Home Assistant, och behövs bara om du vill nå API:et |
 
 Två saker där som är värda en extra titt:
 
@@ -367,7 +382,9 @@ Home Assistant.
 
 | Symptom | Trolig orsak |
 |---|---|
-| `hpmpc check` når inte HA | fel `base_url`, eller token utan behörighet. Testa `curl -H "Authorization: Bearer $HA_TOKEN" http://ha:8123/api/` |
+| `Temporary failure in name resolution` | DNS, inte token. `base_url` är troligen `homeassistant.local` — byt till IP-adressen. `hpmpc check` skriver ut hela förklaringen |
+| `hpmpc check` når inte HA | fel `base_url` eller port. Testa `docker compose exec hpmpc curl -sS -H "Authorization: Bearer $HA_TOKEN" $HA_URL/api/` — inifrån containern, inte från värden |
+| HA svarar 401 | fel `HA_TOKEN`. Det är inte `HPMPC_API_KEY` — den skickas aldrig till Home Assistant |
 | `hpmpc providers` misslyckas mot SMHI | koordinater utanför Norden, eller ingen utgående nät från containern |
 | Morgondagens priser saknas | normalt före 13:00. `price_extrapolated_hours` säger hur mycket som gissas |
 | Kontrollern faller tillbaka till offset 0 | sensordata saknas eller är för gammal; `problems` i loggen säger vilken |

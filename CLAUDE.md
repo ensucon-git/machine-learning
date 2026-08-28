@@ -159,7 +159,7 @@ terminalvärderingen fixar, fast i utvärderingen.
 
 ## Verifierat kontra antaget
 
-**Verifierat** (321 tester, syntetiskt hus med känd sanning):
+**Verifierat** (331 tester, syntetiskt hus med känd sanning):
 - Identifieringen återfinner värmekurva (lutning 0,3495 mot 0,35, R² 0,997) och
   husparametrar (UA +3 %, Ci +4 %, `k_wind` +3 %, plattans tidskonstant inom 8 %).
 - Prediktionsfel 0,085 °C över 12 h, 0,066 °C över 48 h (persistensbaslinje 1,01 °C).
@@ -228,6 +228,15 @@ terminalvärderingen fixar, fast i utvärderingen.
 - **`pot:` är skild från `ntc:` med flit.** `ntc:` är givarkurvan man kalibrerar,
   `pot:` är vad hårdvaran kan. En omkalibrering av kurvan får inte tyst ändra
   hårdvarans gränser.
+- **`homeassistant.local` fungerar inte i Docker.** `.local` är mDNS, och en
+  container har varken Bonjour eller Avahi — samma URL som fungerar i webbläsaren
+  ger `Temporary failure in name resolution` inne i containern. Därför är
+  exempelkonfigurationens `base_url` en IP-adress, och därför översätter
+  `HomeAssistant.diagnose()` anslutningsfel till något handlingsbart.
+- **`HA_TOKEN` och `HPMPC_API_KEY` är olika saker.** Den första är HA:s
+  long-lived token; den andra skyddar hpmpc:s eget API på 8129 och skickas
+  aldrig till Home Assistant. Felmeddelandena säger det explicit, för det är den
+  förväxling som faktiskt sker.
 - **Elbilsladdarens sensor säger `Charging`/`Not charging`**, inte `on`/`off`.
   `ha.BOOLEAN_STATES` mappar båda.
 - **Nord Pool avräknar i kvartstimmar** — 96 priser per dygn. Ingenting i koden
