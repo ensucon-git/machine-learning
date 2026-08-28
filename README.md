@@ -336,8 +336,21 @@ samma data den vägen), så är utebliven utgående trafik en olägenhet i stäl
 stopp. `forecast.weather_source: home_assistant` gör den vägen permanent.
 
 En väderentitet hör hemma i `entities.weather`, **inte** i `entities.outdoor_temp` — dess
-*tillstånd* är ett väderomdöme som `partlycloudy`, och siffrorna ligger i prognosen.
-Konfigurationen avvisar det med en förklaring i stället för att tyst läsa noll.
+*tillstånd* är ett väderomdöme som `cloudy`, och att läsa det som ett tal ger ingenting.
+Mätvärdena ligger som **attribut** bredvid: `temperature`, `wind_speed`, `humidity`.
+Konfigurationen avvisar `weather.*` i `outdoor_temp` med en förklaring i stället för att
+tyst läsa noll.
+
+Står den i `entities.weather` används **båda delarna**: attributen för hur det är just
+nu, och prognosen för resten av horisonten. Nu-värdena ankrar prognosens första steg,
+precis som en riktig givare gör — så utan utegivare startar planen ändå från vad det
+faktiskt är ute. Både `temperature`, `wind_speed` och `humidity` plockas upp, och saknas
+`cloud_coverage` härleds molnigheten ur väderomdömet. `hpmpc plan` säger vilken väg
+talet tog:
+
+```
+    outdoor temperature from weather.smhi_home (current attributes)
+```
 
 Koordinater: kör `hpmpc geocode "Falkvägen, Norrköping"` en gång. SMHI:s rutnät är
 ungefär 2,5 km, så var i Norrköping du står spelar ingen roll — och prognosen ankras

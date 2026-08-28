@@ -59,8 +59,10 @@ entities:
   # integration's own entity is the same data through Home Assistant.
   #
   # This is where a weather entity goes - NOT in outdoor_temp above. A weather
-  # entity's state is a condition ('partlycloudy'); the numbers are in its
-  # forecast, which is what this reads.
+  # entity's state is a condition ('cloudy'), and reading that as a number gives
+  # nothing. The measurements are attributes next to it: temperature, wind_speed,
+  # humidity. Configured here, both are used - the attributes for what it is like
+  # right now, and its forecast for the rest of the horizon.
   weather: weather.smhi_home
 
   supply_temp: ""                                 # strongly recommended - transforms the fit

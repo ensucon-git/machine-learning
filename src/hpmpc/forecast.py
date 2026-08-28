@@ -69,6 +69,17 @@ def _parse_timestamp(value: Any) -> pd.Timestamp | None:
     return ts.tz_convert("UTC")
 
 
+# Home Assistant weather integrations disagree about attribute names, and the
+# same entity carries both the display value and a native_ one. Order matters:
+# the display value is already in the unit system hpmpc expects.
+WEATHER_FIELDS: dict[str, tuple[str, ...]] = {
+    "t_outdoor": ("temperature", "native_temperature"),
+    "wind": ("wind_speed", "native_wind_speed"),
+    "humidity": ("humidity", "native_humidity"),
+    "cloud": ("cloud_coverage",),
+}
+
+
 def parse_weather_forecast(forecast: Iterable[dict[str, Any]]) -> pd.DataFrame:
     """Normalise a Home Assistant weather forecast into a tidy frame."""
     rows = []
@@ -84,14 +95,54 @@ def parse_weather_forecast(forecast: Iterable[dict[str, Any]]) -> pd.DataFrame:
         rows.append(
             {
                 "time": ts,
-                "t_outdoor": to_float(item.get("temperature") or item.get("native_temperature")),
-                "wind": to_float(item.get("wind_speed") or item.get("native_wind_speed")),
+                "t_outdoor": _pick(item, WEATHER_FIELDS["t_outdoor"]),
+                "wind": _pick(item, WEATHER_FIELDS["wind"]),
                 "cloud": cloud,
+                "humidity": _pick(item, WEATHER_FIELDS["humidity"]),
             }
         )
     if not rows:
-        return pd.DataFrame(columns=["time", "t_outdoor", "wind", "cloud"])
+        return pd.DataFrame(columns=["time", "t_outdoor", "wind", "cloud", "humidity"])
     return pd.DataFrame(rows).sort_values("time").reset_index(drop=True)
+
+
+def weather_current(ha: HomeAssistant, entity_id: str) -> dict[str, float]:
+    """What a weather entity says about right now.
+
+    A weather entity's *state* is a condition word - "cloudy", "partlycloudy" -
+    and reading it as a number gives nothing. The measurements are attributes
+    alongside it, and they are the closest thing to a sensor reading available
+    when the house has no outdoor sensor of its own: they describe now, where
+    the forecast only describes the top of the hour.
+
+    Integrations disagree about names, so each field is looked up under both
+    the display name and the ``native_`` one.
+    """
+    if not entity_id:
+        return {}
+    state = ha.get_state(entity_id)
+    if state is None:
+        return {}
+    attributes = state.attributes or {}
+    found: dict[str, float] = {}
+    for column, names in WEATHER_FIELDS.items():
+        value = _pick(attributes, names)
+        if value is not None:
+            found[column] = value
+    if "cloud" not in found:
+        cloud = condition_to_cloud_cover(state.state)
+        if cloud is not None:
+            found["cloud"] = float(cloud)
+    return found
+
+
+def _pick(source: dict[str, Any], names: tuple[str, ...]) -> float | None:
+    """First of ``names`` that carries a number. Zero is a value, not a miss."""
+    for name in names:
+        value = to_float(source.get(name))
+        if value is not None:
+            return value
+    return None
 
 
 def parse_price_attributes(attributes: dict[str, Any], fallback: float | None) -> list[tuple[pd.Timestamp, float]]:
@@ -228,10 +279,25 @@ def build_forecast(cfg: Config, ha: HomeAssistant, now: datetime | None = None) 
     frame = pd.DataFrame(index=index)
 
     weather, sources = weather_points(cfg, ha, index)
-    current_outdoor = _current_value(ha, cfg.entities.outdoor_temp)
-    current_wind = _current_value(ha, cfg.entities.wind_speed)
-    current_cloud = _current_value(ha, cfg.entities.cloud_cover)
-    current_humidity = _current_value(ha, cfg.entities.outdoor_humidity)
+
+    # A dedicated sensor wins - it measures the air this building loses heat to.
+    # Failing that, the weather entity's own attributes describe right now, which
+    # is what the forecast gets anchored to.
+    live = weather_current(ha, cfg.entities.weather)
+    if live:
+        sources["weather_now"] = {
+            "entity": cfg.entities.weather,
+            "fields": sorted(live),
+        }
+
+    def current(entity_id: str, column: str) -> float | None:
+        measured = _current_value(ha, entity_id)
+        return measured if measured is not None else live.get(column)
+
+    current_outdoor = current(cfg.entities.outdoor_temp, "t_outdoor")
+    current_wind = current(cfg.entities.wind_speed, "wind")
+    current_cloud = current(cfg.entities.cloud_cover, "cloud")
+    current_humidity = current(cfg.entities.outdoor_humidity, "humidity")
 
     # ---- outdoor temperature -------------------------------------------
     series = _column_series(weather, "t_outdoor", index, "time")
@@ -239,7 +305,7 @@ def build_forecast(cfg: Config, ha: HomeAssistant, now: datetime | None = None) 
         if current_outdoor is None:
             raise ValueError("No outdoor temperature available - neither a forecast nor a current sensor value")
         series = pd.Series(current_outdoor, index=index)
-        sources["t_outdoor"] = "persisted current sensor value (no forecast)"
+        sources["t_outdoor"] = "persisted current value (no forecast)"
     elif current_outdoor is not None:
         # Anchor the forecast to the measured value and let the bias decay over
         # 6 h; forecasts are routinely a degree off at the current hour, and the

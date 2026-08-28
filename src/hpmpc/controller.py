@@ -274,20 +274,27 @@ class Controller:
         }
 
     def resolve_outdoor(
-        self, readings: dict[str, Any], forecast: pd.DataFrame | None
+        self, readings: dict[str, Any], forecast: pd.DataFrame | None,
+        sources: dict[str, Any] | None = None,
     ) -> tuple[float | None, str]:
         """The current outdoor temperature, from a sensor or from the forecast.
 
         A sensor at the house is better - it measures the air the building
         actually loses heat to - so it wins when configured. Without one the
-        forecast's first step stands in, which keeps the controller from needing
-        Home Assistant as a middleman at all.
+        forecast's first step stands in, and that step has already been anchored
+        to whatever the weather entity says about right now, so this is a
+        current reading rather than a prediction of one.
         """
         measured = readings.get("t_outdoor")
         if measured is not None:
             return float(measured), f"sensor {self.cfg.entities.outdoor_temp}"
         if forecast is not None and len(forecast):
-            return float(forecast["t_outdoor"].iloc[0]), "forecast (no outdoor sensor configured)"
+            now_from = (sources or {}).get("weather_now") or {}
+            if "t_outdoor" in (now_from.get("fields") or []):
+                origin = f"{now_from['entity']} (current attributes)"
+            else:
+                origin = "forecast (no outdoor sensor configured)"
+            return float(forecast["t_outdoor"].iloc[0]), origin
         return None, "unavailable"
 
     def check_readings(self, readings: dict[str, Any]) -> list[str]:
@@ -727,7 +734,7 @@ class Controller:
             report["forecast_error"] = str(exc)
         report["forecast_sources"] = sources
 
-        outdoor, outdoor_source = self.resolve_outdoor(readings, forecast)
+        outdoor, outdoor_source = self.resolve_outdoor(readings, forecast, sources)
         readings["t_outdoor"] = outdoor
         readings["t_outdoor_source"] = outdoor_source
         if outdoor is not None and not self.cfg.entities.outdoor_temp:

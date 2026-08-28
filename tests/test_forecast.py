@@ -229,3 +229,121 @@ def test_each_quarter_keeps_its_own_price_on_the_horizon(cfg, fake_ha):
     assert sources.get("price_resolution_minutes") == 15
     spot = frame["spot_price"].to_numpy()[:8]
     assert len(set(spot.round(3))) == 2, "the alternating quarters were flattened"
+
+
+# ------------------------- a weather entity is a bundle of numbers, not a word
+
+
+def smhi_like(fake_ha, **overrides):
+    """A weather entity shaped like Home Assistant's SMHI integration."""
+    attributes = {
+        "temperature": -3.4,
+        "humidity": 88,
+        "wind_speed": 4.1,
+        "wind_bearing": 210,
+        "pressure": 1004.0,
+        "temperature_unit": "°C",
+        "friendly_name": "SMHI Home",
+    }
+    attributes.update(overrides)
+    fake_ha.set("weather.smhi_home", "cloudy", attributes=attributes)
+    return "weather.smhi_home"
+
+
+def test_the_numbers_are_read_from_the_attributes_not_the_state(fake_ha):
+    """The state is 'cloudy'; reading it as a number is what gave nothing."""
+    from hpmpc.forecast import weather_current
+
+    entity = smhi_like(fake_ha)
+    assert fake_ha.get_state(entity).numeric is None      # the state itself is a word
+    live = weather_current(fake_ha, entity)
+    assert live["t_outdoor"] == pytest.approx(-3.4)
+    assert live["wind"] == pytest.approx(4.1)
+    assert live["humidity"] == pytest.approx(88)
+
+
+def test_the_condition_word_still_gives_cloud_cover(fake_ha):
+    """No cloud_coverage attribute, but 'cloudy' says plenty."""
+    from hpmpc.forecast import weather_current
+
+    entity = smhi_like(fake_ha)
+    assert weather_current(fake_ha, entity)["cloud"] > 50.0
+
+
+def test_native_attribute_names_are_accepted_too(fake_ha):
+    from hpmpc.forecast import weather_current
+
+    fake_ha.set("weather.other", "sunny",
+                attributes={"native_temperature": 12.5, "native_wind_speed": 2.0})
+    live = weather_current(fake_ha, "weather.other")
+    assert live["t_outdoor"] == pytest.approx(12.5)
+    assert live["wind"] == pytest.approx(2.0)
+
+
+def test_a_zero_reading_is_a_reading(fake_ha):
+    from hpmpc.forecast import weather_current
+
+    smhi_like(fake_ha, temperature=0.0, wind_speed=0.0)
+    live = weather_current(fake_ha, "weather.smhi_home")
+    assert live["t_outdoor"] == pytest.approx(0.0)
+    assert live["wind"] == pytest.approx(0.0)
+
+
+def test_a_missing_entity_is_empty_not_an_error(fake_ha):
+    from hpmpc.forecast import weather_current
+
+    assert weather_current(fake_ha, "weather.nope") == {}
+    assert weather_current(fake_ha, "") == {}
+
+
+def test_the_weather_entity_anchors_the_forecast_when_there_is_no_sensor(cfg, fake_ha):
+    """This is the whole point: no outdoor sensor, and the plan still starts
+    from what it is actually like outside right now."""
+    from hpmpc.forecast import build_forecast
+
+    cfg.entities.outdoor_temp = ""
+    cfg.entities.wind_speed = ""
+    cfg.entities.weather = smhi_like(fake_ha)
+    cfg.forecast.weather_source = "home_assistant"
+
+    frame, sources = build_forecast(cfg, fake_ha, fake_ha.now)
+    assert frame["t_outdoor"].iloc[0] == pytest.approx(-3.4, abs=0.05)
+    assert sources["weather_now"]["entity"] == "weather.smhi_home"
+    assert "t_outdoor" in sources["weather_now"]["fields"]
+
+
+def test_humidity_reaches_the_defrost_model_from_the_weather_entity(cfg, fake_ha):
+    from hpmpc.forecast import build_forecast
+
+    cfg.entities.outdoor_temp = ""
+    cfg.entities.outdoor_humidity = ""
+    cfg.entities.weather = smhi_like(fake_ha)
+    cfg.forecast.weather_source = "home_assistant"
+
+    frame, _ = build_forecast(cfg, fake_ha, fake_ha.now)
+    assert frame["humidity"].notna().any()
+
+
+def test_a_real_sensor_still_wins_over_the_weather_entity(cfg, fake_ha):
+    """A sensor at the house measures the air the building loses heat to."""
+    from hpmpc.forecast import build_forecast
+
+    cfg.entities.weather = smhi_like(fake_ha)
+    cfg.entities.outdoor_temp = "sensor.outdoor"
+    fake_ha.set("sensor.outdoor", -8.0)
+    cfg.forecast.weather_source = "home_assistant"
+
+    frame, _ = build_forecast(cfg, fake_ha, fake_ha.now)
+    assert frame["t_outdoor"].iloc[0] == pytest.approx(-8.0, abs=0.05)
+
+
+def test_the_controller_says_where_the_temperature_came_from(cfg, fake_ha):
+    from hpmpc.controller import Controller
+    from hpmpc.model.thermal import ThermalParams
+
+    cfg.entities.outdoor_temp = ""
+    cfg.entities.weather = smhi_like(fake_ha)
+    cfg.forecast.weather_source = "home_assistant"
+    controller = Controller(cfg, ThermalParams(), fake_ha)
+    report = controller.step(apply=False)
+    assert "weather.smhi_home" in report["readings"]["t_outdoor_source"]

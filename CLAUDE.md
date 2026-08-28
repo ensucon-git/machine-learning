@@ -159,7 +159,7 @@ terminalvärderingen fixar, fast i utvärderingen.
 
 ## Verifierat kontra antaget
 
-**Verifierat** (345 tester, syntetiskt hus med känd sanning):
+**Verifierat** (354 tester, syntetiskt hus med känd sanning):
 - Identifieringen återfinner värmekurva (lutning 0,3495 mot 0,35, R² 0,997) och
   husparametrar (UA +3 %, Ci +4 %, `k_wind` +3 %, plattans tidskonstant inom 8 %).
 - Prediktionsfel 0,085 °C över 12 h, 0,066 °C över 48 h (persistensbaslinje 1,01 °C).
@@ -244,8 +244,12 @@ terminalvärderingen fixar, fast i utvärderingen.
   recordern har ingen historik och `hpmpc collect` föll på
   `missing required signals: t_outdoor`. Bara signaler utan konfigurerad entitet
   skrivs — finns en givare är recorderns historik tätare och närmare huset.
-- **En väderentitet är inte en temperaturgivare.** `weather.smhi_home` har
-  tillståndet `partlycloudy`; siffrorna ligger i prognosen. Den hör hemma i
+- **En väderentitet är inte en temperaturgivare, men bär alla talen.**
+  `weather.smhi_home` har tillståndet `cloudy`; mätvärdena ligger som *attribut*
+  (`temperature`, `wind_speed`, `humidity`) och prognosen i tjänsten
+  `weather.get_forecasts`. `weather_current()` läser attributen, `WEATHER_FIELDS`
+  täcker både visningsnamn och `native_`-varianten, och nu-värdena ankrar
+  prognosens första steg precis som en riktig givare. Den hör hemma i
   `entities.weather`, och konfigurationen avvisar den i `outdoor_temp`.
 - **SMHI faller tillbaka på `entities.weather` av sig själv** i `weather_points`.
   Det är därför utebliven utgående trafik inte behöver stoppa något.
