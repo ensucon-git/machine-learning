@@ -61,6 +61,19 @@ def test_the_outdoor_temperature_must_come_from_somewhere(tmp_path):
         load_config(path)
 
 
+def test_no_outdoor_sensor_is_fine_when_smhi_supplies_the_forecast(tmp_path):
+    """The forecast's first step stands in for the sensor, so SMHI is enough."""
+    path = write(tmp_path, "entities:\n  indoor_temp: sensor.a\n"
+                           "forecast:\n  weather_source: smhi\n")
+    assert load_config(path).entities.outdoor_temp == ""
+
+
+def test_a_home_assistant_weather_entity_also_counts(tmp_path):
+    path = write(tmp_path, "entities:\n  indoor_temp: sensor.a\n  weather: weather.home\n"
+                           "forecast:\n  weather_source: home_assistant\n")
+    assert load_config(path).entities.weather == "weather.home"
+
+
 def test_missing_required_entity(tmp_path):
     path = write(tmp_path, "control:\n  setpoint: 21\n")
     with pytest.raises(ValueError, match="indoor_temp"):

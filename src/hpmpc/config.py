@@ -116,6 +116,15 @@ class EntityConfig:
     resistance_output: str = ""
     """Ohm, converted here through the NTC table. Only useful if you would
     rather hpmpc owned the sensor curve than Home Assistant."""
+    wiper_output: str = ""
+    """Digital-potentiometer step, converted here through the pot: section.
+    Only if you want hpmpc to command the wiper directly rather than let the
+    ESP32 do the conversion."""
+    pot_wiper: str = ""
+    """What the ESP32 reports it is actually driving the potentiometer to,
+    0..255 for an MCP41100. Without entities.pump_outdoor_temp this is the only
+    readback in the whole actuator chain, and it is what tells you the write
+    landed and was not clamped on the way."""
     status_entity: str = ""
     extra: list[str] = field(default_factory=list)
 
@@ -127,6 +136,7 @@ class EntityConfig:
             "offset": self.offset_output,
             "fake_temperature": self.fake_temperature_output,
             "resistance": self.resistance_output,
+            "wiper": self.wiper_output,
         }
 
     def all_sensor_ids(self) -> list[str]:
@@ -151,6 +161,8 @@ class EntityConfig:
             self.offset_output,
             self.fake_temperature_output,
             self.resistance_output,
+            self.wiper_output,
+            self.pot_wiper,
         ]
         return [n for n in [*names, *self.extra] if n]
 
@@ -241,6 +253,36 @@ class NTCConfig:
     table_ohm: list[float] = field(default_factory=list)
     resistance_min: float = 0.0
     resistance_max: float = 500000.0
+
+
+@dataclass
+class PotConfig:
+    """The digital potentiometer standing in for the pump's outdoor sensor.
+
+    It is described here rather than only in the ESP32 firmware because its
+    limits are the controller's limits. A single MCP41100 spans 0-100 kohm,
+    which on a 20 kohm Daikin curve stops at about -7 C: command anything
+    colder and the hardware silently clamps, the pump sees -7, and the fit
+    learns a house that responds to nothing. ``hpmpc ntc-table`` prints the
+    reachable band, and ``hpmpc check`` compares it with perceived_min_c.
+
+    Devices in series add range, not resolution: two MCP41100 reach -20 C with
+    the same 392 ohm step.
+    """
+
+    model: str = "mcp41100"
+    resistance_ohm: float = 100000.0
+    """End-to-end resistance of one device."""
+    steps: int = 256
+    """Tap positions on one device (8-bit = 256)."""
+    devices: int = 1
+    """How many are wired in series."""
+    wiper_ohm: float = 100.0
+    """Wiper resistance of one device, present at every tap."""
+    series_ohm: float = 0.0
+    """A fixed resistor in series with the pot, if you fit one. It shifts the
+    whole reachable band colder without adding a second device - useful when the
+    warm end is not needed, but note that holiday mode lives at the warm end."""
     negative_coefficient: bool = True
 
 
@@ -463,6 +505,7 @@ class Config:
     forecast: ForecastConfig = field(default_factory=ForecastConfig)
     heat_pump: HeatPumpConfig = field(default_factory=HeatPumpConfig)
     ntc: NTCConfig = field(default_factory=NTCConfig)
+    pot: PotConfig = field(default_factory=PotConfig)
     control: ControlConfig = field(default_factory=ControlConfig)
     modes: ModesConfig = field(default_factory=ModesConfig)
     power: PowerConfig = field(default_factory=PowerConfig)
@@ -506,11 +549,18 @@ class Config:
                 f"training.history_days ({t.history_days}) - the archive would throw away "
                 "history that training asks for"
             )
-        if not self.entities.outdoor_temp and self.forecast.weather_source != "smhi":
-            raise ValueError(
-                "Without entities.outdoor_temp the current outdoor temperature has to come from "
-                "somewhere: set forecast.weather_source to 'smhi', or configure the sensor."
-            )
+        if not self.entities.outdoor_temp:
+            # The forecast's first step stands in for the missing sensor, so the
+            # only real requirement is that a forecast can be built at all.
+            if self.forecast.weather_source != "smhi" and not self.entities.weather:
+                raise ValueError(
+                    "Without entities.outdoor_temp the current outdoor temperature has to come "
+                    "from somewhere: set forecast.weather_source to 'smhi', configure "
+                    "entities.weather, or configure the outdoor sensor."
+                )
+        pot = self.pot
+        if pot.steps < 2 or pot.devices < 1 or pot.resistance_ohm <= 0:
+            raise ValueError("pot.steps must be >= 2, pot.devices >= 1 and pot.resistance_ohm > 0")
         p = self.power
         if p.source not in {"auto", "heatpump_meter", "house", "none"}:
             raise ValueError(f"power.source '{p.source}' is not valid")

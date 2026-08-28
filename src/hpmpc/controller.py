@@ -37,7 +37,15 @@ from .ha import HomeAssistant, HomeAssistantError
 from .model import build_pump
 from .model.thermal import Exogenous, State, ThermalParams, simulate, steady_state_mass_temp
 from .mpc import MpcResult, MpcSolver
-from .ntc import temperature_to_resistance
+from .ntc import (
+    reachable_temperatures,
+    resistance_to_temperature,
+    resistance_to_wiper,
+    temperature_to_resistance,
+    wiper_resolution,
+    wiper_span,
+    wiper_to_resistance,
+)
 from .residual import ResidualModel
 from .settings import apply as apply_settings
 from .settings import read_from_home_assistant
@@ -204,6 +212,7 @@ class Controller:
         ids = [
             e.indoor_temp, e.outdoor_temp, e.wind_speed, e.outdoor_humidity,
             e.supply_temp, e.price, e.offset_output, e.pump_outdoor_temp,
+            e.pot_wiper,
         ]
         states = self.ha.get_states([i for i in ids if i])
         now = datetime.now(timezone.utc)
@@ -228,6 +237,7 @@ class Controller:
             "t_supply": value(e.supply_temp)[0],
             "price": value(e.price)[0],
             "output_raw": value(e.offset_output)[0],
+            "pot_wiper": value(e.pot_wiper)[0],
         }
 
     def resolve_outdoor(
@@ -393,6 +403,12 @@ class Controller:
                 round(float(temperature_to_resistance(fake, self.cfg.ntc)), 1),
                 "ohm",
             ),
+            (
+                "wiper",
+                entities.wiper_output,
+                int(resistance_to_wiper(temperature_to_resistance(fake, self.cfg.ntc), self.cfg.pot)),
+                "step",
+            ),
         ]
         return [
             {"kind": kind, "entity_id": entity_id, "value": value, "unit": unit}
@@ -423,31 +439,46 @@ class Controller:
         return float(clamped), notes
 
     def check_actuator(self, readings: dict[str, Any]) -> dict[str, Any] | None:
-        """Compare what the pump believes against what was commanded.
+        """Compare what actually reached the sensor input against what we asked for.
 
-        This is the only closed-loop check on the whole actuator chain - the
-        resistor, the wiring, the connector, the NTC table and the pump's own
-        linearisation. Everything else about the offset is open loop: we command
-        a resistance and trust that it means what the table says.
+        Everything about the offset is otherwise open loop: we command a
+        resistance and trust that it means what the NTC table says. There are
+        two places the loop can be closed, and they check different lengths of
+        the chain:
 
-        The comparison is smoothed hard, over many hours. The pump filters its
-        outdoor reading, so any single cycle is dominated by lag rather than by
-        bias; only the long-run mean says anything about calibration.
+        ``pump_outdoor_temp`` is the whole chain - resistor, wiring, connector,
+        NTC table and the pump's own linearisation - so it is preferred when the
+        pump exposes it. The pump filters its outdoor reading, so a single cycle
+        is dominated by lag rather than bias; only the long-run mean says
+        anything about calibration, and the comparison is smoothed over many
+        hours before it is allowed to complain.
+
+        ``pot_wiper`` is what the ESP32 reports it is driving the potentiometer
+        to. It stops short of the pump, so it cannot catch a wrong NTC table -
+        but it does catch the failure that table cannot: a value the hardware
+        could not reach and silently clamped. There is no lag to average out
+        there, so that comparison is immediate.
 
         Deliberately reports rather than corrects. Closing a feedback loop on an
         actuator estimate would let one wrong entity walk the offset away
         quietly, which is exactly the failure this check exists to catch.
         """
-        reported = readings.get("pump_outdoor")
         outdoor = readings.get("t_outdoor")
-        if reported is None or outdoor is None:
+        if outdoor is None:
             return None
-
         pump = self.cfg.heat_pump
         commanded = float(
             np.clip(outdoor + self.state.last_offset, pump.perceived_min_c, pump.perceived_max_c)
         )
-        error = float(reported) - commanded
+
+        if readings.get("pump_outdoor") is not None:
+            return self._actuator_from_pump(float(readings["pump_outdoor"]), commanded)
+        if readings.get("pot_wiper") is not None:
+            return self._actuator_from_wiper(float(readings["pot_wiper"]), commanded)
+        return None
+
+    def _actuator_from_pump(self, reported: float, commanded: float) -> dict[str, Any]:
+        error = reported - commanded
         alpha = self.cfg.control.actuator_error_smoothing
         if self.state.actuator_samples == 0:
             self.state.actuator_error_c = error
@@ -457,7 +488,8 @@ class Controller:
 
         settled = self.state.actuator_samples >= int(2.0 / max(alpha, 1e-6))
         result: dict[str, Any] = {
-            "pump_believes_c": round(float(reported), 2),
+            "source": "pump",
+            "pump_believes_c": round(reported, 2),
             "commanded_c": round(commanded, 2),
             "error_now_c": round(error, 2),
             "error_smoothed_c": round(self.state.actuator_error_c, 2),
@@ -471,6 +503,39 @@ class Controller:
                 f"commanded, averaged over {self.state.actuator_samples} cycles. The NTC table does "
                 "not match the sensor the pump is actually reading. Run 'hpmpc calibrate-ntc' with "
                 "pairs taken from the pump's own display."
+            )
+        return result
+
+    def _actuator_from_wiper(self, wiper: float, commanded: float) -> dict[str, Any]:
+        pot, ntc = self.cfg.pot, self.cfg.ntc
+        driven_c = float(resistance_to_temperature(wiper_to_resistance(wiper, pot), ntc))
+        wanted_step = float(resistance_to_wiper(temperature_to_resistance(commanded, ntc), pot))
+        error = driven_c - commanded
+        # One wiper step is the smallest error that can possibly exist; anything
+        # inside a couple of them is quantisation, not a fault.
+        quantisation = wiper_resolution(pot, ntc, commanded)
+        result: dict[str, Any] = {
+            "source": "pot_wiper",
+            "wiper": int(wiper),
+            "wiper_commanded": int(wanted_step),
+            "driven_c": round(driven_c, 2),
+            "commanded_c": round(commanded, 2),
+            "error_now_c": round(error, 2),
+            "step_resolution_c": round(float(quantisation), 3),
+        }
+        if int(wiper) in (0, wiper_span(pot)) and abs(error) > max(2.0 * quantisation, 0.5):
+            coldest, warmest = reachable_temperatures(pot, ntc)
+            result["warning"] = (
+                f"The potentiometer is at its end stop ({int(wiper)}) and the pump is being shown "
+                f"{driven_c:.1f} C instead of the commanded {commanded:.1f} C. This hardware can only "
+                f"reach {coldest:.1f} to {warmest:.1f} C - raise heat_pump.perceived_min_c to "
+                f"{coldest:.0f}, or wire another potentiometer in series."
+            )
+        elif abs(error) > max(3.0 * quantisation, 1.0):
+            result["warning"] = (
+                f"The ESP32 reports wiper {int(wiper)} but {int(wanted_step)} was commanded "
+                f"({error:+.1f} C). Either the write is not arriving or the pot: section does not "
+                "describe the hardware."
             )
         return result
 

@@ -60,14 +60,12 @@ recorder:
   purge_keep_days: 10
   include:
     entities:
-      - sensor.vardagsrum_temperatur
-      - sensor.ute_temperatur
-      - sensor.daikin_framledning
-      - sensor.victron_ac_consumption_l1_power
-      - sensor.victron_ac_consumption_l2_power
-      - sensor.victron_ac_consumption_l3_power
+      - sensor.hall_temperature_2
+      - sensor.gx_device_consumption_power_l1
+      - sensor.gx_device_consumption_power_l2
+      - sensor.gx_device_consumption_power_l3
       - binary_sensor.eh6nh5cd_charging
-      - number.utegivare_resistans
+      - sensor.varmepump_proxy_mcp41100_wiper_0_255
       - input_number.varmepump_offset
       - input_number.varmepump_fiktiv_utetemp
 ```
@@ -102,8 +100,19 @@ docker compose build
 docker compose run --rm hpmpc init-config
 ```
 
-Det sista skriver `config/config.yaml` — redan ifylld för Daikin Altherma LT,
-Norrköping och SE3. Öppna den och byt entitets-id:n mot dina egna.
+Det sista skriver `config/config.yaml` — redan ifylld för den här anläggningen:
+Daikin Altherma LT, Norrköping, SE3, Victrons faseffekter och MCP41100-proxyn.
+Öppna den och kontrollera entitets-id:na.
+
+Två saker där som är värda en extra titt:
+
+`entities.outdoor_temp` är **tom med flit**. Utetemperaturen hämtas då från SMHI
+inne i kontrollern, så ingen utegivare behövs och Home Assistant är inte
+mellanhand för den. Har du en givare vid huset senare: skriv in dess entitets-id
+där, så vinner den automatiskt över SMHI — inget annat behöver ändras.
+
+`heat_pump.perceived_min_c` är satt till **−7**, inte −20, för att det är så
+långt en enda MCP41100 räcker. Se avsnittet om potentiometern nedan.
 
 ```bash
 docker compose up -d
@@ -142,6 +151,7 @@ svarar på en fråga du annars får svar på senare, dyrare.
 ```bash
 docker compose exec hpmpc hpmpc check        # entiteter, värden, ålder
 docker compose exec hpmpc hpmpc providers    # SMHI + SE3-priser
+docker compose exec hpmpc hpmpc ntc-table    # vad potentiometern räcker till
 docker compose exec hpmpc hpmpc pump-table   # COP och kapacitet
 docker compose exec hpmpc hpmpc settings     # vad du kan ändra i efterhand
 docker compose exec hpmpc hpmpc mode         # aktivt komfortläge
@@ -150,6 +160,29 @@ docker compose exec hpmpc hpmpc mode         # aktivt komfortläge
 **Stäm av `hpmpc providers` mot din elfaktura.** Den skriver ut
 marginalkostnaden med ditt tillägg och din moms — det är den siffran
 optimeraren faktiskt planerar mot, och den enda som är värd att kontrollräkna.
+
+**Läs `hpmpc ntc-table` noga.** Den skriver ut vilket temperaturband
+potentiometern faktiskt når, och varnar om `heat_pump.perceived_min_c` ligger
+utanför det. Med en enda MCP41100:
+
+```
+Pot:       1 x mcp41100 in series, 256 positions, 392 ohm per step
+           reaches -7.4 to +30.0 degC
+```
+
+Upplösningen är gott och väl tillräcklig — 0,10 K per steg kring nollan. Det är
+**räckvidden** som tar slut. Under cirka −7 °C ute sitter wipern i sitt ändläge
+och pumpen visas −7 när det är −15, utan att något säger ifrån. Två saker gör
+det ofarligt:
+
+1. `heat_pump.perceived_min_c: -7` gör att optimeraren aldrig planerar en offset
+   den inte kan leverera. Det står redan så i exempelkonfigurationen.
+2. Innan riktig kyla: löd in en **andra MCP41100 i serie** och sätt
+   `pot.devices: 2`. Då når du −20 °C med samma steglängd — seriekopplade
+   kretsar ger räckvidd, inte upplösning.
+
+Automationen `MPC potentiometer at end stop` i HA-paketet larmar om wipern
+står kvar i ett ändläge i en halvtimme.
 
 Sätt `dry_run: true` i konfigurationen och låt den gå ett par dygn. Läs
 planerna med `hpmpc plan`. Först därefter `hpmpc set control.dry_run 0`.

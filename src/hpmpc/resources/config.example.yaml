@@ -15,33 +15,37 @@ home_assistant:
   verify_ssl: true
   timeout: 30
 
-# Only indoor_temp and outdoor_temp are strictly required. Everything else
-# improves the model; leave unused entries empty and they are skipped.
+# Only indoor_temp is strictly required. Everything else improves the model;
+# leave unused entries empty and they are skipped.
 entities:
-  indoor_temp: sensor.vardagsrum_temperatur       # required
+  indoor_temp: sensor.hall_temperature_2          # required - mid-house is the right place
 
-  # The REAL outdoor temperature. Optional: leave it empty and the current value
-  # comes from the SMHI forecast instead, so Home Assistant is not in the loop
-  # for it at all. A sensor at the house is still better when you have one - it
-  # measures the air the building actually loses heat to.
-  outdoor_temp: sensor.ute_temperatur
-  price: sensor.nordpool_kwh_se3_sek_3_10_025     # only a fallback; see forecast.price_source
+  # The REAL outdoor temperature. Empty on purpose: the current value comes from
+  # the SMHI forecast instead, so no outdoor sensor is needed and Home Assistant
+  # is not in the loop for it at all.
+  #
+  # To switch to your own sensor later, put its entity id here - it wins over
+  # SMHI automatically, no other setting changes. A sensor at the house is the
+  # better signal when you have one: it measures the air this building actually
+  # loses heat to, rather than a 2.5 km grid square.
+  outdoor_temp: ""
+  price: ""                                       # only a fallback; see forecast.price_source
 
-  wind_speed: sensor.vindhastighet                # m/s
-  cloud_cover: sensor.molnighet                   # %, 0-100
-  outdoor_humidity: sensor.ute_luftfuktighet      # %, drives the defrost derate
+  wind_speed: ""                                  # m/s - from SMHI when empty
+  cloud_cover: ""                                 # %, 0-100 - from SMHI when empty
+  outdoor_humidity: ""                            # %, drives the defrost derate
 
-  # What the pump itself reports as the outdoor temperature. This is the ONLY
-  # closed-loop check on the whole actuator chain - the resistor, the wiring,
-  # the connector, the NTC table and the pump's own linearisation. Without it
-  # the offset is pure open loop: we command a resistance and hope.
-  # It must be the reading for the sensor you are emulating.
-  pump_outdoor_temp: sensor.daikin_utetemperatur
+  # What the pump itself reports as the outdoor temperature. This is the only
+  # check that covers the WHOLE actuator chain - the resistor, the wiring, the
+  # connector, the NTC table and the pump's own linearisation. Most Altherma
+  # installations only show it on the unit's display, in which case leave this
+  # empty and rely on pot_wiper below plus one calibration by eye.
+  pump_outdoor_temp: ""
   solar_radiation: ""                             # W/m2 if you own a pyranometer
-  weather: weather.hemma                          # fallback if SMHI is unreachable
+  weather: ""                                     # a HA weather entity, fallback if SMHI is down
 
-  supply_temp: sensor.daikin_framledning          # strongly recommended - transforms the fit
-  return_temp: sensor.daikin_retur
+  supply_temp: ""                                 # strongly recommended - transforms the fit
+  return_temp: ""
 
   # A meter on the heat pump alone is the easy case. Leave it empty and the
   # pump's consumption is separated out of the whole-house measurement instead;
@@ -51,14 +55,20 @@ entities:
   # Victron whole-house power, one entity per phase. Per-phase matters: the heat
   # pump and the car charger are balanced across all three, almost everything
   # else in a house is not, so the phases are what makes them separable.
-  house_power_l1: sensor.victron_ac_consumption_l1_power
-  house_power_l2: sensor.victron_ac_consumption_l2_power
-  house_power_l3: sensor.victron_ac_consumption_l3_power
+  house_power_l1: sensor.gx_device_consumption_power_l1
+  house_power_l2: sensor.gx_device_consumption_power_l2
+  house_power_l3: sensor.gx_device_consumption_power_l3
   house_power_total: ""                           # only if you have no per-phase entities
 
   # Car charger status. Samples where it is charging are dropped from the
   # efficiency fit entirely, so its exact power never has to be known.
   ev_charging: binary_sensor.eh6nh5cd_charging
+
+  # What the ESP32 reports it is actually driving the potentiometer to, 0..255
+  # for an MCP41100. Without pump_outdoor_temp this is the only readback in the
+  # chain: it says the write arrived, and - more useful - it says when the
+  # hardware hit an end stop and clamped the value instead of applying it.
+  pot_wiper: sensor.varmepump_proxy_mcp41100_wiper_0_255
 
   # Outputs. Every one you configure is written every cycle - they are the same
   # decision in different units, so the one you act on and the one you look at
@@ -69,11 +79,14 @@ entities:
   #                            pump. Feed this to your resistor conversion in
   #                            Home Assistant, where you can calibrate the curve
   #                            against what the pump's display actually reads.
-  #   resistance_output        ohm, converted here through the ntc: section
-  #                            below. Only if you want hpmpc to own that curve.
+  #   resistance_output        ohm, converted here through the ntc: section below
+  #   wiper_output             potentiometer step, through ntc: and pot: below.
+  #                            Only if you want hpmpc to own both curves rather
+  #                            than let the ESP32 do the conversion.
   offset_output: input_number.varmepump_offset
   fake_temperature_output: input_number.varmepump_fiktiv_utetemp
   resistance_output: ""
+  wiper_output: ""
   # Optional: the controller publishes its own status here.
   status_entity: sensor.hpmpc_status
 
@@ -119,7 +132,14 @@ heat_pump:
   # Keeping the faked value inside the normal operating range avoids provoking
   # defrost logic or operating-limit behaviour that has nothing to do with the
   # heating curve.
-  perceived_min_c: -20.0
+  #
+  # IMPORTANT: these have to be inside what your hardware can actually reach.
+  # A single MCP41100 spans 0-100 kohm, which on the curve below bottoms out at
+  # about -7 C. Ask for colder than that and the pot sits at its end stop, the
+  # pump is shown -7 C on a -15 C day, and the house underheats with nothing in
+  # the logs to say why. 'hpmpc ntc-table' prints the reachable band and
+  # 'hpmpc check' compares it against these two numbers.
+  perceived_min_c: -7.0
   perceived_max_c: 25.0
 
   standby_power_w: 40
@@ -154,6 +174,21 @@ ntc:
   beta: 3950
   resistance_min: 0
   resistance_max: 500000
+
+# The digital potentiometer itself. Separate from ntc: on purpose - that one is
+# the sensor curve you calibrate, this one is what the hardware can do, and
+# recalibrating the curve must not silently change the hardware's limits.
+#
+# Devices in series add range, not resolution. One MCP41100 reaches -7 C at
+# 0.10 K per step around freezing; two in series reach -20 C at the same step.
+# Range is the binding constraint here, not resolution.
+pot:
+  model: mcp41100
+  resistance_ohm: 100000            # end to end, one device
+  steps: 256                        # tap positions, one device (8-bit)
+  devices: 1                        # how many are wired in series
+  wiper_ohm: 100                    # wiper resistance, present at every tap
+  series_ohm: 0                     # a fixed resistor in series, if you fit one
 
 control:
   offset_min: -6.0                  # more negative = pump thinks it is colder = more heat

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from .config import NTCConfig
+from .config import NTCConfig, PotConfig
 
 KELVIN = 273.15
 
@@ -56,3 +56,56 @@ def resolution_check(cfg: NTCConfig, temp_c: float, step_ohm: float) -> float:
     r0 = float(temperature_to_resistance(temp_c, cfg))
     t1 = float(resistance_to_temperature(r0 + step_ohm, cfg))
     return abs(t1 - temp_c)
+
+
+# --------------------------------------------------------------------------
+# The digital potentiometer itself
+#
+# The NTC curve says which resistance means which temperature. The pot says
+# which resistances are actually reachable, and in what increments. Keeping the
+# two apart matters: recalibrating the sensor curve must not silently change
+# what the hardware can do.
+
+
+def wiper_span(cfg: PotConfig) -> int:
+    """Highest aggregate wiper index across all devices in series."""
+    return int(cfg.devices) * (int(cfg.steps) - 1)
+
+
+def wiper_to_resistance(step: float | np.ndarray, cfg: PotConfig) -> np.ndarray:
+    """Resistance [ohm] presented at aggregate wiper position ``step``."""
+    span = wiper_span(cfg)
+    d = np.clip(np.asarray(step, dtype=float), 0.0, span)
+    per_step = float(cfg.resistance_ohm) / (int(cfg.steps) - 1)
+    return d * per_step + float(cfg.wiper_ohm) * int(cfg.devices) + float(cfg.series_ohm)
+
+
+def resistance_to_wiper(resistance: float | np.ndarray, cfg: PotConfig) -> np.ndarray:
+    """Nearest reachable wiper position for ``resistance``, as an integer.
+
+    Clamps rather than extrapolating: outside the pot's span there is no
+    position to return, and pretending otherwise is how a controller ends up
+    believing it commanded something the hardware refused.
+    """
+    per_step = float(cfg.resistance_ohm) / (int(cfg.steps) - 1)
+    fixed = float(cfg.wiper_ohm) * int(cfg.devices) + float(cfg.series_ohm)
+    raw = (np.asarray(resistance, dtype=float) - fixed) / per_step
+    return np.clip(np.rint(raw), 0.0, float(wiper_span(cfg)))
+
+
+def reachable_temperatures(pot: PotConfig, ntc: NTCConfig) -> tuple[float, float]:
+    """(coldest, warmest) temperature the pot can actually show the pump.
+
+    Coldest comes from the highest resistance, because the sensor is an NTC.
+    """
+    lo = float(wiper_to_resistance(0, pot))
+    hi = float(wiper_to_resistance(wiper_span(pot), pot))
+    coldest = float(resistance_to_temperature(hi, ntc))
+    warmest = float(resistance_to_temperature(max(lo, 1e-6), ntc))
+    return coldest, warmest
+
+
+def wiper_resolution(pot: PotConfig, ntc: NTCConfig, temp_c: float) -> float:
+    """Temperature resolution [K] of one wiper step at ``temp_c``."""
+    per_step = float(pot.resistance_ohm) / (int(pot.steps) - 1)
+    return resolution_check(ntc, temp_c, per_step)

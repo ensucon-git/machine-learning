@@ -9,6 +9,7 @@ data/*.parquet
 data/*.csv
 data/*.json
 data/cache/
+data/history/
 !data/.gitkeep
 config/config.yaml
 .env

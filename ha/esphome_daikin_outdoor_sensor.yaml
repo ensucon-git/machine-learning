@@ -2,15 +2,17 @@
 # ESP32 outdoor-sensor emulator for a Daikin Altherma
 # (ERLQ016CAW1 outdoor unit + EHVH16S26CB9W hydrobox)
 #
+# Written for the hardware actually in use here: one MCP41100 (8-bit, 100 kohm,
+# SPI). Read the RANGE section below before trusting it through a winter.
+#
 # Two ways to drive this node:
 #
-#   a) hpmpc writes ohm straight here (entities.resistance_output), owning the
-#      NTC curve itself; or
-#   b) hpmpc writes the fictitious temperature (entities.fake_temperature_output)
-#      and Home Assistant converts it, which is usually easier because the curve
-#      then lives where you can adjust it against the pump's display.
-#
-# The HA package ships the template sensor for (b).
+#   a) Home Assistant converts the fictitious temperature to a wiper position
+#      and writes it here - the HA package ships the template sensors for that,
+#      and the curve then lives where you can adjust it against the pump's
+#      display; or
+#   b) hpmpc writes the wiper position straight here
+#      (entities.wiper_output), owning both the NTC curve and the pot geometry.
 #
 #
 # WHICH SENSOR TO FAKE - read this first, it matters more than the wiring
@@ -35,27 +37,39 @@
 # -25 C operating limit, so the lie never reaches a threshold that matters.
 #
 #
-# HARDWARE
+# RANGE: what one MCP41100 can and cannot do
 # ---------------------------------------------------------------------------
-# A Daikin 20 kohm outdoor thermistor spans roughly 32 kohm at +15 C to
-# 197 kohm at -20 C. One 8-bit 100 kohm digital pot cannot cover that with
-# usable resolution. What works:
+# A Daikin 20 kohm outdoor thermistor spans roughly 25 kohm at +20 C to
+# 197 kohm at -20 C. One MCP41100 covers 0-100 kohm, so:
 #
-#   two 10-bit 100 kohm digital rheostats in series (e.g. 2x AD5293-100)
-#     -> 0 .. 200 kohm in ~195 ohm steps
+#     hpmpc ntc-table --low -20 --high 20
 #
-# Check what that buys you before ordering:
+#       temp (C)         ohm   wiper     K per 392 ohm
+#          -20.0      196648      --      <- out of the pot's range
+#          -10.0      114003      --      <- out of the pot's range
+#           -5.0       87562     223             0.074
+#            0.0       67628     172             0.098
+#           10.0       40991     104             0.170
+#           20.0       25354      64             0.288
 #
-#     hpmpc ntc-table --step-ohm 195
+# RESOLUTION is fine - 0.10 K per step around freezing, well under the 0.2 K
+# where quantisation starts to show. RANGE is not: the coldest temperature this
+# pot can present is about -7.4 C.
 #
-#       temp (C)         ohm   K per 195 ohm
-#          -20.0      196648             0.015
-#            0.0       67628             0.049
-#           15.0       32159             0.110
+# That is a real problem below -7 C outdoors, and not a subtle one. The pot sits
+# at wiper 255, the pump is shown -7 C on a -15 C day, and the house underheats
+# with nothing anywhere to say why. Two things to do about it:
 #
-# Comfortably under the 0.2 K where quantisation starts to show. An 8-bit
-# 100 kohm part would give roughly 0.4 K at +15 C and could not reach -20 C
-# at all.
+#   - set heat_pump.perceived_min_c to -7 so the controller never plans an
+#     offset it cannot deliver ('hpmpc check' warns when these disagree); and
+#   - before real cold, wire a SECOND MCP41100 in series and set pot.devices: 2.
+#     That reaches -20 C at the same 392 ohm step - series devices buy range,
+#     not resolution. Drive the second one from the spill-over in set_wiper()
+#     below.
+#
+# A fixed resistor in series (pot.series_ohm) shifts the whole band colder for
+# the price of the warm end - but holiday mode lives at the warm end, so prefer
+# the second pot.
 #
 # SAFETY: the real thermistor stays wired through the NC contact of a relay.
 # The ESP has to actively energise the relay to take over. Lose power, lose
@@ -63,8 +77,8 @@
 # ---------------------------------------------------------------------------
 
 esphome:
-  name: daikin-utegivare
-  friendly_name: Daikin outdoor sensor emulator
+  name: varmepump-proxy
+  friendly_name: Varmepump proxy
 
 esp32:
   board: esp32dev
@@ -87,15 +101,62 @@ spi:
   mosi_pin: GPIO23
   miso_pin: GPIO19
 
+# MCP41100. 16 bits per transfer: command byte then wiper byte.
+# 0x11 = write data to potentiometer 0. Mode 0,0.
+spi_device:
+  - id: pot_primary
+    cs_pin: GPIO5
+    data_rate: 1MHz
+    mode: 0
+  # A second device wired in series goes here; see set_wiper() below.
+  # - id: pot_secondary
+  #   cs_pin: GPIO17
+  #   data_rate: 1MHz
+  #   mode: 0
+
 globals:
-  - id: target_ohm
-    type: float
+  - id: wiper_position
+    type: int
     restore_value: false
-    initial_value: '0'
+    initial_value: '-1'
   - id: last_command_ms
     type: uint32_t
     restore_value: false
     initial_value: '0'
+
+script:
+  - id: set_wiper
+    parameters:
+      step: int
+    then:
+      - lambda: |-
+          // Independent sanity band. hpmpc already clamps what the pump may be
+          // shown, and so does Home Assistant, but the firmware must not trust
+          // the network: a corrupted value must not reach the pump.
+          const int STEP_MIN = 0;
+          const int STEP_MAX = 255;      // per device
+          if (step < STEP_MIN || step > STEP_MAX) {
+            ESP_LOGW("hpmpc", "Rejected out-of-band wiper %d", step);
+            return;
+          }
+          uint8_t frame[2] = {0x11, (uint8_t) step};
+          id(pot_primary)->enable();
+          id(pot_primary)->write_array(frame, 2);
+          id(pot_primary)->disable();
+
+          // With a second device in series, the first fills to 255 and the rest
+          // spills into the second:
+          //   int spill = step > 255 ? step - 255 : 0;
+          //   uint8_t frame2[2] = {0x11, (uint8_t) spill};
+          //   id(pot_secondary)->enable();
+          //   id(pot_secondary)->write_array(frame2, 2);
+          //   id(pot_secondary)->disable();
+
+          id(wiper_position) = step;
+          id(last_command_ms) = millis();
+          if (!id(emulator_relay).state) {
+            id(emulator_relay).turn_on();
+          }
 
 # Energise to take over the sensor; de-energise to hand it back.
 switch:
@@ -106,43 +167,34 @@ switch:
     restore_mode: ALWAYS_OFF
 
 number:
+  # This is what Home Assistant (or hpmpc) writes to.
   - platform: template
-    name: "Utegivare resistans"
-    id: utegivare_resistans
-    unit_of_measurement: "Ω"
+    name: "Wiper target"
+    id: wiper_target
+    unit_of_measurement: "step"
     min_value: 0
-    max_value: 250000
+    max_value: 255
     step: 1
     optimistic: true
     set_action:
-      - lambda: |-
-          // Independent sanity band. hpmpc already clamps what the pump may be
-          // shown, but the firmware must not trust the network: a corrupted or
-          // malicious value must not be able to present an absurd temperature.
-          const float R_MIN = 25000.0;    // about +20 C
-          const float R_MAX = 260000.0;   // about -25 C
-          float wanted = x;
-          if (wanted < R_MIN || wanted > R_MAX) {
-            ESP_LOGW("hpmpc", "Rejected out-of-band resistance %.0f ohm", wanted);
-            return;
-          }
-          id(target_ohm) = wanted;
-          id(last_command_ms) = millis();
-
-          // Two 100 kohm 10-bit rheostats in series; fill the first, spill into
-          // the second.
-          const float FULL_SCALE = 100000.0;
-          const int STEPS = 1023;
-          float first = wanted > FULL_SCALE ? FULL_SCALE : wanted;
-          float second = wanted > FULL_SCALE ? wanted - FULL_SCALE : 0.0f;
-          id(pot_coarse).set_level(first / FULL_SCALE * STEPS);
-          id(pot_fine).set_level(second / FULL_SCALE * STEPS);
-
-          if (!id(emulator_relay).state) {
-            id(emulator_relay).turn_on();
-          }
+      - script.execute:
+          id: set_wiper
+          step: !lambda "return (int) x;"
 
 sensor:
+  # The readback. Set entities.pot_wiper to this: without the pump's own
+  # reading it is the only thing that says the write arrived - and, more
+  # useful, the only thing that says the pot hit an end stop and clamped
+  # instead of applying what was asked for.
+  - platform: template
+    name: "MCP41100 wiper (0-255)"
+    id: mcp41100_wiper
+    accuracy_decimals: 0
+    lambda: |-
+      if (id(wiper_position) < 0) return {};
+      return (float) id(wiper_position);
+    update_interval: 30s
+
   - platform: template
     name: "Emulated outdoor temperature"
     id: emulated_outdoor
@@ -151,13 +203,17 @@ sensor:
     accuracy_decimals: 2
     lambda: |-
       // Inverse of the NTC table, so Home Assistant shows what the pump believes
-      // rather than a raw resistance nobody can read at a glance. Keep these two
+      // rather than a raw wiper position nobody can read at a glance. Keep these
       // arrays identical to the ntc section of config.yaml.
       static const float T[] = {-30,-25,-20,-15,-10,-5,0,5,10,15,20,25,30};
       static const float R[] = {347667,260639,196648,149283,114003,87562,
                                 67628,52514,40991,32159,25354,20084,15984};
       const int N = 13;
-      float r = id(target_ohm);
+      if (id(wiper_position) < 0) return {};
+      // Keep in step with pot: in config.yaml.
+      const float PER_STEP = 100000.0 / 255.0;
+      const float WIPER_OHM = 100.0;
+      float r = id(wiper_position) * PER_STEP + WIPER_OHM;
       if (r <= 0) return {};
       // R decreases as T increases, so walk down.
       for (int i = 0; i < N - 1; i++) {
@@ -184,46 +240,27 @@ interval:
             id(emulator_relay).turn_off();
           }
 
-# Replace with the driver for the parts you actually fit. AD5293 is SPI; the
-# MCP4xxx family and the AD527x family (I2C) work the same way from here - all
-# this code needs is "set wiper to N of 1023".
-output:
-  - platform: template
-    id: pot_coarse
-    type: float
-    write_action:
-      - lambda: |-
-          // TODO: shift out the 10-bit wiper value to the first rheostat.
-          ESP_LOGD("hpmpc", "coarse wiper -> %.0f", state);
-  - platform: template
-    id: pot_fine
-    type: float
-    write_action:
-      - lambda: |-
-          // TODO: shift out the 10-bit wiper value to the second rheostat.
-          ESP_LOGD("hpmpc", "fine wiper -> %.0f", state);
-
 
 # ---------------------------------------------------------------------------
 # COMMISSIONING
 #
-# 1. Do not connect the pump yet. Command a few resistances and measure the
-#    output with a multimeter. The two rheostats have real wiper resistance
-#    (tens of ohms each) and a tolerance of a few percent - measure, do not
-#    assume.
+# 1. Do not connect the pump yet. Command a few wiper positions and measure the
+#    output with a multimeter. The MCP41100 is a +/-20% part with tens of ohms
+#    of wiper resistance - measure, do not assume, and put what you measure into
+#    pot.resistance_ohm and pot.wiper_ohm.
 # 2. Calibrate against the PUMP, not against the sensor. Connect the emulator,
-#    command a resistance, and read what the pump's display says it means.
+#    command a position, and read what the pump's display says it means.
 #    Repeat at two or three well-separated values:
-#       hpmpc calibrate-ntc --point=-8.4:120000 --point=2.1:58000 --point=9.6:41000
+#       hpmpc calibrate-ntc --point=-5.4:87500 --point=2.1:58000 --point=9.6:41000
 #    Pairs taken this way include the wiring resistance, the connector and the
 #    pump's own linearisation - all of which a bench measurement of the
 #    thermistor misses. 'hpmpc check' prints a ready-made --point for whatever
-#    resistance is in effect right now.
+#    the pot is set to right now.
 # 3. Connect the pump with control.dry_run: true and offset 0. The pump's own
 #    display should read the real outdoor temperature. If it does not, the
-#    calibration is wrong - fix it before going further. Then set
-#    entities.pump_outdoor_temp so the controller keeps checking this by itself
-#    forever, instead of you having to remember to.
+#    calibration is wrong - fix it before going further.
 # 4. Command a steady -2 K offset for a day and check that the leaving water
 #    temperature rises by about slope * 2 K. Only then let the controller run.
+# 5. Before the first real cold snap, decide about the second pot. Below -7 C
+#    outdoors, one MCP41100 cannot tell this pump the truth.
 # ---------------------------------------------------------------------------

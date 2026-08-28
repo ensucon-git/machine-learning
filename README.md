@@ -84,6 +84,17 @@ tvinga in systemet i resistiv tillsatsvärme vid COP 1,0.
 går mot `fallback_offset` i stället för att sitta kvar på ett gammalt extremvärde,
 och säger rakt ut varför.
 
+### Vad potentiometern räcker till
+
+![hpmpc ntc-table](docs/screenshots/05-hardware.png)
+
+Överst en enda MCP41100, underst två i serie. Upplösningen är gott och väl
+tillräcklig i båda fallen — 0,10 K per steg kring nollan. Det är **räckvidden** som
+tar slut vid −7,4 °C med en krets: kallare än så finns ingen wiperposition att
+kommendera, och hårdvaran klipper värdet utan att säga ifrån. Därför jämförs
+`pot:`-sektionen mot `heat_pump.perceived_min_c` och varnar när de inte går ihop.
+Se [Vad som faktiskt krävs av hårdvaran](#vad-som-faktiskt-krävs-av-hårdvaran).
+
 ---
 
 ## Idén
@@ -702,13 +713,20 @@ men det är inget krav: hpmpc kopierar historiken till sitt eget arkiv varje
 styrcykel, så recordern behöver bara hålla längre än glappet mellan två cykler.
 Se [Historiken är vår egen](#historiken-är-vår-egen).
 
-Nödvändigt: **innetemperatur** och **utetemperatur**.
+Nödvändigt: **innetemperatur**. Det är den enda entiteten som måste finnas.
+
+Utetemperaturen hämtas från SMHI när `entities.outdoor_temp` är tom, vilket den är
+som standard — ingen utegivare behövs. Har du en givare vid huset är den bättre, för
+den mäter luften byggnaden faktiskt förlorar värme till istället för en 2,5 km stor
+rutas medelvärde. Skriv i så fall in dess entitets-id, så vinner den automatiskt.
+Detsamma gäller vind och molnighet: SMHI när inget är konfigurerat.
 
 Starkt rekommenderat: **framledningstemperatur** (gör modellanpassningen dramatiskt
 bättre) och **någon effektmätning** — antingen en mätare på pumpen, eller husets totala
 effekt per fas plus laddarens laddstatus, se [Vad drar värmepumpen?](#vad-drar-värmepumpen).
 
-Nyttigt: vind, molnighet, luftfuktighet (driver avfrostningsmodellen).
+Nyttigt: luftfuktighet (driver avfrostningsmodellen) och en avläsning av vad ESP32:n
+driver potentiometern till (`entities.pot_wiper`).
 
 ### 2. Installera
 
@@ -1036,31 +1054,56 @@ aldrig når ett tröskelvärde som betyder något.
 
 ### Vad som faktiskt krävs av hårdvaran
 
-En Daikin 20 kΩ-utegivare spänner ungefär 32 kΩ vid +15 °C till 197 kΩ vid −20 °C. En
-enda 8-bitars 100 kΩ digitalpotentiometer klarar varken räckvidden eller upplösningen.
-Det som fungerar:
-
-> **två 10-bitars 100 kΩ digitala reostater i serie** (t.ex. 2× AD5293-100)
-> → 0–200 kΩ i steg om ~195 Ω
-
-Kontrollera vad det ger innan du beställer:
+En Daikin 20 kΩ-utegivare spänner ungefär 25 kΩ vid +20 °C till 197 kΩ vid −20 °C.
+Anläggningen här har en **MCP41100** — 8 bitar, 100 kΩ, SPI — och det är värt att vara
+exakt om vad den klarar, för det är inte det man först gissar:
 
 ```bash
-hpmpc ntc-table --step-ohm 195
+hpmpc ntc-table --low -20 --high 20
 ```
 ```
-  temp (C)         ohm   K per 195.0 ohm
-     -20.0      196648             0.015
-       0.0       67628             0.049
-      15.0       32159             0.110
+Pot:       1 x mcp41100 in series, 256 positions, 392 ohm per step
+           reaches -7.4 to +30.0 degC
+
+  temp (C)         ohm   wiper     K per 392 ohm
+     -20.0      196648      --                    <- out of the pot's range
+     -10.0      114003      --                    <- out of the pot's range
+      -5.0       87562     223             0.074
+       0.0       67628     172             0.098
+      10.0       40991     104             0.170
+      20.0       25354      64             0.288  <- coarse
 ```
 
-Klart under de 0,2 K där kvantiseringen börjar synas. En 8-bitars 100 kΩ-krets hade gett
-runt 0,4 K vid +15 °C och inte nått −20 °C alls.
+**Upplösningen är inte problemet.** 0,10 K per steg kring nollan är gott och väl under
+de 0,2 K där kvantiseringen börjar synas. Det är **räckvidden** som tar slut: 100 kΩ
+motsvarar cirka −7,4 °C på den här kurvan, och kallare än så finns det ingen wiperposition
+för.
 
-`ha/esphome_daikin_outdoor_sensor.yaml` är en komplett ESPHome-nod med den topologin,
-en oberoende rimlighetsspärr i firmware, och en watchdog som släpper emulatorn efter 45
-minuter utan kommando.
+Under −7 °C ute sitter alltså wipern i ändläge, pumpen visas −7 när det är −15, och huset
+underhettar utan att någonting säger ifrån. Tre lager fångar det:
+
+1. `heat_pump.perceived_min_c: -7` gör att optimeraren aldrig planerar en offset som
+   hårdvaran inte kan leverera. `hpmpc check` och `hpmpc ntc-table` varnar om den
+   inställningen och `pot:`-sektionen inte går ihop.
+2. `entities.pot_wiper` läser tillbaka vad ESP32:n faktiskt driver. Står den i ett
+   ändläge samtidigt som något annat begärdes rapporteras det i varje styrcykel.
+3. Automationen `MPC potentiometer at end stop` i HA-paketet larmar om wipern står kvar
+   i ändläge en halvtimme.
+
+Den riktiga lösningen är billig: **en andra MCP41100 i serie**, och `pot.devices: 2`.
+
+```
+Pot:       2 x mcp41100 in series, 511 positions, 392 ohm per step
+           reaches -20.3 to +30.0 degC
+```
+
+Samma steglängd, dubbla räckvidden — seriekopplade kretsar köper räckvidd, inte
+upplösning. En fast resistor i serie (`pot.series_ohm`) skjuter hela bandet kallare
+istället, men på bekostnad av den varma änden, och semesterläget bor i den varma änden.
+
+`ha/esphome_daikin_outdoor_sensor.yaml` är en komplett ESPHome-nod för MCP41100 med
+plats förberedd för den andra kretsen, en oberoende rimlighetsspärr i firmware, och en
+watchdog som släpper emulatorn efter 45 minuter utan kommando.
 
 **Den riktiga givaren sitter kvar** via ett reläs NC-kontakt. ESP:n måste aktivt dra
 reläet för att ta över. Strömavbrott, wifi-tapp, kraschad firmware — pumpen faller
@@ -1078,6 +1121,13 @@ och då kan den du agerar på och den du tittar på aldrig säga emot varandra.
 | `offset_output` | K | beslutet självt. Historiken läses tillbaka härifrån, utan omräkning |
 | `fake_temperature_output` | °C | verklig utetemperatur + offset — **temperaturen att visa pumpen** |
 | `resistance_output` | Ω | omräknat här via `ntc:`-sektionen, om du hellre vill att hpmpc äger den kurvan |
+| `wiper_output` | steg | potentiometerposition, via `ntc:` **och** `pot:`, om hpmpc ska äga båda kurvorna |
+
+Och åt andra hållet finns en avläsning: `entities.pot_wiper` — vad ESP32:n rapporterar
+att den faktiskt driver potentiometern till. Utan pumpens egen avläsning är det den enda
+återkopplingen som finns i hela ställdonskedjan, och den fångar det en korrekt NTC-tabell
+inte kan fånga: att hårdvaran slog i ändläget och klippte värdet istället för att
+tillämpa det.
 
 **För din uppsättning är `fake_temperature_output` den intressanta.** Den ger dig en
 färdig temperatur; omräkningen till ohm gör du i Home Assistant, där du kan justera
@@ -1127,24 +1177,25 @@ i stället:
 hpmpc check
 ```
 ```
-Actuator calibration
-  real outdoor        -6.40 C
-  offset applied      +1.50 K
-  should be showing   -4.90 C
-  pump believes       -4.80 C   (sensor.daikin_utetemperatur)
-  error               +0.10 K
-  we sent             88184 ohm, which our table calls -4.90 C
+Actuator
+  should be showing   -4.90 C   (input_number.varmepump_fiktiv_utetemp)
+  ESP32 is driving    wiper 225 = 88335 ohm = -5.04 C
+                      (sensor.varmepump_proxy_mcp41100_wiper_0_255)
+  wiper commanded     225   (error -0.14 K)
 
-  -> a calibration pair for your pump: --point=-4.8:88184
+  Note: this checks the chain as far as the ESP32 only. It cannot see a wrong NTC
+  table - for that, read the pump's display once and run 'hpmpc calibrate-ntc'.
 ```
 
+Wiperavläsningen ger dig den ena halvan av kalibreringsparet — vilken resistans
+som faktiskt ligger på ingången. Den andra halvan läser du på **pumpens display**.
 Ett par avläst så — "jag skickade R ohm, pumpen säger T grader" — innefattar
 kabelresistansen, kontakten och pumpens egen linjärisering. En bänkmätning av
 termistorn missar allt det. Samla två eller tre vid väl åtskilda temperaturer
 och mata in dem:
 
 ```bash
-hpmpc calibrate-ntc --point=-8.4:120000 --point=2.1:58000 --point=9.6:41000
+hpmpc calibrate-ntc --point=-5.4:88335 --point=2.1:58000 --point=9.6:41000
 ```
 
 ### Och om pumpens avläsning går att komma åt

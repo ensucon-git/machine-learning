@@ -16,7 +16,7 @@ import pandas as pd
 
 from .config import Config
 from .ha import HomeAssistant
-from .ntc import resistance_to_temperature
+from .ntc import resistance_to_temperature, wiper_to_resistance
 from .solar import irradiance_from_cloud_cover
 
 log = logging.getLogger(__name__)
@@ -27,7 +27,8 @@ CONTINUOUS = [
     "t_supply", "t_return", "power", "house_l1", "house_l2", "house_l3", "house_power",
 ]
 # Signals that hold their value until explicitly changed.
-STEPWISE = ["price", "output_offset", "output_fake_temp", "output_resistance", "ev_charging"]
+STEPWISE = ["price", "output_offset", "output_fake_temp", "output_resistance",
+            "output_wiper", "pot_wiper", "ev_charging"]
 
 REQUIRED = ["t_indoor", "t_outdoor"]
 
@@ -54,6 +55,8 @@ def column_map(cfg: Config) -> dict[str, str]:
         e.offset_output: "output_offset",
         e.fake_temperature_output: "output_fake_temp",
         e.resistance_output: "output_resistance",
+        e.wiper_output: "output_wiper",
+        e.pot_wiper: "pot_wiper",
     }
     return {k: v for k, v in pairs.items() if k}
 
@@ -127,6 +130,11 @@ def applied_offset(frame: pd.DataFrame, cfg: Config) -> pd.Series:
     cannot disagree with what the controller decided. The others are recovered by
     subtracting the outdoor temperature, which is exact for degrees and
     only as good as the NTC table for ohm.
+
+    ``pot_wiper`` comes last but is the most honest of the lot: it is what the
+    ESP32 reports it actually drove, so it includes anything the hardware
+    clamped or refused. Prefer it over the commanded value only when there is
+    no kelvin entity, because it also carries the NTC table's errors.
     """
     zeros = pd.Series(0.0, index=frame.index, name="offset")
     if "output_offset" in frame and frame["output_offset"].notna().any():
@@ -140,7 +148,15 @@ def applied_offset(frame: pd.DataFrame, cfg: Config) -> pd.Series:
         )
         value = fake - frame["t_outdoor"]
     else:
-        return zeros
+        wiper = next(
+            (c for c in ("output_wiper", "pot_wiper") if c in frame and frame[c].notna().any()),
+            None,
+        )
+        if wiper is None:
+            return zeros
+        ohm = wiper_to_resistance(frame[wiper].to_numpy(dtype=float), cfg.pot)
+        fake = pd.Series(resistance_to_temperature(ohm, cfg.ntc), index=frame.index)
+        value = fake - frame["t_outdoor"]
     return value.astype(float).ffill().fillna(0.0).clip(cfg.control.offset_min, cfg.control.offset_max)
 
 

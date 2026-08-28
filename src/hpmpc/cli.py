@@ -82,28 +82,85 @@ def cmd_init_config(args: argparse.Namespace) -> int:
 
 def cmd_ntc_table(args: argparse.Namespace) -> int:
     """Print the temperature/resistance table so it can be checked against the
-    pump's service manual, plus the resolution a given resistance step buys."""
-    from .ntc import resolution_check, temperature_to_resistance
+    pump's service manual, and what the configured potentiometer can do with it."""
+    from .ntc import (
+        reachable_temperatures,
+        resistance_to_wiper,
+        resolution_check,
+        temperature_to_resistance,
+        wiper_span,
+    )
 
     cfg = _load(args)
+    pot = cfg.pot
+    per_step = pot.resistance_ohm / (pot.steps - 1)
+    step_ohm = args.step_ohm if args.step_ohm is not None else per_step
+
     temps = np.arange(args.low, args.high + 0.001, args.step)
     print(f"NTC model: {cfg.ntc.model}", end="")
     if cfg.ntc.model == "beta":
         print(f" (R25 = {cfg.ntc.r25:.0f} ohm, B = {cfg.ntc.beta:.0f})")
     else:
         print(f" ({len(cfg.ntc.table_temp_c)} table points)")
-    print(f"\n{'temp (C)':>10}{'ohm':>12}{'K per ' + str(args.step_ohm) + ' ohm':>18}")
+
+    coldest, warmest = reachable_temperatures(pot, cfg.ntc)
+    span = wiper_span(pot)
+    print(f"Pot:       {pot.devices} x {pot.model} in series, {span + 1} positions, "
+          f"{per_step:.0f} ohm per step")
+    print(f"           reaches {coldest:+.1f} to {warmest:+.1f} degC")
+
+    print(f"\n{'temp (C)':>10}{'ohm':>12}{'wiper':>8}{'K per ' + f'{step_ohm:.0f}' + ' ohm':>18}")
     for temp in temps:
         ohm = float(temperature_to_resistance(float(temp), cfg.ntc))
-        resolution = resolution_check(cfg.ntc, float(temp), args.step_ohm)
+        resolution = resolution_check(cfg.ntc, float(temp), step_ohm)
+        if not coldest - 0.05 <= float(temp) <= warmest + 0.05:
+            print(f"{temp:>10.1f}{ohm:>12.0f}{'--':>8}{'':>18}  <- out of the pot's range")
+            continue
+        wiper = int(resistance_to_wiper(ohm, pot))
         flag = "  <- coarse" if resolution > 0.2 else ""
-        print(f"{temp:>10.1f}{ohm:>12.0f}{resolution:>18.3f}{flag}")
+        print(f"{temp:>10.1f}{ohm:>12.0f}{wiper:>8}{resolution:>18.3f}{flag}")
+
     print(
         "\nA step worth more than about 0.2 K makes the controller quantise noticeably.\n"
-        "Size the digital potentiometer (or its series resistor) around the outdoor\n"
-        "temperatures you actually see, not the whole curve."
+        "Range matters more than resolution: a temperature outside the band above cannot\n"
+        "be commanded at all, and the hardware will clamp it without saying so."
     )
+    _pot_range_warning(cfg)
     return 0
+
+
+def _pot_range_warning(cfg: Config) -> bool:
+    """Compare what the pot can reach with what the controller is allowed to command.
+
+    Getting this wrong is silent by construction: the controller plans an offset,
+    the hardware clamps at its end stop, the pump sees something warmer than
+    asked for and the house just underheats.
+    """
+    from .ntc import reachable_temperatures
+
+    coldest, warmest = reachable_temperatures(cfg.pot, cfg.ntc)
+    pump = cfg.heat_pump
+    ok = True
+    if pump.perceived_min_c < coldest - 0.05:
+        ok = False
+        print(
+            f"\nWARNING  heat_pump.perceived_min_c is {pump.perceived_min_c:.0f} C but the "
+            f"potentiometer bottoms out at {coldest:+.1f} C.\n"
+            f"         Anything colder is clamped by the hardware without telling anyone, and on a\n"
+            f"         cold day the pump would be shown {coldest:+.1f} C when it is actually much\n"
+            f"         colder - it would underheat badly. Either set perceived_min_c to "
+            f"{coldest:.0f},\n"
+            f"         or wire a second {cfg.pot.model} in series and set pot.devices: 2."
+        )
+    if pump.perceived_max_c > warmest + 0.05:
+        ok = False
+        print(
+            f"\nWARNING  heat_pump.perceived_max_c is {pump.perceived_max_c:.0f} C but the "
+            f"potentiometer stops at {warmest:+.1f} C.\n"
+            f"         Holiday mode works by showing the pump a temperature above its heating "
+            f"cut-off,\n         so this is the end that setback depends on."
+        )
+    return ok
 
 
 def cmd_mode(args: argparse.Namespace) -> int:
@@ -617,56 +674,107 @@ def cmd_check(args: argparse.Namespace) -> int:
 
 
 def _check_actuator_calibration(cfg: Config, ha: HomeAssistant) -> None:
-    """Compare what the pump believes with what the offset says it should.
+    """Compare what actually reached the sensor input with what was commanded.
 
     Everything else about the actuator is open loop: we command a resistance and
-    trust the NTC table. This is the one place the loop closes.
+    trust the NTC table. There are two places the loop can close - the pump's own
+    reading, which covers the whole chain, and the ESP32's wiper readback, which
+    stops short of the pump but catches the one thing a correct table cannot:
+    a value the hardware could not reach.
     """
     from .controller import ControllerState
-    from .ntc import resistance_to_temperature
+    from .ntc import (
+        reachable_temperatures,
+        resistance_to_temperature,
+        resistance_to_wiper,
+        temperature_to_resistance,
+        wiper_span,
+        wiper_to_resistance,
+    )
 
-    if not cfg.entities.pump_outdoor_temp:
-        print(
-            "\nActuator: entities.pump_outdoor_temp is not set, so nothing verifies that the pump\n"
-            "          really sees what was commanded. Many pumps only show that number on their\n"
-            "          own display, in which case this stays a job you do by eye at commissioning:\n"
-            "          command a known value, read the display, and check that they agree.\n"
-            "          'hpmpc plan' prints the temperature the pump should be seeing right now."
-        )
-        return
-
-    reported = ha.get_state(cfg.entities.pump_outdoor_temp)
-    outdoor = ha.get_state(cfg.entities.outdoor_temp) if cfg.entities.outdoor_temp else None
-    if reported is None or reported.numeric is None or outdoor is None or outdoor.numeric is None:
-        print("\nActuator: pump or outdoor temperature unavailable, cannot check calibration")
-        return
-
+    entities = cfg.entities
     state = ControllerState.load(cfg.paths.state_file)
-    offset = state.last_offset if state else 0.0
-    commanded = outdoor.numeric + offset
-    error = reported.numeric - commanded
 
-    print("\nActuator calibration")
-    print(f"  real outdoor        {outdoor.numeric:+.2f} C")
-    print(f"  offset applied      {offset:+.2f} K")
-    print(f"  should be showing   {commanded:+.2f} C")
-    print(f"  pump believes       {reported.numeric:+.2f} C   ({cfg.entities.pump_outdoor_temp})")
-    print(f"  error               {error:+.2f} K")
-    if state and state.actuator_samples > 20:
-        print(f"  error, smoothed     {state.actuator_error_c:+.2f} K over {state.actuator_samples} cycles")
+    # What the pump should be seeing right now. The controller already wrote
+    # that number, so prefer it: it needs no outdoor sensor, which is the point
+    # of letting the outdoor temperature come from SMHI.
+    commanded: float | None = None
+    commanded_from = ""
+    shown = ha.get_state(entities.fake_temperature_output) if entities.fake_temperature_output else None
+    if shown is not None and shown.numeric is not None:
+        commanded, commanded_from = float(shown.numeric), entities.fake_temperature_output
+    else:
+        outdoor = ha.get_state(entities.outdoor_temp) if entities.outdoor_temp else None
+        if outdoor is not None and outdoor.numeric is not None and state is not None:
+            commanded = float(outdoor.numeric) + state.last_offset
+            commanded_from = f"{entities.outdoor_temp} + last offset"
 
-    raw = ha.get_state(cfg.entities.resistance_output) if cfg.entities.resistance_output else None
-    if raw is not None and raw.numeric:
-        implied = float(resistance_to_temperature(raw.numeric, cfg.ntc))
-        print(f"  we sent             {raw.numeric:.0f} ohm, which our table calls {implied:+.2f} C")
+    reported = ha.get_state(entities.pump_outdoor_temp) if entities.pump_outdoor_temp else None
+    wiper = ha.get_state(entities.pot_wiper) if entities.pot_wiper else None
+    has_pump = reported is not None and reported.numeric is not None
+    has_wiper = wiper is not None and wiper.numeric is not None
+
+    if not has_pump and not has_wiper:
         print(
-            f"\n  -> a calibration pair for your pump: --point={reported.numeric:.1f}:{raw.numeric:.0f}\n"
-            "     Collect two or three at different outdoor temperatures and feed them to\n"
-            "     'hpmpc calibrate-ntc'. Pairs taken from the pump's own display beat measuring\n"
-            "     the sensor: they include the wiring, the connector and the pump's own curve."
+            "\nActuator: nothing reads back what actually reached the pump. Set "
+            "entities.pot_wiper to\n          what the ESP32 reports it is driving, or "
+            "entities.pump_outdoor_temp if the pump\n          exposes its own reading. Without "
+            "either, commissioning is a job you do by eye:\n          command a known value, read "
+            "the pump's display, check that they agree."
         )
-    elif abs(error) > cfg.control.actuator_error_warn_c:
-        print(f"\n  WARNING: {abs(error):.1f} K off. Check the NTC table before running for real.")
+        _pot_range_warning(cfg)
+        return
+
+    print("\nActuator")
+    if commanded is not None:
+        print(f"  should be showing   {commanded:+.2f} C   ({commanded_from})")
+    else:
+        print("  should be showing   unknown - no fake-temperature entity and no outdoor sensor")
+
+    if has_wiper:
+        step = float(wiper.numeric)
+        ohm = float(wiper_to_resistance(step, cfg.pot))
+        driven = float(resistance_to_temperature(ohm, cfg.ntc))
+        print(f"  ESP32 is driving    wiper {int(step)} = {ohm:.0f} ohm = {driven:+.2f} C "
+              f"({entities.pot_wiper})")
+        if commanded is not None:
+            wanted = int(resistance_to_wiper(temperature_to_resistance(commanded, cfg.ntc), cfg.pot))
+            print(f"  wiper commanded     {wanted}   (error {driven - commanded:+.2f} K)")
+            if int(step) in (0, wiper_span(cfg.pot)):
+                coldest, warmest = reachable_temperatures(cfg.pot, cfg.ntc)
+                print(f"  WARNING: at an end stop. This pot only reaches {coldest:+.1f} to "
+                      f"{warmest:+.1f} C.")
+
+    if has_pump:
+        error = float(reported.numeric) - (commanded if commanded is not None else float(reported.numeric))
+        print(f"  pump believes       {reported.numeric:+.2f} C   ({entities.pump_outdoor_temp})")
+        if commanded is not None:
+            print(f"  error               {error:+.2f} K")
+        if state and state.actuator_samples > 20:
+            print(f"  error, smoothed     {state.actuator_error_c:+.2f} K over "
+                  f"{state.actuator_samples} cycles")
+
+        raw = ha.get_state(entities.resistance_output) if entities.resistance_output else None
+        sent_ohm = float(raw.numeric) if raw is not None and raw.numeric else (
+            float(wiper_to_resistance(float(wiper.numeric), cfg.pot)) if has_wiper else None
+        )
+        if sent_ohm:
+            print(
+                f"\n  -> a calibration pair for your pump: "
+                f"--point={reported.numeric:.1f}:{sent_ohm:.0f}\n"
+                "     Collect two or three at different outdoor temperatures and feed them to\n"
+                "     'hpmpc calibrate-ntc'. Pairs taken from the pump's own display beat measuring\n"
+                "     the sensor: they include the wiring, the connector and the pump's own curve."
+            )
+        elif commanded is not None and abs(error) > cfg.control.actuator_error_warn_c:
+            print(f"\n  WARNING: {abs(error):.1f} K off. Check the NTC table before running for real.")
+    elif has_wiper:
+        print(
+            "\n  Note: this checks the chain as far as the ESP32 only. It cannot see a wrong NTC\n"
+            "  table - for that, read the pump's display once and run 'hpmpc calibrate-ntc'."
+        )
+
+    _pot_range_warning(cfg)
 
 
 def cmd_collect(args: argparse.Namespace) -> int:
@@ -848,7 +956,8 @@ def _print_plan(report: dict[str, Any]) -> None:
                     continue
                 age = readings.get(f"{key}_age_min")
                 suffix = f"   ({age:.0f} min old)" if isinstance(age, (int, float)) else ""
-                print(f"  {key:16}{value}{suffix}")
+                shown = f"{value:.2f}" if isinstance(value, float) else value
+                print(f"  {key:22} {shown}{suffix}")
         return
     print(f"\nOffset now: {report['offset']:+.2f} K   [{report.get('mode')}]")
     print(_format_outputs(report))
@@ -978,7 +1087,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--low", type=float, default=-25.0)
     p.add_argument("--high", type=float, default=20.0)
     p.add_argument("--step", type=float, default=5.0)
-    p.add_argument("--step-ohm", type=float, default=78.0, help="one step of your digital potentiometer")
+    p.add_argument("--step-ohm", type=float, default=None,
+                   help="resistance step to report resolution for (default: one step of the "
+                        "configured pot)")
     p.set_defaults(func=cmd_ntc_table)
 
     p = sub.add_parser("archive", help="our own copy of the history - span, gaps, size")

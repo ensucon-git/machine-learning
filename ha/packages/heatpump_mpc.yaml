@@ -173,6 +173,29 @@ template:
             {{ (r25 * (2.718281828459045 ** (beta * (1/(t + 273.15) - 1/298.15)))) | round(0) }}
           {% endif %}
 
+      # The same target as a wiper position, which is what the ESP32 actually
+      # sets. One MCP41100: 100 kohm across 256 taps, plus ~100 ohm of wiper.
+      # Set POTS to the number wired in series - two doubles the range, which is
+      # what it takes to reach -20 C on the curve above.
+      #
+      # This CLAMPS, and that matters: a target beyond the last tap cannot be
+      # applied, and rounding it to the end stop silently is how the pump ends up
+      # being shown -7 C on a -15 C day. The sanity automation below watches for
+      # exactly that.
+      - name: "Utegivare wiper"
+        unique_id: hpmpc_target_wiper
+        unit_of_measurement: "step"
+        state: >
+          {% set r = states('sensor.utegivare_malresistans') | float(none) %}
+          {% set pots = 1 %}
+          {% if r is none %}
+            {{ none }}
+          {% else %}
+            {% set step = 100000 / 255 %}
+            {% set raw = ((r - 100 * pots) / step) | round(0) %}
+            {{ [[raw, 0] | max, 255 * pots] | min }}
+          {% endif %}
+
       # Minutes since the controller last reported in - drives the dead-man switch.
       - name: "MPC age"
         unique_id: hpmpc_age_minutes
@@ -266,16 +289,22 @@ automation:
   # ---- Sanity check on the faked temperature ----------------------------
   # Independent of anything hpmpc does: if what the pump is being shown drifts
   # implausibly far from the real outdoor temperature, stop the experiment.
+  # The offset is the whole deviation from reality, so it is checked directly
+  # rather than against an outdoor sensor - there need not be one, the real
+  # outdoor temperature can come from SMHI inside the controller.
+  #
+  # Raise the limit if you run holiday mode, which legitimately needs about
+  # twenty kelvin to coast down to 16 C in winter.
   - alias: "MPC offset sanity check"
     id: hpmpc_offset_sanity
     mode: single
     trigger:
-      - platform: state
-        entity_id: sensor.emulated_outdoor_temperature
-    condition: >
-      {% set faked = states('sensor.emulated_outdoor_temperature') | float(none) %}
-      {% set real = states('sensor.ute_temperatur') | float(none) %}
-      {{ faked is not none and real is not none and (faked - real) | abs > 8 }}
+      - platform: numeric_state
+        entity_id: input_number.varmepump_offset
+        above: 25
+      - platform: numeric_state
+        entity_id: input_number.varmepump_offset
+        below: -10
     action:
       - service: switch.turn_off
         target:
@@ -287,9 +316,37 @@ automation:
         data:
           title: "Heat pump MPC stopped"
           message: >
-            The pump was being shown {{ states('sensor.emulated_outdoor_temperature') }} °C
-            while the real outdoor temperature is {{ states('sensor.ute_temperatur') }} °C.
+            The controller asked for an offset of {{ states('input_number.varmepump_offset') }} K,
+            showing the pump {{ states('input_number.varmepump_fiktiv_utetemp') }} °C.
             The emulator has been released and MPC control switched off.
+
+  # ---- The potentiometer ran out of range -------------------------------
+  # A single MCP41100 reaches about -7 C on a 20 kohm Daikin curve. Past that it
+  # sits at its end stop and the pump is shown something warmer than asked for,
+  # with nothing in any log to say so - the house just underheats. Two in series
+  # fix it; until then, this says it out loud.
+  - alias: "MPC potentiometer at end stop"
+    id: hpmpc_pot_end_stop
+    mode: single
+    trigger:
+      - platform: state
+        entity_id: sensor.varmepump_proxy_mcp41100_wiper_0_255
+        to: "255"
+        for: "00:30:00"
+      - platform: state
+        entity_id: sensor.varmepump_proxy_mcp41100_wiper_0_255
+        to: "0"
+        for: "00:30:00"
+    action:
+      - service: persistent_notification.create
+        data:
+          title: "Outdoor sensor emulator at its limit"
+          message: >
+            The potentiometer has been at wiper {{ states('sensor.varmepump_proxy_mcp41100_wiper_0_255') }}
+            for half an hour. The controller wants to show the pump
+            {{ states('input_number.varmepump_fiktiv_utetemp') }} °C but the hardware cannot reach it,
+            so the pump is seeing something else. Raise heat_pump.perceived_min_c to what this
+            pot can do, or wire a second one in series and set pot.devices: 2.
 
   # ---- Come home from holiday ------------------------------------------
   # The controller already ramps the comfort band back at the return time, and
@@ -325,19 +382,21 @@ automation:
     mode: single
     trigger:
       - platform: state
-        entity_id: sensor.utegivare_malresistans
+        entity_id: sensor.utegivare_wiper
     condition:
       - condition: state
         entity_id: input_boolean.varmepump_mpc_aktiv
         state: "on"
       - condition: template
-        value_template: "{{ states('sensor.utegivare_malresistans') | float(0) > 0 }}"
+        value_template: "{{ states('sensor.utegivare_wiper') | float(-1) >= 0 }}"
     action:
+      # Must match what your ESP node actually exposes - check Developer Tools ->
+      # States for the number entity belonging to the varmepump_proxy node.
       - service: number.set_value
         target:
-          entity_id: number.utegivare_resistans
+          entity_id: number.varmepump_proxy_wiper_target
         data:
-          value: "{{ states('sensor.utegivare_malresistans') | float }}"
+          value: "{{ states('sensor.utegivare_wiper') | int }}"
 
   # ---- Actuator calibration drift --------------------------------------
   # Everything about the offset is open loop except this. If what the pump

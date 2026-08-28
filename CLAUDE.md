@@ -19,10 +19,21 @@ bestämt, varför, och vilka fällor som redan är upptäckta.
 | Ort | Falkvägen, Norrköping (58.5877, 16.1924) |
 | Elområde | SE3, rörligt pris |
 | Elöverföring + energiskatt | **0,7084 kr/kWh exkl. moms** (= 0,8855 inkl.) |
-| Ställdon | ESP32 + digitalt motstånd på pumpens utegivare |
+| Ställdon | ESP32 + **MCP41100** (8 bitar, 100 kΩ, SPI) på pumpens utegivare |
 | Effektmätning | Victron, **hela husets effekt per fas** — ingen mätare enbart på pumpen |
 | Elbilsladdare | 11 kW över alla tre faser, `binary_sensor.eh6nh5cd_charging` (`Charging` / `Not charging`) |
 | Körs på | NUC, Docker (Portainer), skilt från Home Assistant |
+| Utegivare | **ingen** — utetemperaturen hämtas från SMHI. `entities.outdoor_temp` finns kvar för att koppla in en givare senare |
+
+Entiteterna, som de faktiskt heter:
+
+| roll | entity_id |
+|---|---|
+| innetemperatur (mitt i huset) | `sensor.hall_temperature_2` |
+| husets effekt per fas | `sensor.gx_device_consumption_power_l1` / `_l2` / `_l3` |
+| laddstatus | `binary_sensor.eh6nh5cd_charging` |
+| wiperavläsning från ESP32 | `sensor.varmepump_proxy_mcp41100_wiper_0_255` |
+| utgångar | `input_number.varmepump_offset`, `input_number.varmepump_fiktiv_utetemp` |
 
 Användaren skriver svenska. Svara på svenska; kod och kommentarer på engelska.
 
@@ -54,6 +65,7 @@ Home Assistant ──historik──►  dataset ──►  systemidentifiering �
 | `mpc.py` | CEM-optimerare med batchade utrullningar |
 | `comfort.py` | Börvärde, lägen, komfortschema över horisonten |
 | `controller.py` | Styrslinga, observatör, säkerhet, lägen, utgångar |
+| `ntc.py` | Givarkurva (beta/tabell) + potentiometerns geometri och räckvidd |
 | `providers/` | SMHI-prognos, SE3-spotpris, geokodning |
 | `settings.py` | Inställningar i drift + säker redigering av `config.yaml` |
 | `evaluate.py` | Backtest |
@@ -141,7 +153,7 @@ terminalvärderingen fixar, fast i utvärderingen.
 
 ## Verifierat kontra antaget
 
-**Verifierat** (285 tester, syntetiskt hus med känd sanning):
+**Verifierat** (303 tester, syntetiskt hus med känd sanning):
 - Identifieringen återfinner värmekurva (lutning 0,3495 mot 0,35, R² 0,997) och
   husparametrar (UA +3 %, Ci +4 %, `k_wind` +3 %, plattans tidskonstant inom 8 %).
 - Prediktionsfel 0,085 °C över 12 h, 0,066 °C över 48 h (persistensbaslinje 1,01 °C).
@@ -161,9 +173,14 @@ terminalvärderingen fixar, fast i utvärderingen.
   blockerad av sessionens policy. Parsning, cachning, felhantering och
   reservvägar är testade mot mockade svar. `hpmpc providers` är första
   kommandot att köra på riktig maskin.
+- **`pot:`-siffrorna är MCP41100:ans typvärden** (100 kΩ ±20 %, 256 steg,
+  ~100 Ω wiper), inte uppmätta på den faktiska kretsen. Mät med multimeter vid
+  idrifttagning och skriv in `resistance_ohm`/`wiper_ohm`.
 - **NTC-tabellen är en typisk Daikin 20 kΩ-givare**, inte uppmätt på den
   faktiska givaren. `hpmpc calibrate-ntc` finns för att rätta det, och
-  `entities.pump_outdoor_temp` för att verifiera det kontinuerligt.
+  `entities.pump_outdoor_temp` för att verifiera det kontinuerligt — men den
+  pumpen visar bara talet på displayen, så i praktiken är `entities.pot_wiper`
+  den enda återkopplingen och den når bara fram till ESP32:n.
 - **Docker-imagen är inte byggd** — ingen docker-daemon i utvecklingsmiljön. Den
   motsvarande wheel-installationen är verifierad, inklusive paketdata.
 - **Ingenting har körts mot en riktig Home Assistant.** HA-klienten är testad mot
@@ -177,8 +194,19 @@ terminalvärderingen fixar, fast i utvärderingen.
   driftområdesgränser och om aggregatet får gå. Daikins innedel kan ta en extern
   utegivare (KRCS01-1) och via en field setting använda *den* för kurvan. Koden
   för den inställningen skiljer mellan generationer — slå upp i installatörsmanualen.
-- **En 8-bitars 100 kΩ digitalpotentiometer räcker inte.** Givaren spänner
-  32–197 kΩ. Två 10-bitars 100 kΩ reostater i serie ger 0,015–0,11 K upplösning.
+- **MCP41100:ans problem är räckvidden, inte upplösningen.** Det var fel i den
+  här filen tidigare. 392 Ω per steg ger 0,10 K vid nollan och 0,29 K vid +20 —
+  gott nog. Men 100 kΩ tar slut vid **−7,4 °C** på Daikinkurvan, och kallare än
+  så finns ingen wiperposition. Under −7 ute sitter wipern i ändläge, pumpen
+  visas −7 när det är −15, och huset underhettar tyst. Därför är
+  `heat_pump.perceived_min_c: -7` i exempelkonfigurationen, därför varnar
+  `hpmpc check`/`ntc-table` när den och `pot:` inte går ihop, och därför läses
+  `entities.pot_wiper` tillbaka varje cykel. Fixen är en **andra MCP41100 i
+  serie** och `pot.devices: 2` → −20,3 °C vid samma steglängd. Seriekopplade
+  kretsar ger räckvidd, inte upplösning.
+- **`pot:` är skild från `ntc:` med flit.** `ntc:` är givarkurvan man kalibrerar,
+  `pot:` är vad hårdvaran kan. En omkalibrering av kurvan får inte tyst ändra
+  hårdvarans gränser.
 - **Elbilsladdarens sensor säger `Charging`/`Not charging`**, inte `on`/`off`.
   `ha.BOOLEAN_STATES` mappar båda.
 - **Nord Pool avräknar i kvartstimmar** — 96 priser per dygn. Ingenting i koden
@@ -202,9 +230,10 @@ terminalvärderingen fixar, fast i utvärderingen.
 - **Arkivet och recordern kan inte hamna i konflikt.** Raderas arkivet fyller det
   sig från det recordern har kvar; kortas recorderns retention behåller arkivet
   det redan kopierat. `training.archive: false` går direkt mot recordern som förut.
-- **Utetemperaturen får komma från SMHI** om ingen givare är konfigurerad. En givare
-  vid huset är bättre när den finns — den mäter luften byggnaden faktiskt förlorar
-  värme till — men det ska inte vara ett krav att ha HA i loopen för det.
+- **Utetemperaturen kommer från SMHI** eftersom `entities.outdoor_temp` är tom här.
+  En givare vid huset är bättre när den finns — den mäter luften byggnaden faktiskt
+  förlorar värme till — och vinner automatiskt så fort entiteten fylls i. Det ska
+  inte vara ett krav att ha HA i loopen för det.
 - **Kalibrera mot pumpens display, inte mot givaren.** Ett par avlästa som
   "jag skickade R, pumpen säger T" innefattar kabelresistans, kontakt och
   pumpens egen linjärisering. En bänkmätning av termistorn missar allt det.
@@ -241,6 +270,7 @@ hpmpc providers      # SMHI + SE3-priser, plus faktisk marginalkostnad
 hpmpc pump-table     # COP- och kapacitetstabeller
 hpmpc curve --point=-15:40 --point=15:25        # Daikins tvåpunktskurva -> lutning/offset
 hpmpc calibrate-ntc --point=0:66800 --point=25:20000
+hpmpc ntc-table      # vad potentiometern faktiskt når, och per steg
 hpmpc mode holiday   # byt komfortläge
 hpmpc settings       # vad som går att ändra i drift
 hpmpc set control.price_addition 0.7084
