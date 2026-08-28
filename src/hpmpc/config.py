@@ -149,6 +149,18 @@ class EntityConfig:
             "wiper": self.wiper_output,
         }
 
+    def self_published(self) -> set[str]:
+        """Entities hpmpc puts into Home Assistant itself, through the states API.
+
+        Nothing has to define these first, so "it does not exist yet" is the
+        normal state of an install that has not completed a control cycle - not
+        something to report as missing.
+        """
+        published = {v for v in self.outputs().values() if v.startswith("sensor.")}
+        if self.status_entity:
+            published.add(self.status_entity)
+        return published
+
     def all_sensor_ids(self) -> list[str]:
         names = [
             self.indoor_temp,

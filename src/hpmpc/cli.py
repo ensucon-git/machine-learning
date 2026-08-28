@@ -625,7 +625,7 @@ def cmd_check(args: argparse.Namespace) -> int:
     print(f"Home Assistant reachable at {cfg.home_assistant.base_url}")
 
     ok = True
-    published = {v for v in cfg.entities.outputs().values() if v.startswith("sensor.")}
+    published = cfg.entities.self_published()
     for name, entity_id in vars(cfg.entities).items():
         if not entity_id or name == "extra":
             continue
@@ -651,7 +651,7 @@ def cmd_check(args: argparse.Namespace) -> int:
                 print(f"  WARNING  {kind} output must be a "
                       f"{'/'.join(sorted(OUTPUT_DOMAINS))} entity, got '{domain}'")
                 ok = False
-        if published:
+        if published & set(cfg.entities.outputs().values()):
             print("  note     sensor outputs are published by hpmpc, so no helper is needed - but\n"
                   "           they are forgotten on a Home Assistant restart until the next cycle.\n"
                   "           Drive the actuator from an input_number, which restores its value.")

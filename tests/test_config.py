@@ -97,3 +97,21 @@ def test_validation_rejects_inconsistent_settings(section, changes, message):
         setattr(getattr(cfg, section), key, value)
     with pytest.raises(ValueError, match=message):
         cfg.validate()
+
+
+def test_the_status_entity_is_one_hpmpc_publishes_itself(cfg):
+    """It goes in through the states API, so nothing defines it first and a
+    fresh install simply has not created it yet."""
+    cfg.entities.status_entity = "sensor.hpmpc_status"
+    assert "sensor.hpmpc_status" in cfg.entities.self_published()
+
+
+def test_helpers_are_not_treated_as_self_published(cfg):
+    cfg.entities.offset_output = "input_number.varmepump_offset"
+    cfg.entities.status_entity = ""
+    assert cfg.entities.self_published() == set()
+
+
+def test_a_sensor_output_counts_as_self_published(cfg):
+    cfg.entities.fake_temperature_output = "sensor.hpmpc_fake_outdoor"
+    assert "sensor.hpmpc_fake_outdoor" in cfg.entities.self_published()
