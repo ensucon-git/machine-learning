@@ -34,7 +34,14 @@ from .archive import build_training_frame, open_archive
 from .dataset import describe, load_dataset, save_dataset
 from .evaluate import backtest, format_backtest
 from .ha import HomeAssistant, HomeAssistantError
-from .train import load_model, summarise, train, write_report
+from .train import (
+    ModelNotTrained,
+    load_model,
+    load_model_if_trained,
+    summarise,
+    train,
+    write_report,
+)
 
 log = logging.getLogger("hpmpc")
 
@@ -828,7 +835,9 @@ def cmd_train(args: argparse.Namespace) -> int:
 
 def cmd_plan(args: argparse.Namespace) -> int:
     cfg = _load(args)
-    working, params, residual, _ = load_model(cfg)
+    # Useful before there is a model too: it shows what would be written, which
+    # is exactly what you want to see while commissioning the actuator.
+    working, params, residual, _ = load_model_if_trained(cfg)
     with _connect(working) as ha:
         controller = Controller(working, params, ha, residual)
         report = controller.step(apply=False)
@@ -840,8 +849,12 @@ def cmd_plan(args: argparse.Namespace) -> int:
 
 def cmd_run(args: argparse.Namespace) -> int:
     cfg = _load(args)
-    working, params, residual, _ = load_model(cfg)
+    working, params, residual, _ = load_model_if_trained(cfg)
     apply = not (args.dry_run or cfg.control.dry_run)
+    if params is None:
+        print(f"No trained model at {cfg.model_path} yet - running in collecting mode.\n"
+              f"The offset is held at {cfg.control.fallback_offset:+.1f} K and history is "
+              "archived every cycle;\ncontrol starts by itself once 'hpmpc train' has run.\n")
     with _connect(working) as ha:
         controller = Controller(working, params, ha, residual)
         controller.reload_config(args.config)   # record the current mtime
@@ -849,6 +862,13 @@ def cmd_run(args: argparse.Namespace) -> int:
             started = datetime.now(timezone.utc)
             try:
                 controller.reload_config(args.config)
+                if not controller.trained:
+                    try:
+                        fresh, fresh_params, fresh_residual, _ = load_model(controller.base_cfg)
+                        controller.adopt_model(fresh_params, fresh, fresh_residual)
+                        print("Model found - switching from collecting to control.")
+                    except (ModelNotTrained, OSError, ValueError, KeyError):
+                        pass
                 if args.excite:
                     report = controller.excite_step(apply=apply, hold_hours=args.hold_hours)
                 else:
@@ -1170,6 +1190,11 @@ def main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:
         print("\nStopped.")
         return 130
+    except ModelNotTrained as exc:
+        # Not a crash - a fresh install that has not been through training yet.
+        # Print it as instructions rather than as an error with a traceback.
+        print(f"\n{exc}")
+        return 1
     except (HomeAssistantError, ValueError, FileNotFoundError) as exc:
         log.error("%s", exc)
         return 1

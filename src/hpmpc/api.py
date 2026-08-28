@@ -25,7 +25,7 @@ from .controller import Controller
 from .archive import build_training_frame
 from .dataset import save_dataset
 from .ha import HomeAssistant, HomeAssistantError
-from .train import load_model, train
+from .train import load_model, load_model_if_trained, train
 
 log = logging.getLogger(__name__)
 
@@ -43,11 +43,36 @@ class ControllerService:
         self.started_at = datetime.now(timezone.utc)
         self.cycles = 0
         self.cfg: Config = load_config(self.config_path)
-        working, params, residual, self.model_metadata = load_model(self.cfg)
+        # An untrained install must still come up. The pump has no sensor other
+        # than the one this service drives, so refusing to start would leave the
+        # actuator dark - and the history the fit needs would never be
+        # collected, which means it could never become trained either.
+        working, params, residual, self.model_metadata = load_model_if_trained(self.cfg)
         self.cfg = working
+        if params is None:
+            log.warning(
+                "No trained model at %s - starting in collecting mode: the offset is held at "
+                "%+.1f K and history is archived every cycle. Run 'hpmpc collect' and "
+                "'hpmpc train' when there are a few weeks of it; control starts by itself.",
+                self.cfg.model_path, self.cfg.control.fallback_offset,
+            )
         self.ha = HomeAssistant(self.cfg.home_assistant)
         self.controller = Controller(self.cfg, params, self.ha, residual)
         self.controller.reload_config(self.config_path)
+
+    def adopt_new_model(self) -> bool:
+        """Pick up a model trained while we were running, without a restart."""
+        if self.controller.trained:
+            return False
+        try:
+            working, params, residual, metadata = load_model(self.cfg)
+        except (OSError, ValueError, KeyError):
+            return False
+        with self.lock:
+            self.cfg = working
+            self.model_metadata = metadata
+            self.controller.adopt_model(params, working, residual)
+        return True
 
     def step(self, apply: bool | None = None) -> dict[str, Any]:
         with self.lock:
@@ -116,6 +141,7 @@ class ControllerService:
         cycle = timedelta(minutes=self.cfg.control.cycle_minutes)
         while not self.stop_event.is_set():
             try:
+                self.adopt_new_model()
                 self.step()
                 self.maybe_retrain()
             except Exception as exc:  # pragma: no cover - keep the loop alive
@@ -160,6 +186,7 @@ def create_app(config_path: str | Path = "config/config.yaml", run_scheduler: bo
             "last_error": service.last_error,
             "last_cycle": service.last_report.get("timestamp"),
             "scheduler": run_scheduler,
+            "trained": service.controller.trained,
             "model_age_days": (
                 round(service.model_age_days(), 1) if service.model_age_days() is not None else None
             ),

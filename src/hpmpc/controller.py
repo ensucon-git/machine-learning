@@ -110,7 +110,7 @@ class Controller:
     def __init__(
         self,
         cfg: Config,
-        params: ThermalParams,
+        params: ThermalParams | None,
         ha: HomeAssistant,
         residual: ResidualModel | None = None,
     ) -> None:
@@ -120,13 +120,38 @@ class Controller:
         self.residual = residual
         self.base_cfg = cfg
         self.pump = build_pump(cfg)
-        self.solver = MpcSolver(cfg, params)
+        # No model yet is an ordinary state on a fresh install, not a failure:
+        # the house has to be observed before it can be identified. The
+        # controller still runs - it keeps the pump supplied with a sensor
+        # reading and fills the archive - it just does not optimise.
+        self.solver = MpcSolver(cfg, params) if params is not None else None
         self._config_mtime: float | None = None
         self.mode = cfg.modes.default
+        slab = (
+            float(steady_state_mass_temp(params, cfg.control.setpoint, 0.0))
+            if params is not None
+            else cfg.control.setpoint
+        )
         self.state = ControllerState.load(cfg.paths.state_file) or ControllerState(
             t_indoor=cfg.control.setpoint,
-            t_mass=float(steady_state_mass_temp(params, cfg.control.setpoint, 0.0)),
+            t_mass=slab,
         )
+
+    @property
+    def trained(self) -> bool:
+        return self.params is not None
+
+    def adopt_model(self, params: ThermalParams, cfg: Config,
+                    residual: ResidualModel | None = None) -> None:
+        """Start optimising, without a restart, as soon as a model appears."""
+        self.cfg = cfg
+        self.base_cfg = cfg
+        self.params = params
+        self.residual = residual
+        self.pump = build_pump(cfg)
+        self.solver = MpcSolver(cfg, params)
+        self.state.warm_started = False
+        log.info("Model adopted - switching from collecting to control")
 
     def refresh_settings(self) -> list[str]:
         """Re-derive the active configuration from the file, the mode and the helpers.
@@ -160,8 +185,9 @@ class Controller:
         self.cfg = updated
         if changed:
             self.pump = build_pump(updated)
-            self.solver.cfg = updated
-            self.solver.pump = self.pump
+            if self.solver is not None:
+                self.solver.cfg = updated
+                self.solver.pump = self.pump
             log.info(
                 "Active settings: mode '%s', setpoint %.1f C, comfort %.1f-%.1f C%s",
                 mode, updated.control.setpoint, updated.control.comfort_min, updated.control.comfort_max,
@@ -187,21 +213,27 @@ class Controller:
         if first_load:
             return False
         try:
-            from .train import load_model
+            from .train import load_model_if_trained
 
             fresh = load_config(file_path)
-            working, params, residual, _ = load_model(fresh)
+            working, params, residual, _ = load_model_if_trained(fresh)
         except Exception as exc:
             log.error("Reloading %s failed (%s); staying on the previous configuration", file_path, exc)
             return False
         self.cfg = working
         self.base_cfg = working
-        self.params = params
         self.residual = residual
         self.pump = build_pump(working)
-        self.solver.cfg = working
-        self.solver.pump = self.pump
-        self.solver.params = params
+        if params is None:
+            self.params = None
+            self.solver = None
+        elif self.solver is None:
+            self.adopt_model(params, working, residual)
+        else:
+            self.params = params
+            self.solver.cfg = working
+            self.solver.pump = self.pump
+            self.solver.params = params
         log.info("Reloaded %s", file_path)
         return True
 
@@ -682,6 +714,9 @@ class Controller:
             report["notes"].append(shortfall["warning"])
             log.warning("%s", shortfall["warning"])
 
+        if not self.trained:
+            return self._collect_only(now, readings, report, apply)
+
         problems = self.check_readings(readings)
         if forecast is None:
             problems.append("no weather or price forecast available")
@@ -695,7 +730,7 @@ class Controller:
             report["mode"] = "fallback"
             log.error("Sensor problems (%s) - falling back toward %.2f K",
                       "; ".join(problems), self.cfg.control.fallback_offset)
-            self._write(fallback, readings.get("t_outdoor") or 0.0, report, apply)
+            self._write(fallback, readings.get("t_outdoor"), report, apply)
             self._persist(now, report)
             return report
 
@@ -804,7 +839,7 @@ class Controller:
         offset, notes = self._limit(target, readings.get("t_outdoor"))
         report["notes"].extend(notes)
         report["offset"] = offset
-        self._write(offset, float(readings.get("t_outdoor") or 0.0), report, apply)
+        self._write(offset, readings.get("t_outdoor"), report, apply)
         self._persist(now, report)
         return report
 
@@ -828,7 +863,44 @@ class Controller:
             log.warning("Residual model failed (%s); continuing with physics only", exc)
             return np.zeros(len(forecast))
 
-    def _write(self, offset: float, t_outdoor: float, report: dict[str, Any], apply: bool) -> None:
+    def _collect_only(self, now: datetime, readings: dict[str, Any],
+                      report: dict[str, Any], apply: bool) -> dict[str, Any]:
+        """Everything except optimising, for the weeks before there is a model.
+
+        The pump still needs a sensor reading and the fit still needs history,
+        so this is not a degraded mode - it is the first phase of an ordinary
+        install. The offset is held at control.fallback_offset, which is zero by
+        default and therefore simply the truth, and the archive fills up in the
+        background until there is enough to run 'hpmpc train'.
+        """
+        offset, notes = self._limit(self.cfg.control.fallback_offset, readings.get("t_outdoor"))
+        report["mode"] = "collecting"
+        report["offset"] = offset
+        report["notes"].extend(notes)
+        report["notes"].append(
+            f"no trained model yet - holding {self.cfg.control.fallback_offset:+.1f} K and "
+            "collecting history. Run 'hpmpc collect' and 'hpmpc train' once there are a few "
+            "weeks of it ('hpmpc archive' shows how much)."
+        )
+        self._write(offset, readings.get("t_outdoor"), report, apply)
+        self._persist(now, report)
+        return report
+
+    def _write(self, offset: float, t_outdoor: float | None, report: dict[str, Any],
+               apply: bool) -> None:
+        if t_outdoor is None:
+            # Every output except the offset is "outdoor + offset", so without a
+            # temperature there is nothing honest to send. Writing zero would
+            # tell a pump that has no other sensor that it is 0 C outside.
+            # Holding is better: the ESP32 keeps its last value and Home
+            # Assistant's dead-man switch writes the truth if this persists.
+            report["outputs"] = []
+            report["notes"].append(
+                "outdoor temperature unknown - nothing written, the emulator holds its last value"
+            )
+            log.error("No outdoor temperature; skipping the write rather than inventing one")
+            return
+
         outputs = self.outputs(offset, t_outdoor)
         report["outputs"] = outputs
         if not apply:

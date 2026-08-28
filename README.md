@@ -774,6 +774,13 @@ hpmpc ntc-table --step-ohm 195     # kollar upplösningen din hårdvara ger
 
 ### 5. Samla data
 
+Kontrollern kan köra redan nu, utan modell. Den håller offseten på
+`fallback_offset` (0 K = den riktiga temperaturen) och arkiverar historik varje
+cykel, i läget `collecting`. Det är första fasen av en vanlig installation, inte
+ett degraderat läge — och det är enda sättet att få historiken som steg 6
+behöver.
+
+
 ```bash
 hpmpc collect --days 45
 ```

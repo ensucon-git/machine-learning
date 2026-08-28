@@ -98,6 +98,12 @@ på validerings-RMSE. En hundradels grad är brus på en platt likelihood-ås, o
 att föredra det lät en anpassning vinna just genom att smita undan
 regulariseringen — den gav UA 140 W/K mot sanna 195.
 
+**Kontrollern startar utan modell** (`load_model_if_trained`, läget `collecting`).
+En färsk installation har ingen modell, och att vägra starta vore bakvänt: pumpen
+har ingen annan givare än den vi driver, och historiken anpassningen behöver
+samlas in av samma slinga. `adopt_model` växlar över utan omstart så fort
+`hpmpc train` körts.
+
 **Historiken kopieras ur recordern varje styrcykel** (`archive.py`). Recordern är
 ett rullande fönster som rensas av ett annat system; identifieringen vill ha sex
 veckor. Att kräva `purge_keep_days: 45` gör modellen beroende av en inställning
@@ -153,7 +159,7 @@ terminalvärderingen fixar, fast i utvärderingen.
 
 ## Verifierat kontra antaget
 
-**Verifierat** (315 tester, syntetiskt hus med känd sanning):
+**Verifierat** (321 tester, syntetiskt hus med känd sanning):
 - Identifieringen återfinner värmekurva (lutning 0,3495 mot 0,35, R² 0,997) och
   husparametrar (UA +3 %, Ci +4 %, `k_wind` +3 %, plattans tidskonstant inom 8 %).
 - Prediktionsfel 0,085 °C över 12 h, 0,066 °C över 48 h (persistensbaslinje 1,01 °C).

@@ -183,6 +183,23 @@ docker compose up -d
 docker compose exec hpmpc hpmpc check
 ```
 
+Containern startar **utan modell** — det ska den. En modell byggs ur ditt eget
+hus historik, så en färsk installation har ingen, och att vägra starta vore
+bakvänt: pumpen har ingen annan givare än den här containern driver, och
+historiken som anpassningen behöver samlas in av samma slinga.
+
+I loggen står då:
+
+```
+WARNING hpmpc.api: No trained model at /data/models/thermal_model.json - starting in
+collecting mode: the offset is held at +0.0 K and history is archived every cycle.
+```
+
+Det betyder: offset 0 skrivs varje cykel — alltså den riktiga utetemperaturen,
+pumpens egen kurva omodifierad — och arkivet fylls på. När du senare kört
+`hpmpc train` växlar containern **själv** över till styrning, utan omstart.
+`/health` visar `"trained": false` tills dess.
+
 ### Alternativ B: Portainer
 
 Portainer → **Stacks** → **Add stack** → **Repository**:

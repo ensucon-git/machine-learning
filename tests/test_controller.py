@@ -393,3 +393,70 @@ def test_an_output_domain_that_cannot_be_written_is_refused(cfg):
     cfg.entities.fake_temperature_output = "climate.living_room"
     with pytest.raises(ValueError, match="fake_temperature_output"):
         cfg.validate()
+
+
+# ----------------------------------------- before there is a model to run on
+
+
+def untrained(cfg, fake_ha) -> Controller:
+    return Controller(cfg, None, fake_ha)
+
+
+def test_a_controller_without_a_model_still_runs(cfg, fake_ha):
+    """A fresh install has no model, and refusing to start would be backwards:
+    the pump has no other sensor and the fit needs history this loop collects."""
+    controller = untrained(cfg, fake_ha)
+    assert not controller.trained
+    report = controller.step(apply=True)
+    assert report["mode"] == "collecting"
+    assert report["outputs"] and fake_ha.written
+
+
+def test_collecting_holds_the_neutral_offset(cfg, fake_ha):
+    """fallback_offset is zero by default, which is simply the truth."""
+    controller = untrained(cfg, fake_ha)
+    report = controller.step(apply=True)
+    assert report["offset"] == pytest.approx(cfg.control.fallback_offset, abs=0.01)
+    shown = {o["kind"]: o["value"] for o in report["outputs"]}["fake_temperature"]
+    assert shown == pytest.approx(report["readings"]["t_outdoor"], abs=0.01)
+
+
+def test_collecting_says_what_is_missing_and_how_to_fix_it(cfg, fake_ha):
+    controller = untrained(cfg, fake_ha)
+    notes = " ".join(controller.step(apply=True)["notes"])
+    assert "no trained model" in notes
+    assert "hpmpc train" in notes
+
+
+def test_a_model_can_be_adopted_without_a_restart(cfg, fake_ha):
+    controller = untrained(cfg, fake_ha)
+    assert controller.step(apply=True)["mode"] == "collecting"
+    controller.adopt_model(ThermalParams(), cfg)
+    assert controller.trained
+    assert controller.step(apply=True)["mode"] not in {"collecting"}
+
+
+def test_an_unknown_outdoor_temperature_writes_nothing(cfg, fake_ha):
+    """Every output but the offset is outdoor + offset. With no outdoor
+    temperature, writing zero would tell a pump with no other sensor that it is
+    0 C outside; holding the last value is the honest answer."""
+    cfg.entities.outdoor_temp = "sensor.outdoor"
+    cfg.forecast.weather_source = "home_assistant"
+    cfg.entities.weather = ""
+    controller = untrained(cfg, fake_ha)
+    fake_ha.drop("sensor.outdoor")
+    report = controller.step(apply=True)
+    assert report["outputs"] == []
+    assert fake_ha.written == []
+    assert "holds its last value" in " ".join(report["notes"])
+
+
+def test_the_untrained_message_names_the_two_commands(cfg):
+    from hpmpc.train import ModelNotTrained, load_model, load_model_if_trained
+
+    with pytest.raises(ModelNotTrained) as excinfo:
+        load_model(cfg)
+    assert "hpmpc collect" in str(excinfo.value)
+    assert "hpmpc train" in str(excinfo.value)
+    # The tolerant loader turns the same situation into a state.
+    assert load_model_if_trained(cfg)[1] is None

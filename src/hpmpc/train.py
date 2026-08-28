@@ -144,8 +144,21 @@ def _previous_params(cfg: Config) -> ThermalParams | None:
         return None
 
 
+class ModelNotTrained(FileNotFoundError):
+    """No model on disk yet. Expected on a fresh install, not a fault."""
+
+
 def load_model(cfg: Config) -> tuple[Config, ThermalParams, ResidualModel | None, dict[str, Any]]:
     """Load a trained model and return a config with the learned pump settings."""
+    if not Path(cfg.model_path).exists():
+        raise ModelNotTrained(
+            f"No trained model at {cfg.model_path}. A model is built from your own house's "
+            "history, so a fresh install has none yet:\n"
+            "  hpmpc collect --days 45   # pull history out of Home Assistant\n"
+            "  hpmpc train               # fit the house\n"
+            "Until then 'hpmpc serve' and 'hpmpc run' still start, hold the offset at "
+            "control.fallback_offset and keep collecting history."
+        )
     params, metadata = load_params(cfg.model_path)
     working = apply_pump_overrides(cfg, metadata.get("pump_overrides", {}))
     residual = None
@@ -155,6 +168,21 @@ def load_model(cfg: Config) -> tuple[Config, ThermalParams, ResidualModel | None
         except Exception as exc:  # pragma: no cover - never block control on this
             log.warning("Could not load the residual model (%s); continuing with physics only", exc)
     return working, params, residual, metadata
+
+
+def load_model_if_trained(
+    cfg: Config,
+) -> tuple[Config, ThermalParams | None, ResidualModel | None, dict[str, Any]]:
+    """Like :func:`load_model`, but an untrained install is a state, not an error.
+
+    The controller has real work to do before it can optimise anything - keeping
+    the pump supplied with a sensor reading and building the history the fit
+    needs - so refusing to start until a model exists would be exactly backwards.
+    """
+    try:
+        return load_model(cfg)
+    except ModelNotTrained:
+        return cfg, None, None, {}
 
 
 def summarise(report: dict[str, Any]) -> str:
