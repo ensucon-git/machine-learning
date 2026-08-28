@@ -486,8 +486,17 @@ def cmd_providers(args: argparse.Namespace) -> int:
                     f"{row['cloud']:>8.0f}{row['humidity']:>10.0f}"
                 )
         except (ProviderError, ValueError) as exc:
+            from .providers.smhi import forecast_url
+
             print(f"  FAILED   {exc}")
             ok = False
+            # Whether this is your network or SMHI is one command away, and
+            # nobody should have to reconstruct the URL by hand to find out.
+            print("\n           Reproduce it from inside the container:\n"
+                  f"             curl -sS -o /dev/null -w '%{{http_code}}\\n' \\\n"
+                  f"               '{forecast_url(cfg.site.latitude, cfg.site.longitude)}'\n"
+                  "           200 means SMHI is fine and the problem is here; a timeout or a\n"
+                  "           proxy error means outbound traffic is blocked on your network.")
             print(_weather_fallback_advice(cfg))
     else:
         print("  (using the Home Assistant weather entity; run 'hpmpc check' instead)")
