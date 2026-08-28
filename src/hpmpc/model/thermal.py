@@ -101,9 +101,14 @@ class ThermalParams:
         envelope = (self.Ci + self.Cm) / max(self.Hie + self.Hme, 1e-6)
         return {"air": fast, "slab": slow, "envelope": envelope}
 
-    def heat_loss_w_per_k(self) -> float:
-        """Steady-state envelope loss coefficient [W/K] at zero wind."""
-        return self.Hie + self.Hme
+    def heat_loss_w_per_k(self, wind: float = 0.0) -> float:
+        """Steady-state envelope loss coefficient [W/K].
+
+        ``wind`` in m/s: only the indoor-to-exterior path is exposed to it, so
+        a windy day does not scale the whole loss - the slab's path to outside
+        does not care about the breeze.
+        """
+        return self.Hie * (1.0 + self.k_wind * max(float(wind), 0.0)) + self.Hme
 
 
 @dataclass

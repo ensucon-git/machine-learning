@@ -159,9 +159,11 @@ terminalvärderingen fixar, fast i utvärderingen.
 
 ## Verifierat kontra antaget
 
-**Verifierat** (354 tester, syntetiskt hus med känd sanning):
+**Verifierat** (356 tester, syntetiskt hus med känd sanning):
 - Identifieringen återfinner värmekurva (lutning 0,3495 mot 0,35, R² 0,997) och
   husparametrar (UA +3 %, Ci +4 %, `k_wind` +3 %, plattans tidskonstant inom 8 %).
+  `hpmpc train` skriver ut vad den lärt sig om sol och vind som area och
+  procent per m/s, inte som råa koefficienter.
 - Prediktionsfel 0,085 °C över 12 h, 0,066 °C över 48 h (persistensbaslinje 1,01 °C).
 - Sluten loop: 5,3 % lägre kostnad vid samma medelinnetemperatur, komfort
   0,8 mot 11,0 kelvintimmar utanför bandet.

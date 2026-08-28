@@ -209,6 +209,19 @@ def summarise(report: dict[str, Any]) -> str:
     lines.append(
         f"           UA {thermal.get('heat_loss_w_per_k')} W/K, time constants {thermal.get('time_constants_hours')}"
     )
+    weather = thermal.get("weather_sensitivity")
+    if weather:
+        # The direct answer to "did it learn anything about the weather?" - and
+        # a number worth eyeballing, because a house that shows no solar gain
+        # at all usually means the cloud cover never varied in the data.
+        lines.append(
+            f"           sun: {weather['solar_aperture_m2']} m2 effective window area, "
+            f"{weather['solar_to_air_pct']}% of it straight into the air"
+        )
+        lines.append(
+            f"           wind: +{weather['wind_pct_per_m_s']}% envelope loss per m/s "
+            f"({weather['ua_at_5_m_s']} W/K at 5 m/s vs {thermal.get('heat_loss_w_per_k')} calm)"
+        )
     ident = thermal.get("identifiability", {})
     if ident:
         lines.append(

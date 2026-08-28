@@ -363,6 +363,14 @@ def fit_thermal(
         "used_measured_supply": short.supply is not None,
         "time_constants_hours": {k: round(v, 2) for k, v in params.time_constants_hours().items()},
         "heat_loss_w_per_k": round(params.heat_loss_w_per_k(), 1),
+        # What the fit concluded about the weather, in units someone can argue
+        # with: an effective window area rather than a bare coefficient.
+        "weather_sensitivity": {
+            "solar_aperture_m2": round(params.A_sol, 2),
+            "solar_to_air_pct": round(100.0 * params.f_sol_i),
+            "wind_pct_per_m_s": round(100.0 * params.k_wind, 1),
+            "ua_at_5_m_s": round(params.heat_loss_w_per_k(wind=5.0), 1),
+        },
         "restarts": max(1, restarts),
         "restart_scores": [
             {"objective": round(a["cost"], 8), "validation_rmse_c": a["score"], "drift": round(a["drift"], 4)}

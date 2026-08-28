@@ -148,3 +148,31 @@ def test_identifiability_separates_strong_from_weak_parameters(synthetic):
     assert set(ident["weakest_direction"]) <= names
     assert len(ident["singular_values"]) == len(names)
     assert ident["singular_values"][0] == pytest.approx(1.0)
+
+
+def test_the_fit_reports_what_it_learned_about_the_weather():
+    """Sun and wind are two of the things this exists to learn, so the summary
+    should say what it concluded rather than leaving it inside the vector."""
+    from hpmpc.model.thermal import ThermalParams
+
+    params = ThermalParams(A_sol=5.5, f_sol_i=0.45, k_wind=0.045, Hie=170.0, Hme=35.0)
+    calm = params.heat_loss_w_per_k()
+    windy = params.heat_loss_w_per_k(wind=5.0)
+    assert windy > calm
+    # Only the indoor-to-exterior path feels the wind; the slab's does not.
+    assert windy == pytest.approx(170.0 * (1 + 0.045 * 5) + 35.0)
+
+
+def test_wind_and_sun_are_recovered_from_data(synthetic):
+    """Two of the things this exists to learn. A house identified as indifferent
+    to wind under-heats on the windy evening it was supposed to see coming."""
+    cfg, frame, truth = synthetic
+    params, metrics = fit_thermal(frame, cfg, initial=perturbed(truth))
+
+    assert params.k_wind == pytest.approx(truth.k_wind, rel=0.4)
+    assert params.A_sol == pytest.approx(truth.A_sol, rel=0.4)
+
+    weather = metrics["weather_sensitivity"]
+    assert weather["wind_pct_per_m_s"] == pytest.approx(100 * params.k_wind, abs=0.1)
+    assert weather["solar_aperture_m2"] == pytest.approx(params.A_sol, abs=0.01)
+    assert weather["ua_at_5_m_s"] > metrics["heat_loss_w_per_k"]
