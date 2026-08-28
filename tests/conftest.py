@@ -137,6 +137,38 @@ class FakeHomeAssistant:
         return {}
 
 
+class RecorderHomeAssistant(FakeHomeAssistant):
+    """A fake whose history really is a rolling window, like the real recorder.
+
+    ``keep_days`` is Home Assistant's ``purge_keep_days``: readings older than
+    that exist in ``history_frame`` but can no longer be queried.
+    """
+
+    def __init__(self, *args: Any, keep_days: float = 10.0, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.keep_days = keep_days
+        self.requests: list[tuple[datetime, datetime]] = []
+
+    def history(self, entity_ids, start, end=None, chunk_days: int = 5) -> pd.DataFrame:
+        end = end or self.now
+        self.requests.append((start, end))
+        frame = self.history_frame
+        if frame.empty:
+            return frame
+        purged = self.now - timedelta(days=self.keep_days)
+        window = frame[
+            (frame["time"] >= max(start, purged))
+            & (frame["time"] <= end)
+            & frame["entity_id"].isin([e for e in entity_ids if e])
+        ]
+        return window.reset_index(drop=True)
+
+
 @pytest.fixture
 def fake_ha() -> FakeHomeAssistant:
     return FakeHomeAssistant()
+
+
+@pytest.fixture
+def recorder_ha() -> RecorderHomeAssistant:
+    return RecorderHomeAssistant()

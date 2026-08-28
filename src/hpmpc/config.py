@@ -426,6 +426,16 @@ class TrainingConfig:
     fitted in November is not the same house in March."""
     retrain_hour: int = 3
     """Local hour to do it at. Training pins a core for a minute or two."""
+    archive: bool = True
+    """Keep our own copy of the recorder history under ``data/history/``.
+
+    Home Assistant's recorder is a rolling window purged on someone else's
+    schedule. With the archive on, every control cycle copies the new rows out
+    of it, so recorder retention only has to outlast the gap between two
+    cycles instead of the six weeks identification wants."""
+    archive_keep_days: int = 400
+    """How long the archive itself keeps history. A year of 15-minute rows for
+    twenty signals is a few megabytes, and more history means a better fit."""
     use_residual_model: bool = True
     residual_max_correction: float = 0.4
     seed: int = 0
@@ -489,6 +499,13 @@ class Config:
             raise ValueError("control.step_minutes and control.horizon_hours must be positive")
         if self.optimizer.elites >= self.optimizer.population:
             raise ValueError("optimizer.elites must be smaller than optimizer.population")
+        t = self.training
+        if t.archive and 0 < t.archive_keep_days < t.history_days:
+            raise ValueError(
+                f"training.archive_keep_days ({t.archive_keep_days}) is shorter than "
+                f"training.history_days ({t.history_days}) - the archive would throw away "
+                "history that training asks for"
+            )
         if not self.entities.outdoor_temp and self.forecast.weather_source != "smhi":
             raise ValueError(
                 "Without entities.outdoor_temp the current outdoor temperature has to come from "
@@ -529,6 +546,10 @@ class Config:
     @property
     def dataset_path(self) -> Path:
         return Path(self.paths.data_dir) / "history.csv.gz"
+
+    @property
+    def archive_dir(self) -> Path:
+        return Path(self.paths.data_dir) / "history"
 
 
 def load_config(path: str | Path) -> Config:

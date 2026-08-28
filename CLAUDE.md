@@ -49,6 +49,7 @@ Home Assistant ──historik──►  dataset ──►  systemidentifiering �
 | `model/heatpump.py` | Värmekurva, utegivarfilter, `PumpModel`, `OperatingPoint` |
 | `identify.py` | Systemidentifiering + identifierbarhetsdiagnostik + verkningsgradskalibrering |
 | `disaggregate.py` | Dela husets effekt i pump / laddare / baslast |
+| `archive.py` | Egen kopia av recorderhistoriken, en gzippad CSV per månad |
 | `residual.py` | Lärd residual (scikit-learn), enbart exogena särdrag |
 | `mpc.py` | CEM-optimerare med batchade utrullningar |
 | `comfort.py` | Börvärde, lägen, komfortschema över horisonten |
@@ -84,6 +85,16 @@ försvinner incitamentet.
 på validerings-RMSE. En hundradels grad är brus på en platt likelihood-ås, och
 att föredra det lät en anpassning vinna just genom att smita undan
 regulariseringen — den gav UA 140 W/K mot sanna 195.
+
+**Historiken kopieras ur recordern varje styrcykel** (`archive.py`). Recordern är
+ett rullande fönster som rensas av ett annat system; identifieringen vill ha sex
+veckor. Att kräva `purge_keep_days: 45` gör modellen beroende av en inställning
+ingen minns, i en databas som återställs från backup. Arkivet frågar bara efter
+det som hänt sedan senaste lagrade raden, så recordern behöver bara hålla längre
+än glappet mellan två cykler. **Bara råa signaler lagras** — solinstrålning och
+offset i kelvin härleds vid läsning, annars bär gamla rader runt gamla fel efter
+att NTC-tabellen rättats. Överlappet på två timmar finns för att den nyaste
+resampling-luckan alltid är halvfylld när den skrivs.
 
 **Residualmodellen får bara exogena särdrag** (klocka, sol, vind, utetemperatur).
 Aldrig husets tillstånd, aldrig styrsignalen. Annars kan optimeraren utnyttja
@@ -130,7 +141,7 @@ terminalvärderingen fixar, fast i utvärderingen.
 
 ## Verifierat kontra antaget
 
-**Verifierat** (258 tester, syntetiskt hus med känd sanning):
+**Verifierat** (285 tester, syntetiskt hus med känd sanning):
 - Identifieringen återfinner värmekurva (lutning 0,3495 mot 0,35, R² 0,997) och
   husparametrar (UA +3 %, Ci +4 %, `k_wind` +3 %, plattans tidskonstant inom 8 %).
 - Prediktionsfel 0,085 °C över 12 h, 0,066 °C över 48 h (persistensbaslinje 1,01 °C).
@@ -188,6 +199,9 @@ terminalvärderingen fixar, fast i utvärderingen.
 - **Regulatorn skriver alla konfigurerade utgångar samtidigt**, inget `output_mode`.
   Samma beslut i kelvin, grader och ohm — då kan de inte säga emot varandra. Historiken
   läses tillbaka från kelvin-entiteten eftersom den inte kräver någon omräkning.
+- **Arkivet och recordern kan inte hamna i konflikt.** Raderas arkivet fyller det
+  sig från det recordern har kvar; kortas recorderns retention behåller arkivet
+  det redan kopierat. `training.archive: false` går direkt mot recordern som förut.
 - **Utetemperaturen får komma från SMHI** om ingen givare är konfigurerad. En givare
   vid huset är bättre när den finns — den mäter luften byggnaden faktiskt förlorar
   värme till — men det ska inte vara ett krav att ha HA i loopen för det.
@@ -231,6 +245,7 @@ hpmpc mode holiday   # byt komfortläge
 hpmpc settings       # vad som går att ändra i drift
 hpmpc set control.price_addition 0.7084
 hpmpc excite         # identifieringsexperiment, ~1 vecka
+hpmpc archive        # vår egen historik — omfång, hål, storlek
 hpmpc collect --days 45 && hpmpc train
 hpmpc power          # effektuppdelningen — laddaren ska hamna nära 11 kW
 hpmpc plan           # nuvarande plan, skriver ingenting

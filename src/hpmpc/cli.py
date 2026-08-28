@@ -3,7 +3,8 @@
     hpmpc demo                  run the whole pipeline on a synthetic house
     hpmpc init-config           write a starting config.yaml
     hpmpc check                 verify config and Home Assistant connectivity
-    hpmpc collect               pull recorder history into a dataset
+    hpmpc archive               our own copy of the history - span, gaps, size
+    hpmpc collect               refresh the archive and build a dataset from it
     hpmpc excite                run the identification experiment
     hpmpc train                 fit the model
     hpmpc plan                  solve once and print the plan (writes nothing)
@@ -29,7 +30,8 @@ import numpy as np
 from . import __version__
 from .config import Config, load_config
 from .controller import Controller
-from .dataset import build_dataset, describe, load_dataset, save_dataset
+from .archive import build_training_frame, open_archive
+from .dataset import describe, load_dataset, save_dataset
 from .evaluate import backtest, format_backtest
 from .ha import HomeAssistant, HomeAssistantError
 from .train import load_model, summarise, train, write_report
@@ -147,6 +149,52 @@ def cmd_mode(args: argparse.Namespace) -> int:
                 "The comfort band returns to normal at that moment; the optimiser decides on its\n"
                 "own when to start reheating the slab, which for a deep setback is many hours."
             )
+    return 0
+
+
+def cmd_archive(args: argparse.Namespace) -> int:
+    """What history we have kept ourselves, independently of the recorder."""
+    cfg = _load(args)
+    archive = open_archive(cfg)
+
+    if args.refresh:
+        from .archive import refresh
+
+        with _connect(cfg) as ha:
+            info = refresh(cfg, ha, archive)
+        print(f"Pulled from {info.get('pulled_from', '-')} ({info.get('reason')}): "
+              f"+{info.get('rows_added', 0)} rows, {info.get('pruned', 0)} month files pruned")
+        print()
+
+    info = archive.describe()
+    if not info["rows"]:
+        print(f"The archive at {archive.directory} is empty.")
+        print("It fills itself once the controller runs; 'hpmpc collect' fills it immediately.")
+        return 0
+
+    print(f"{archive.directory}")
+    print(f"  {info['rows']} rows over {info['span_days']} days "
+          f"in {info['files']} files ({info['bytes'] / 1e6:.1f} MB)")
+    print(f"  {info['start']}  ->  {info['end']}")
+    coverage = info.get("coverage")
+    if coverage is not None:
+        print(f"  coverage {coverage:.1%} of the {cfg.training.resample_minutes}-minute grid")
+    gaps = info.get("gaps") or []
+    if gaps:
+        print("  recent gaps:")
+        for gap in gaps:
+            print(f"    {gap['hours']:>6.1f} h after {gap['after']}")
+
+    need = cfg.training.history_days
+    if info["span_days"] < need:
+        print()
+        print(f"Training asks for {need} days and the archive holds {info['span_days']:.1f}. "
+              "It grows by itself from here -\n"
+              "the recorder only has to keep up between two control cycles.")
+    if args.prune:
+        removed = archive.prune(cfg.training.archive_keep_days)
+        print()
+        print(f"Pruned {removed} month files older than {cfg.training.archive_keep_days} days")
     return 0
 
 
@@ -544,6 +592,19 @@ def cmd_check(args: argparse.Namespace) -> int:
 
     _check_actuator_calibration(cfg, ha)
 
+    if cfg.training.archive:
+        info = open_archive(cfg).describe()
+        if info["rows"]:
+            print(f"Archive:   {info['span_days']} days, {info['rows']} rows "
+                  f"({info['bytes'] / 1e6:.1f} MB) - recorder retention only has to cover "
+                  "the gap\n           between two control cycles")
+        else:
+            print("Archive:   empty - it fills itself once the controller runs. Until then the "
+                  "model\n           depends on Home Assistant's own recorder retention.")
+    else:
+        print(f"Archive:   off (training.archive) - Home Assistant's recorder must keep "
+              f"{cfg.training.history_days} days")
+
     try:
         _, params, residual, metadata = load_model(cfg)
         print(f"Model:     trained {metadata.get('trained_at', 'unknown')}, "
@@ -611,10 +672,13 @@ def _check_actuator_calibration(cfg: Config, ha: HomeAssistant) -> None:
 def cmd_collect(args: argparse.Namespace) -> int:
     cfg = _load(args)
     with _connect(cfg) as ha:
-        frame = build_dataset(cfg, ha, args.days)
+        frame, source = build_training_frame(cfg, ha, args.days)
     path = Path(args.output or cfg.dataset_path)
     save_dataset(frame, path)
     info = describe(frame)
+    if source.get("source") == "archive":
+        print(f"Archive: +{source.get('rows_added', 0)} new rows "
+              f"({source.get('reason')}), {source.get('span_days')} days stored")
     print(f"Saved {len(frame)} rows to {path}")
     print(json.dumps(info, indent=2))
     excitation = info.get("offset_excitation", {})
@@ -833,6 +897,9 @@ def _print_cycle(report: dict[str, Any]) -> None:
     )
     for note in report.get("notes", []):
         print(f"          note: {note}")
+    archive = report.get("archive") or {}
+    if archive.get("error"):
+        print(f"          archive: {archive['error']}")
 
 
 def _sleep_until_next_cycle(started: datetime, cycle_minutes: int) -> None:
@@ -913,6 +980,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--step", type=float, default=5.0)
     p.add_argument("--step-ohm", type=float, default=78.0, help="one step of your digital potentiometer")
     p.set_defaults(func=cmd_ntc_table)
+
+    p = sub.add_parser("archive", help="our own copy of the history - span, gaps, size")
+    p.add_argument("--refresh", action="store_true", help="pull new rows from the recorder first")
+    p.add_argument("--prune", action="store_true", help="delete history older than archive_keep_days")
+    p.set_defaults(func=cmd_archive)
 
     p = sub.add_parser("collect", help="download recorder history into a dataset")
     p.add_argument("--days", type=int, default=None)

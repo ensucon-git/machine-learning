@@ -289,6 +289,19 @@ optimizer:
 training:
   history_days: 45
   resample_minutes: 15
+
+  # Keep our own copy of the history, under data/history/.
+  #
+  # Home Assistant's recorder is a rolling window - ten days by default - and it
+  # is purged on a schedule that belongs to another system. With this on, every
+  # control cycle copies the recorder's new rows into data/history/, so recorder
+  # retention only has to outlast the gap between two cycles instead of the six
+  # weeks identification wants. A year of 15-minute rows is a few megabytes.
+  #
+  # 'hpmpc archive' shows what has been kept, and where the holes are.
+  archive: true
+  archive_keep_days: 400
+
   window_hours: 12                  # short windows pin the fast air dynamics
   window_stride_hours: 3
   burn_in_hours: 24                 # simulated but not scored; lets the slab estimate settle

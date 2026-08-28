@@ -22,7 +22,8 @@ from fastapi.responses import PlainTextResponse
 from . import __version__
 from .config import Config, load_config
 from .controller import Controller
-from .dataset import build_dataset, save_dataset
+from .archive import build_training_frame
+from .dataset import save_dataset
 from .ha import HomeAssistant, HomeAssistantError
 from .train import load_model, train
 
@@ -91,7 +92,7 @@ class ControllerService:
         log.info("Model is %.0f days old; retraining", age)
         try:
             with self.lock:
-                frame = build_dataset(self.cfg, self.ha)
+                frame, _ = build_training_frame(self.cfg, self.ha)
                 save_dataset(frame, self.cfg.dataset_path)
                 report = train(self.cfg, frame)
                 working, params, residual, metadata = load_model(self.cfg)

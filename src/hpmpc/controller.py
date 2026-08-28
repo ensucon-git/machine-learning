@@ -30,6 +30,7 @@ import pandas as pd
 
 from .comfort import apply_mode, build_schedule, read_return_time, resolve_mode
 from .config import Config, load_config
+from .archive import refresh as refresh_archive
 from .dataset import add_derived, column_map, pivot_history
 from .forecast import build_forecast
 from .ha import HomeAssistant, HomeAssistantError
@@ -516,10 +517,23 @@ class Controller:
 
     # ---------------------------------------------------------------- step
 
+    def archive_cycle(self, report: dict[str, Any], now: datetime | None = None) -> None:
+        """Copy whatever the recorder has gained since last cycle into our own
+        archive. Never allowed to disturb control: the worst case is that this
+        cycle's rows are picked up by the next one instead."""
+        if not self.cfg.training.archive:
+            return
+        try:
+            report["archive"] = refresh_archive(self.cfg, self.ha, now=now)
+        except (HomeAssistantError, ValueError, OSError) as exc:
+            log.warning("Could not update the history archive: %s", exc)
+            report["archive"] = {"error": str(exc)}
+
     def step(self, now: datetime | None = None, apply: bool | None = None) -> dict[str, Any]:
         now = now or datetime.now(timezone.utc)
         apply = (not self.cfg.control.dry_run) if apply is None else apply
         report: dict[str, Any] = {"timestamp": now.isoformat(), "applied": False, "notes": []}
+        self.archive_cycle(report, now)
 
         setting_notes = self.refresh_settings()
         if setting_notes:
@@ -649,6 +663,8 @@ class Controller:
             "applied": False,
             "notes": [f"excitation block {block}, hold {hold_hours} h"],
         }
+        # Excitation week is exactly the data the fit needs most; archive it.
+        self.archive_cycle(report, now)
         readings = self.read_sensors()
         report["readings"] = {k: v for k, v in readings.items() if v is not None}
         problems = self.check_readings(readings)

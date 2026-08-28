@@ -33,15 +33,27 @@ tystnar.
 
 ### Recorder
 
-Modellen behöver minst tre till fyra veckors historik för de entiteter den
-använder. Standard är tio dagar. Antingen höj generellt:
+**hpmpc sparar sin egen historik.** Varje styrcykel kopierar det recordern har
+fått sedan förra cykeln till `data/history/` i containern, och där ligger det
+kvar i `training.archive_keep_days` dygn (400 som standard). Recordern behöver
+alltså bara hålla längre än *glappet mellan två styrcykler* — timmar, inte
+veckor. Standardinställningen tio dagar räcker gott.
+
+```bash
+docker compose exec hpmpc hpmpc archive     # vad vi själva har sparat
+```
+
+Det enda recorderns retention fortfarande styr är hur mycket historik du **ärver
+vid första installationen**. Vill du kunna träna direkt istället för att vänta
+en månad på att arkivet fyller sig, höj retentionen *innan* du installerar —
+antingen generellt:
 
 ```yaml
 recorder:
   purge_keep_days: 45
 ```
 
-eller spara bara det som behövs länge:
+eller bara för de entiteter modellen läser:
 
 ```yaml
 recorder:
@@ -56,7 +68,13 @@ recorder:
       - sensor.victron_ac_consumption_l3_power
       - binary_sensor.eh6nh5cd_charging
       - number.utegivare_resistans
+      - input_number.varmepump_offset
+      - input_number.varmepump_fiktiv_utetemp
 ```
+
+Sedan kan du sänka den igen — arkivet behåller det som redan kopierats. De två
+kan aldrig hamna i konflikt: raderar du arkivet fyller det sig på nytt från det
+recordern har kvar.
 
 Utan tillräcklig historik blir första träningen tunn — och det märks mest på
 effektuppdelningen, som vill ha en månad.
@@ -142,6 +160,7 @@ planerna med `hpmpc plan`. Först därefter `hpmpc set control.dry_run 0`.
 
 ```bash
 docker compose exec hpmpc hpmpc excite       # ~1 vecka, kör i förgrunden
+docker compose exec hpmpc hpmpc archive      # hur mycket historik vi har sparat
 docker compose exec hpmpc hpmpc collect --days 45
 docker compose exec hpmpc hpmpc train
 docker compose exec hpmpc hpmpc power        # kontrollera effektuppdelningen
@@ -188,6 +207,9 @@ docker compose build && docker compose up -d
 ```
 
 Modellen och historiken ligger i volymen `hpmpc-data` och överlever bygget.
+**Radera inte den volymen** — där ligger arkivet under `history/`, och det är den
+enda kopian av historik som recordern redan har rensat bort. En backup av volymen
+är en backup av allt modellen vet om huset.
 
 ### Säkerhetskopiera
 

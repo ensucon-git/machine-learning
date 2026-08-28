@@ -24,6 +24,7 @@ Levereras konfigurerad för **Daikin Altherma LT** (ERLQ016CAW1 + EHVH16S26CB9W)
 - [Arkitektur](#arkitektur)
 - [Värmepumpsmodellen](#värmepumpsmodellen)
 - [Datakällor](#datakällor)
+- [Historiken är vår egen](#historiken-är-vår-egen)
 - [Vad drar värmepumpen?](#vad-drar-värmepumpen)
 - [Temperatur och lägen](#temperatur-och-lägen)
 - [Ändra inställningar i efterhand](#ändra-inställningar-i-efterhand)
@@ -372,6 +373,55 @@ hpmpc providers
 
 ---
 
+## Historiken är vår egen
+
+Home Assistants recorder är ett rullande fönster — tio dygn som standard — som
+rensas efter ett schema som hör hemma i ett annat system. Identifieringen vill
+ha sex veckor och effektuppdelningen vill ha en månad. Den vanliga lösningen är
+"höj `purge_keep_days` till 45 och rör den aldrig mer", och det gör modellen
+beroende av en inställning ingen kommer ihåg, i en databas som återställs från
+backup, flyttas till en ny maskin eller trimmas när disken tar slut.
+
+Så systemet sparar historiken själv istället. Varje styrcykel frågar det
+recordern om **bara det som hänt sedan förra raden det lagrade** och lägger till
+det i `data/history/` — en gzippad CSV per månad, cirka fyra megabyte per år.
+
+Recordern behöver då bara hålla längre än glappet mellan två styrcykler, timmar
+istället för veckor. Arkivet behåller resten i `training.archive_keep_days` dygn.
+
+```
+$ hpmpc archive
+data/history
+  4208 rows over 44.0 days in 2 files (0.2 MB)
+  2026-07-15 17:00:00+00:00  ->  2026-08-28 17:00:00+00:00
+  coverage 99.6% of the 15-minute grid
+  recent gaps:
+       4.5 h after 2026-08-04 15:00:00+00:00
+```
+
+Tre saker det gör med flit:
+
+**Bara råa signaler lagras.** Solinstrålning ur molnighet och den kommenderade
+offseten i kelvin räknas fram vid läsning. Rättar du NTC-tabellen eller
+koordinaterna rättas därmed också den historik som läses genom dem — annars
+hade gamla rader burit runt gamla fel för alltid.
+
+**Nyaste avläsningen vinner, men en kolumn som försvinner behåller sitt förflutna.**
+Den nyaste resampling-luckan är alltid halvfylld när den skrivs, så varje hämtning
+tar två timmars överlapp och räknar om den. Är en givare otillgänglig i den nya
+hämtningen ligger det gamla värdet kvar istället för att bli ett hål.
+
+**De två kan aldrig hamna i konflikt.** Raderar du arkivet fyller det sig på nytt
+från det recordern har kvar. Kortar du recorderns retention behåller arkivet det
+det redan kopierat. Sätt `training.archive: false` så går allt direkt mot
+recordern som förut — då är det retentionen som gäller igen.
+
+Det enda recordern fortfarande styr är hur mycket historik du **ärver vid första
+installationen**. Vill du kunna träna direkt istället för att vänta en månad,
+höj `purge_keep_days` innan du installerar, och sänk den sedan igen.
+
+---
+
 ## Vad drar värmepumpen?
 
 Utan en egen mätare på pumpen finns ingen direktmätning att kalibrera verkningsgraden
@@ -647,9 +697,10 @@ värmeförlusten, återfinns inom 3 % trots att den bara syns indirekt i innetem
 
 ### 1. Förutsättningar
 
-Home Assistant med recorder som sparar minst 3–4 veckor för de aktuella entiteterna
-(default är 10 dagar — höj `recorder.purge_keep_days` eller lägg entiteterna i en
-egen `recorder`-`include`).
+Home Assistant. Recordern får gärna spara några veckor för de aktuella entiteterna,
+men det är inget krav: hpmpc kopierar historiken till sitt eget arkiv varje
+styrcykel, så recordern behöver bara hålla längre än glappet mellan två cykler.
+Se [Historiken är vår egen](#historiken-är-vår-egen).
 
 Nödvändigt: **innetemperatur** och **utetemperatur**.
 
@@ -712,6 +763,9 @@ hpmpc collect --days 45
 Läs varningen i slutet. Om `offset_excitation.std` är nära noll saknar datan den
 variation som behövs — se nästa avsnitt.
 
+`hpmpc archive` visar hur mycket historik systemet har sparat åt sig själv, och
+var hålen sitter.
+
 ### 6. Excitera, träna, kör
 
 ```bash
@@ -739,7 +793,8 @@ Alla kommandon:
 | `pump-table` | visa COP- och kapacitetstabellerna |
 | `calibrate-ntc` | anpassa NTC-modellen till dina mätningar |
 | `ntc-table` | visa NTC-kurvan och upplösningen per resistanssteg |
-| `collect` | hämta historik till ett dataset |
+| `archive` | vår egen kopia av historiken — omfång, hål, storlek |
+| `collect` | uppdatera arkivet och bygga ett dataset av det |
 | `excite` | kör identifieringsexperimentet |
 | `train` | anpassa modellen |
 | `plan` | lös en gång och skriv ingenting |

@@ -144,17 +144,25 @@ def applied_offset(frame: pd.DataFrame, cfg: Config) -> pd.Series:
     return value.astype(float).ffill().fillna(0.0).clip(cfg.control.offset_min, cfg.control.offset_max)
 
 
+def finish_dataset(frame: pd.DataFrame, cfg: Config) -> pd.DataFrame:
+    """Derive the computed columns and check that the essentials are there.
+
+    Kept separate from the fetch so the same step can be applied to history
+    read back from the archive, which stores raw signals only.
+    """
+    frame = add_derived(frame, cfg)
+    missing = [c for c in REQUIRED if c not in frame or frame[c].isna().all()]
+    if missing:
+        raise ValueError(f"History is missing required signals: {', '.join(missing)}")
+    return frame.dropna(subset=REQUIRED)
+
+
 def build_dataset(cfg: Config, ha: HomeAssistant, days: int | None = None) -> pd.DataFrame:
     long_frame = fetch_history(cfg, ha, days)
     frame = pivot_history(long_frame, column_map(cfg), cfg.training.resample_minutes)
     if frame.empty:
         raise ValueError("No usable history returned by Home Assistant - check entity ids and recorder retention")
-    frame = add_derived(frame, cfg)
-    missing = [c for c in REQUIRED if c not in frame or frame[c].isna().all()]
-    if missing:
-        raise ValueError(f"History is missing required signals: {', '.join(missing)}")
-    frame = frame.dropna(subset=REQUIRED)
-    return frame
+    return finish_dataset(frame, cfg)
 
 
 def save_dataset(frame: pd.DataFrame, path: str | Path) -> None:
