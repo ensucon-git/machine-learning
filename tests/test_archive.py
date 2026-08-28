@@ -219,3 +219,114 @@ def test_refresh_is_a_no_op_when_the_recorder_has_nothing(cfg):
     info = refresh(cfg, ha, now=datetime.now(timezone.utc))
     assert info["rows_added"] == 0
     assert not open_archive(cfg).files()
+
+
+# ------------------------- weather that only exists at the moment it is used
+
+
+def no_sensor(cfg):
+    """The shipped arrangement: no outdoor sensor, the forecast supplies it."""
+    cfg.entities.outdoor_temp = ""
+    cfg.entities.wind_speed = ""
+    cfg.forecast.weather_source = "smhi"
+    return cfg
+
+
+def test_the_resolved_weather_is_written_down(cfg):
+    """Without a sensor this is the only place the temperature ever exists."""
+    from hpmpc.archive import record_resolved
+
+    cfg = no_sensor(cfg)
+    now = pd.Timestamp("2026-01-15 08:07", tz="UTC")
+    recorded = record_resolved(cfg, {"t_outdoor": -4.5, "wind": 3.2}, now)
+    assert set(recorded) == {"t_outdoor", "wind"}
+
+    frame = open_archive(cfg).load()
+    assert frame["t_outdoor"].iloc[0] == pytest.approx(-4.5)
+    # Snapped onto the training grid, not left on the cycle's own clock.
+    assert frame.index[0] == pd.Timestamp("2026-01-15 08:00", tz="UTC")
+
+
+def test_a_configured_sensor_is_left_to_the_recorder(cfg):
+    """Where a sensor exists its own history is denser and closer to the house."""
+    from hpmpc.archive import record_resolved
+
+    cfg = no_sensor(cfg)
+    cfg.entities.outdoor_temp = "sensor.outdoor"
+    recorded = record_resolved(cfg, {"t_outdoor": -4.5, "wind": 3.2},
+                               pd.Timestamp("2026-01-15 08:00", tz="UTC"))
+    assert recorded == ["wind"]
+    assert "t_outdoor" not in open_archive(cfg).load().columns
+
+
+def test_nothing_is_written_for_values_that_are_missing(cfg):
+    from hpmpc.archive import record_resolved
+
+    cfg = no_sensor(cfg)
+    assert record_resolved(cfg, {"t_outdoor": None, "wind": float("nan")},
+                           pd.Timestamp("2026-01-15 08:00", tz="UTC")) == []
+    assert not open_archive(cfg).files()
+
+
+def test_recorded_weather_makes_the_history_trainable(cfg):
+    """The gap this closes: recorder history has no t_outdoor, so 'hpmpc collect'
+    failed outright on an install with no outdoor sensor."""
+    from hpmpc.archive import record_resolved
+
+    cfg = no_sensor(cfg)
+    ha = RecorderHomeAssistant()
+    recorded(cfg, ha, days=3.0)                 # indoor only; there is no outdoor entity
+    refresh(cfg, ha, now=ha.now)
+    with pytest.raises(ValueError, match="t_outdoor"):
+        dataset_from_archive(cfg)
+
+    # Now let the control loop write down what it used, cycle by cycle.
+    end = ha.now.replace(second=0, microsecond=0)
+    for stamp in pd.date_range(end - pd.Timedelta(days=3), end, freq="15min", tz="UTC"):
+        record_resolved(cfg, {"t_outdoor": -3.0, "wind": 2.0}, stamp)
+
+    frame = dataset_from_archive(cfg)
+    assert "t_outdoor" in frame and frame["t_outdoor"].notna().all()
+    assert len(frame) > 200
+
+
+def test_a_slow_cycle_does_not_leave_holes_in_the_history(cfg):
+    """Recorded once per control cycle, which need not match the training grid."""
+    from hpmpc.archive import record_resolved
+
+    cfg = no_sensor(cfg)
+    ha = RecorderHomeAssistant()
+    recorded(cfg, ha, days=2.0)
+    refresh(cfg, ha, now=ha.now)
+    end = ha.now.replace(second=0, microsecond=0)
+    for stamp in pd.date_range(end - pd.Timedelta(days=2), end, freq="45min", tz="UTC"):
+        record_resolved(cfg, {"t_outdoor": -3.0}, stamp)
+
+    frame = dataset_from_archive(cfg)
+    assert frame["t_outdoor"].isna().sum() == 0
+
+
+def test_the_error_says_what_to_do_about_it(cfg):
+    from hpmpc.dataset import finish_dataset
+
+    cfg = no_sensor(cfg)
+    index = pd.date_range("2026-01-15", periods=8, freq="15min", tz="UTC")
+    with pytest.raises(ValueError) as excinfo:
+        finish_dataset(pd.DataFrame({"t_indoor": 21.0}, index=index), cfg)
+    message = str(excinfo.value)
+    assert "no outdoor sensor configured" in message
+    assert "hpmpc archive" in message
+
+
+def test_the_controller_archives_the_weather_it_used(cfg, fake_ha):
+    from hpmpc.controller import Controller
+    from hpmpc.model.thermal import ThermalParams
+
+    cfg = no_sensor(cfg)
+    cfg.entities.weather = "weather.home"
+    cfg.forecast.weather_source = "home_assistant"
+    controller = Controller(cfg, ThermalParams(), fake_ha)
+    report = controller.step(apply=True)
+
+    assert "t_outdoor" in report["archive"]["recorded"]
+    assert "t_outdoor" in open_archive(cfg).load().columns

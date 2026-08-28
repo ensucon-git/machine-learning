@@ -330,6 +330,15 @@ pumpen måste avfrosta, och avfrostning är ren förlust.
 Prognosen cachas i 30 minuter (SMHI uppdaterar per timme) och en gammal cache används
 hellre än ingen prognos alls — men det syns i rapporten istället för att döljas.
 
+**Går SMHI inte att nå faller kontrollern tillbaka på en Home Assistant-väderentitet**
+av sig själv. Sätt `entities.weather` (SMHI-integrationens egen `weather.smhi_home` är
+samma data den vägen), så är utebliven utgående trafik en olägenhet i stället för ett
+stopp. `forecast.weather_source: home_assistant` gör den vägen permanent.
+
+En väderentitet hör hemma i `entities.weather`, **inte** i `entities.outdoor_temp` — dess
+*tillstånd* är ett väderomdöme som `partlycloudy`, och siffrorna ligger i prognosen.
+Konfigurationen avvisar det med en förklaring i stället för att tyst läsa noll.
+
 Koordinater: kör `hpmpc geocode "Falkvägen, Norrköping"` en gång. SMHI:s rutnät är
 ungefär 2,5 km, så var i Norrköping du står spelar ingen roll — och prognosen ankras
 ändå mot din egen utegivare vid horisontens början.
@@ -411,6 +420,13 @@ data/history
 ```
 
 Tre saker det gör med flit:
+
+**Vädret vi faktiskt använde skrivs ner varje cykel.** Utan utegivare hämtas
+utetemperaturen från SMHI i samma stund den behövs, och Home Assistant ser den aldrig —
+recordern har alltså ingen historik att träna på. Styrslingan är det enda stället där
+talet existerar, så den arkiverar det själv, tillsammans med vind, molnighet och
+luftfuktighet när inga givare finns för dem. Finns en givare lämnas signalen till
+recordern, vars historik är tätare och närmare huset.
 
 **Bara råa signaler lagras.** Solinstrålning ur molnighet och den kommenderade
 offseten i kelvin räknas fram vid läsning. Rättar du NTC-tabellen eller

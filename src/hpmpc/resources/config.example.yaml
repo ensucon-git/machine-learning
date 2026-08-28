@@ -52,7 +52,16 @@ entities:
   # empty and rely on pot_wiper below plus one calibration by eye.
   pump_outdoor_temp: ""
   solar_radiation: ""                             # W/m2 if you own a pyranometer
-  weather: ""                                     # a HA weather entity, fallback if SMHI is down
+
+  # A Home Assistant weather entity. Worth setting even with SMHI configured
+  # below: the controller falls back to it by itself when the direct connection
+  # fails, and its forecast can stand in for a missing outdoor sensor. The SMHI
+  # integration's own entity is the same data through Home Assistant.
+  #
+  # This is where a weather entity goes - NOT in outdoor_temp above. A weather
+  # entity's state is a condition ('partlycloudy'); the numbers are in its
+  # forecast, which is what this reads.
+  weather: weather.smhi_home
 
   supply_temp: ""                                 # strongly recommended - transforms the fit
   return_temp: ""
@@ -128,7 +137,12 @@ site:
   timezone: Europe/Stockholm
 
 forecast:
-  weather_source: smhi              # SMHI open data: free, no key, ~10 days ahead
+  # smhi           - straight from SMHI open data: free, no key, ~10 days ahead.
+  #                  Falls back to entities.weather on its own if unreachable.
+  # home_assistant - use entities.weather only. Choose this if the direct
+  #                  connection is blocked on your network; the SMHI integration
+  #                  gives you the same forecast through Home Assistant.
+  weather_source: smhi
   price_source: elprisetjustnu      # Nord Pool day-ahead per bidding area, free, no key
   price_area: SE3
   weather_cache_minutes: 30         # SMHI updates hourly; be polite to a free service

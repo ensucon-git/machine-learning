@@ -30,10 +30,11 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 from .config import Config
-from .dataset import column_map, finish_dataset, pivot_history
+from .dataset import CONTINUOUS, column_map, finish_dataset, pivot_history
 from .ha import HomeAssistant
 
 log = logging.getLogger(__name__)
@@ -222,6 +223,46 @@ def refresh(cfg: Config, ha: HomeAssistant, archive: Archive | None = None,
     }
 
 
+# Signals the recorder cannot supply when no entity is configured for them:
+# they come from the forecast provider, live, and are gone by the next cycle
+# unless something writes them down. Column name -> the entities.* field that
+# would otherwise carry it.
+RESOLVED_SIGNALS = {
+    "t_outdoor": "outdoor_temp",
+    "wind": "wind_speed",
+    "cloud": "cloud_cover",
+    "humidity": "outdoor_humidity",
+}
+
+
+def record_resolved(cfg: Config, values: dict[str, float | None], now: datetime,
+                    archive: Archive | None = None) -> list[str]:
+    """Write down what the controller actually used, for signals nothing else logs.
+
+    Without an outdoor sensor the temperature comes from SMHI at the moment it
+    is needed and is never seen by Home Assistant, so the recorder has no
+    history of it and identification has nothing to fit against - the model
+    needs to know what it was outside, not only what it is now. The control
+    loop knows, once per cycle, so it writes it into our own archive.
+
+    Only signals with no configured entity are recorded: where a sensor exists
+    the recorder's own history is denser and closer to the house.
+    """
+    archive = archive or open_archive(cfg)
+    row: dict[str, float] = {}
+    for column, field in RESOLVED_SIGNALS.items():
+        if getattr(cfg.entities, field, ""):
+            continue                        # the recorder has this one covered
+        value = values.get(column)
+        if value is not None and np.isfinite(float(value)):
+            row[column] = float(value)
+    if not row:
+        return []
+    stamp = pd.Timestamp(now).tz_convert("UTC").floor(f"{int(cfg.training.resample_minutes)}min")
+    archive.merge(pd.DataFrame(row, index=[stamp]))
+    return sorted(row)
+
+
 def dataset_from_archive(cfg: Config, archive: Archive | None = None,
                          days: float | None = None) -> pd.DataFrame:
     """Build a training dataset out of the archive instead of the recorder."""
@@ -232,6 +273,12 @@ def dataset_from_archive(cfg: Config, archive: Archive | None = None,
             f"The archive at {archive.directory} is empty - run 'hpmpc collect' while the "
             "controller has access to Home Assistant"
         )
+    # Signals the control loop records itself arrive once per cycle, which need
+    # not line up with every grid step. Bridge the small gaps the same way the
+    # recorder path does, rather than dropping otherwise complete rows.
+    for column in CONTINUOUS:
+        if column in frame:
+            frame[column] = frame[column].interpolate(limit=8, limit_direction="both")
     return finish_dataset(frame, cfg)
 
 

@@ -169,8 +169,31 @@ def finish_dataset(frame: pd.DataFrame, cfg: Config) -> pd.DataFrame:
     frame = add_derived(frame, cfg)
     missing = [c for c in REQUIRED if c not in frame or frame[c].isna().all()]
     if missing:
-        raise ValueError(f"History is missing required signals: {', '.join(missing)}")
+        raise ValueError(_missing_signals_message(missing, cfg))
     return frame.dropna(subset=REQUIRED)
+
+
+def _missing_signals_message(missing: list[str], cfg: Config) -> str:
+    """Say what to do, not only what is absent.
+
+    Missing t_outdoor with no outdoor sensor is the ordinary case on a fresh
+    install rather than a misconfiguration: the temperature comes from SMHI at
+    the moment it is used, so it has no history until the control loop has run
+    for a while and written some down.
+    """
+    text = f"History is missing required signals: {', '.join(missing)}"
+    if "t_outdoor" in missing and not cfg.entities.outdoor_temp:
+        text += (
+            "\n\nThere is no outdoor sensor configured, so the temperature comes from the "
+            "weather\nforecast as each cycle needs it - which means Home Assistant never sees "
+            "it and its\nrecorder has no history of it to train on.\n\n"
+            "The control loop writes it into hpmpc's own archive every cycle, so this fixes "
+            "itself\nonce it has been running: start the controller, leave it, and check "
+            "progress with\n'hpmpc archive'. Identification wants a few weeks.\n\n"
+            "To use history that already exists instead, point entities.outdoor_temp at an "
+            "outdoor\ntemperature sensor Home Assistant has been recording."
+        )
+    return text
 
 
 def build_dataset(cfg: Config, ha: HomeAssistant, days: int | None = None) -> pd.DataFrame:

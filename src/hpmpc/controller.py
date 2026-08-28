@@ -30,6 +30,7 @@ import pandas as pd
 
 from .comfort import apply_mode, build_schedule, read_return_time, resolve_mode
 from .config import Config, load_config
+from .archive import record_resolved
 from .archive import refresh as refresh_archive
 from .dataset import add_derived, column_map, pivot_history
 from .forecast import build_forecast
@@ -674,6 +675,34 @@ class Controller:
             log.warning("Could not update the history archive: %s", exc)
             report["archive"] = {"error": str(exc)}
 
+    def _archive_resolved(self, now: datetime, readings: dict[str, Any],
+                          forecast: pd.DataFrame | None, report: dict[str, Any]) -> None:
+        """Write down the weather we used, for the signals nothing else logs.
+
+        Without an outdoor sensor the temperature comes from SMHI at the moment
+        it is needed, and Home Assistant never sees it - so the recorder has no
+        history of it and the fit would have nothing to work with. This is the
+        only place that number exists, once per cycle.
+        """
+        if not self.cfg.training.archive:
+            return
+        values: dict[str, float | None] = {
+            "t_outdoor": readings.get("t_outdoor"),
+            "wind": readings.get("wind"),
+            "humidity": readings.get("humidity"),
+        }
+        if forecast is not None and len(forecast):
+            for column in ("t_outdoor", "wind", "cloud", "humidity"):
+                if values.get(column) is None and column in forecast:
+                    values[column] = float(forecast[column].iloc[0])
+        try:
+            recorded = record_resolved(self.cfg, values, now)
+        except (ValueError, OSError) as exc:
+            log.warning("Could not archive the resolved weather: %s", exc)
+            return
+        if recorded:
+            report.setdefault("archive", {})["recorded"] = recorded
+
     def step(self, now: datetime | None = None, apply: bool | None = None) -> dict[str, Any]:
         now = now or datetime.now(timezone.utc)
         apply = (not self.cfg.control.dry_run) if apply is None else apply
@@ -705,6 +734,7 @@ class Controller:
             readings["t_outdoor_age_min"] = 0.0      # a forecast for now is, by definition, now
 
         report["readings"] = {k: v for k, v in readings.items() if v is not None}
+        self._archive_resolved(now, readings, forecast, report)
 
         # Colder outside than the actuator can present? Keep commanding anyway -
         # the emulator is the pump's only sensor now - but say what it is costing.

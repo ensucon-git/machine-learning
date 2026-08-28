@@ -159,7 +159,7 @@ terminalvärderingen fixar, fast i utvärderingen.
 
 ## Verifierat kontra antaget
 
-**Verifierat** (334 tester, syntetiskt hus med känd sanning):
+**Verifierat** (345 tester, syntetiskt hus med känd sanning):
 - Identifieringen återfinner värmekurva (lutning 0,3495 mot 0,35, R² 0,997) och
   husparametrar (UA +3 %, Ci +4 %, `k_wind` +3 %, plattans tidskonstant inom 8 %).
 - Prediktionsfel 0,085 °C över 12 h, 0,066 °C över 48 h (persistensbaslinje 1,01 °C).
@@ -239,6 +239,16 @@ terminalvärderingen fixar, fast i utvärderingen.
   förväxling som faktiskt sker.
 - **Elbilsladdarens sensor säger `Charging`/`Not charging`**, inte `on`/`off`.
   `ha.BOOLEAN_STATES` mappar båda.
+- **Utan utegivare måste kontrollern arkivera vädret själv** (`record_resolved`).
+  SMHI-temperaturen hämtas i stunden och passerar aldrig Home Assistant, så
+  recordern har ingen historik och `hpmpc collect` föll på
+  `missing required signals: t_outdoor`. Bara signaler utan konfigurerad entitet
+  skrivs — finns en givare är recorderns historik tätare och närmare huset.
+- **En väderentitet är inte en temperaturgivare.** `weather.smhi_home` har
+  tillståndet `partlycloudy`; siffrorna ligger i prognosen. Den hör hemma i
+  `entities.weather`, och konfigurationen avvisar den i `outdoor_temp`.
+- **SMHI faller tillbaka på `entities.weather` av sig själv** i `weather_points`.
+  Det är därför utebliven utgående trafik inte behöver stoppa något.
 - **Nord Pool avräknar i kvartstimmar** — 96 priser per dygn. Ingenting i koden
   antar upplösning; den läses ur `time_start`.
 - **Morgondagens priser finns inte före ~13:00.** Det är normaltillstånd, inte fel.

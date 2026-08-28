@@ -385,7 +385,9 @@ Home Assistant.
 | `Temporary failure in name resolution` | DNS, inte token. `base_url` är troligen `homeassistant.local` — byt till IP-adressen. `hpmpc check` skriver ut hela förklaringen |
 | `hpmpc check` når inte HA | fel `base_url` eller port. Testa `docker compose exec hpmpc curl -sS -H "Authorization: Bearer $HA_TOKEN" $HA_URL/api/` — inifrån containern, inte från värden |
 | HA svarar 401 | fel `HA_TOKEN`. Det är inte `HPMPC_API_KEY` — den skickas aldrig till Home Assistant |
-| `hpmpc providers` misslyckas mot SMHI | koordinater utanför Norden, eller ingen utgående nät från containern |
+| `hpmpc providers` misslyckas mot SMHI | koordinater utanför Norden, eller ingen utgående trafik från containern. Sätt `entities.weather: weather.smhi_home` — kontrollern faller tillbaka dit av sig själv, och `forecast.weather_source: home_assistant` gör det permanent |
+| `History is missing required signals: t_outdoor` | normalt utan utegivare: temperaturen hämtas i stunden och har ingen historik förrän styrslingan hunnit skriva ner den. Se `hpmpc archive` |
+| `outdoor_temp '...' is a weather entity` | en väderentitets *tillstånd* är `partlycloudy`, inte grader. Den ska stå i `entities.weather` |
 | Morgondagens priser saknas | normalt före 13:00. `price_extrapolated_hours` säger hur mycket som gissas |
 | Kontrollern faller tillbaka till offset 0 | sensordata saknas eller är för gammal; `problems` i loggen säger vilken |
 | Planen vill ha elpatron | kurvan, offsetgränserna eller dimensioneringen pressar systemet förbi kompressorn — se `hpmpc pump-table` |

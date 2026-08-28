@@ -115,3 +115,13 @@ def test_helpers_are_not_treated_as_self_published(cfg):
 def test_a_sensor_output_counts_as_self_published(cfg):
     cfg.entities.fake_temperature_output = "sensor.hpmpc_fake_outdoor"
     assert "sensor.hpmpc_fake_outdoor" in cfg.entities.self_published()
+
+
+def test_a_weather_entity_is_not_an_outdoor_temperature_sensor(tmp_path):
+    """Its state is a condition string, so reading it as a number gives nothing."""
+    path = write(tmp_path, "entities:\n  indoor_temp: sensor.a\n  outdoor_temp: weather.smhi_home\n")
+    with pytest.raises(ValueError) as excinfo:
+        load_config(path)
+    message = str(excinfo.value)
+    assert "entities.weather" in message
+    assert "partlycloudy" in message

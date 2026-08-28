@@ -170,6 +170,29 @@ def _pot_range_warning(cfg: Config) -> bool:
     return ok
 
 
+def _weather_fallback_advice(cfg: Config) -> str:
+    """SMHI being unreachable is not fatal - say so, and say what covers it.
+
+    The controller already falls through to a Home Assistant weather entity on
+    its own; whether that is configured is the only thing that decides how bad
+    this failure is.
+    """
+    if cfg.entities.weather:
+        return (
+            f"\n           The controller falls back to {cfg.entities.weather} by itself, so this\n"
+            "           is survivable - but that entity's forecast is what the plan is built\n"
+            "           on until SMHI answers again. Check it with 'hpmpc check'.\n"
+            "           To use it permanently: forecast.weather_source: home_assistant"
+        )
+    return (
+        "\n           Nothing covers this: entities.weather is empty, so there is no fallback\n"
+        "           forecast and no outdoor sensor either. Point entities.weather at a weather\n"
+        "           entity - the SMHI integration's weather.smhi_home is the same data through\n"
+        "           Home Assistant - and set forecast.weather_source: home_assistant if the\n"
+        "           direct connection keeps failing."
+    )
+
+
 def cmd_mode(args: argparse.Namespace) -> int:
     """Show or switch the comfort mode."""
     from .comfort import apply_mode, resolve_mode, set_mode
@@ -465,6 +488,7 @@ def cmd_providers(args: argparse.Namespace) -> int:
         except (ProviderError, ValueError) as exc:
             print(f"  FAILED   {exc}")
             ok = False
+            print(_weather_fallback_advice(cfg))
     else:
         print("  (using the Home Assistant weather entity; run 'hpmpc check' instead)")
 
@@ -478,9 +502,17 @@ def cmd_providers(args: argparse.Namespace) -> int:
                 cache_minutes=cfg.forecast.price_cache_minutes,
                 timeout=cfg.forecast.timeout,
             )
-            print(f"  ok       {len(points)} hourly prices, {meta['first']} .. {meta['last']}")
+            from .forecast import price_resolution
+
+            minutes = round(price_resolution(points).total_seconds() / 60)
+            print(f"  ok       {len(points)} prices at {minutes} min resolution, "
+                  f"{meta['first']} .. {meta['last']}")
             for day in meta.get("days", []):
-                print(f"           {day['date']}: {day['hours']} h{' (cached)' if day['cached'] else ''}")
+                print(f"           {day['date']}: {day['hours']} prices"
+                      f"{' (cached)' if day['cached'] else ''}")
+            if minutes == 15:
+                print("           Nord Pool settles in quarter-hours; the controller plans on the "
+                      "same grid")
             if meta.get("tomorrow_published") is False:
                 print("           tomorrow not published yet (Nord Pool publishes just after 13:00)")
             if meta.get("warning"):
@@ -663,7 +695,23 @@ def cmd_check(args: argparse.Namespace) -> int:
 
     if cfg.entities.weather:
         forecast = ha.weather_forecast(cfg.entities.weather)
-        print(f"  {'ok' if forecast else 'WARNING'}       weather forecast: {len(forecast)} hourly entries")
+        print(f"  {'ok' if forecast else 'WARNING'}       weather forecast: "
+              f"{len(forecast)} entries from {cfg.entities.weather}")
+        if forecast:
+            # A weather entity's STATE is a condition string; the numbers live in
+            # its forecast. Show that the ones we need are actually there.
+            from .forecast import parse_weather_forecast
+
+            parsed = parse_weather_forecast(forecast)
+            have = [c for c in ("t_outdoor", "wind", "cloud", "humidity")
+                    if c in parsed and parsed[c].notna().any()]
+            missing = [c for c in ("t_outdoor", "wind", "cloud", "humidity") if c not in have]
+            print(f"           carries {', '.join(have) or 'nothing usable'}"
+                  + (f" (no {', '.join(missing)})" if missing else ""))
+            if "t_outdoor" not in have:
+                print("  WARNING  that forecast has no temperature, so it cannot "
+                      "stand in for an outdoor sensor")
+                ok = False
 
     _check_actuator_calibration(cfg, ha)
 

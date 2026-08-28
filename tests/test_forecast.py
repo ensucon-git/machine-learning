@@ -192,3 +192,40 @@ def test_humidity_falls_back_to_the_sensor_then_to_unknown(cfg, fake_ha):
     cfg.entities.outdoor_humidity = ""
     frame, _ = build_forecast(cfg, fake_ha, fake_ha.now)
     assert frame["humidity"].isna().all()   # unknown, not guessed
+
+
+def test_quarter_hourly_prices_are_recognised_as_such():
+    """Nord Pool settles in quarter-hours: 96 prices a day, not 24."""
+    from hpmpc.forecast import price_resolution
+
+    start = pd.Timestamp("2026-01-15 00:00", tz="UTC")
+    points = [(start + pd.Timedelta(minutes=15 * i), 1.0) for i in range(96)]
+    assert price_resolution(points) == pd.Timedelta(minutes=15)
+
+
+def test_an_hourly_feed_still_parses():
+    from hpmpc.forecast import price_resolution
+
+    start = pd.Timestamp("2026-01-15 00:00", tz="UTC")
+    points = [(start + pd.Timedelta(hours=i), 1.0) for i in range(24)]
+    assert price_resolution(points) == pd.Timedelta(hours=1)
+
+
+def test_each_quarter_keeps_its_own_price_on_the_horizon(cfg, fake_ha):
+    """The planning grid is 15 minutes, so a quarter-hourly price must survive
+    onto it rather than being averaged into an hour."""
+    from hpmpc.forecast import build_forecast
+
+    now = fake_ha.now.replace(minute=0, second=0, microsecond=0)
+    raw = []
+    for i in range(-8, 200):
+        stamp = now + pd.Timedelta(minutes=15 * i)
+        raw.append({"start": stamp.isoformat(), "value": 1.0 if i % 2 == 0 else 5.0})
+    fake_ha.set("sensor.price", 1.0, attributes={"raw_today": raw})
+    cfg.forecast.price_source = "home_assistant"
+    cfg.control.step_minutes = 15
+
+    frame, sources = build_forecast(cfg, fake_ha, now)
+    assert sources.get("price_resolution_minutes") == 15
+    spot = frame["spot_price"].to_numpy()[:8]
+    assert len(set(spot.round(3))) == 2, "the alternating quarters were flattened"

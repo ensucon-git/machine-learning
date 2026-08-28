@@ -577,6 +577,14 @@ class Config:
                 f"training.history_days ({t.history_days}) - the archive would throw away "
                 "history that training asks for"
             )
+        if self.entities.outdoor_temp.startswith("weather."):
+            raise ValueError(
+                f"entities.outdoor_temp '{self.entities.outdoor_temp}' is a weather entity. Its "
+                "state is a condition ('partlycloudy'), not a temperature, so it cannot be read "
+                "as one. Put it in entities.weather instead and set forecast.weather_source: "
+                "home_assistant - that uses its forecast, and the first step of that forecast "
+                "also stands in for the missing sensor."
+            )
         if not self.entities.outdoor_temp:
             # The forecast's first step stands in for the missing sensor, so the
             # only real requirement is that a forecast can be built at all.
