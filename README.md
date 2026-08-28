@@ -1090,7 +1090,31 @@ underhettar utan att någonting säger ifrån. Tre lager fångar det:
 3. Automationen `MPC potentiometer at end stop` i HA-paketet larmar om wipern står kvar
    i ändläge en halvtimme.
 
+Och under gränsen gör regulatorn det enda hederliga: **den slutar styra.** Är det
+kallare ute än `perceived_min_c` finns ingen resistans som ens säger sanningen,
+än mindre en lögn — så den skriver ingenting alls, ESP32:ns watchdog släpper
+reläet, och pumpen går på sin egen givare precis som innan det här projektet
+fanns. Styrningen återupptas av sig själv när det blir varmare. Det syns i
+planen:
+
+```
+Not controlling this cycle - the pump has been handed back to its real sensor  [released]
+  note: -10.0 C outside is below what the pump can be shown (-7.0 C), so no offset can be
+        delivered - handing the pump back to its real sensor. Wire another potentiometer
+        in series (pot.devices) to control through this weather.
+```
+
+Det gör det tryggt att installera med en krets nu och löda in den andra i
+efterhand: det värsta som händer under tiden är att systemet tar paus de
+timmarna det är kallare än −7 °C ute. `control.release_when_unreachable: false`
+stänger av beteendet om `perceived_min_c` skulle vara ett policyval snarare än
+en hårdvarugräns.
+
 Den riktiga lösningen är billig: **en andra MCP41100 i serie**, och `pot.devices: 2`.
+Alltså ännu en likadan krets — en 100 **kΩ** 8-bitars digitalpotentiometer med
+SPI, inte en vanlig fast resistor. Wiper och ena änden på var krets kopplas så
+att de två banorna adderas, den andra kretsen får ett eget chip-select-ben, och
+`pot.devices: 2` i konfigurationen. Inget annat ändras.
 
 ```
 Pot:       2 x mcp41100 in series, 511 positions, 392 ohm per step

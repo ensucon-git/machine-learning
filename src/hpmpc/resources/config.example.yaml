@@ -182,6 +182,10 @@ ntc:
 # Devices in series add range, not resolution. One MCP41100 reaches -7 C at
 # 0.10 K per step around freezing; two in series reach -20 C at the same step.
 # Range is the binding constraint here, not resolution.
+# What to buy for the second one: another MCP41100 - the same 100 kohm 8-bit
+# SPI digital potentiometer, not a plain 100 ohm resistor. Wire it in series
+# with the first (wiper and one end of each, so the two tracks add up), give it
+# its own chip-select pin, and set devices: 2 below. Nothing else changes.
 pot:
   model: mcp41100
   resistance_ohm: 100000            # end to end, one device
@@ -191,6 +195,13 @@ pot:
   series_ohm: 0                     # a fixed resistor in series, if you fit one
 
 control:
+  # Colder outside than perceived_min_c? Then no resistance can tell the pump the
+  # truth, let alone a lie, so stop commanding and let the emulator fall back to
+  # the real sensor. The pump then behaves exactly as it did before hpmpc
+  # existed, and control resumes by itself once it warms up. With one MCP41100
+  # that happens below about -7 C; with two in series, below about -20 C.
+  release_when_unreachable: true
+
   offset_min: -6.0                  # more negative = pump thinks it is colder = more heat
   offset_max: 4.0
   max_change_per_cycle: 1.0         # kelvin per cycle; keeps the pump from hunting

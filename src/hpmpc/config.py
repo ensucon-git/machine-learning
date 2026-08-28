@@ -364,6 +364,16 @@ class ControlConfig:
     Leave at 0 when the price entity already includes VAT."""
     dry_run: bool = False
     max_data_age_minutes: float = 45.0
+    release_when_unreachable: bool = True
+    """When it is colder outside than ``heat_pump.perceived_min_c``, stop
+    commanding and let the emulator fall back to the pump's real sensor.
+
+    Below that temperature there is no resistance to send: even offset zero gets
+    clamped to something warmer than the truth, and the pump underheats with
+    nothing to show for it. Handing back is the honest failure - the pump then
+    behaves exactly as it did before hpmpc existed, and control resumes by
+    itself once it warms up. Turn this off only if the perceived floor is a
+    policy choice rather than a hardware limit."""
     actuator_error_warn_c: float = 1.5
     """Warn when what the pump believes differs from what was commanded by more
     than this, averaged over many cycles. This is the only closed-loop check on

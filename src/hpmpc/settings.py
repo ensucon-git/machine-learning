@@ -47,15 +47,20 @@ OVERRIDABLE: dict[str, tuple[float, float]] = {
     "control.weight_backup_heater": (0.0, 100.0),
     "control.max_electric_power_kw": (0.0, 100.0),
     "control.dry_run": (0.0, 1.0),
+    "control.release_when_unreachable": (0.0, 1.0),
     "heat_pump.curve_slope": (0.0, 2.0),
     "heat_pump.curve_offset": (0.0, 60.0),
     "heat_pump.curve_ref": (0.0, 40.0),
     "heat_pump.supply_max": (20.0, 65.0),
     "heat_pump.heat_stop_temp": (5.0, 30.0),
+    # Raise these after fitting a second potentiometer in series, without
+    # editing the file: the hardware's reach is what they describe.
+    "heat_pump.perceived_min_c": (-40.0, 0.0),
+    "heat_pump.perceived_max_c": (0.0, 40.0),
     "heat_pump.efficiency_scale": (0.3, 3.0),
 }
 
-BOOLEAN_FIELDS = {"control.dry_run"}
+BOOLEAN_FIELDS = {"control.dry_run", "control.release_when_unreachable"}
 
 
 class SettingError(ValueError):

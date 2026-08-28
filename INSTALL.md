@@ -178,8 +178,18 @@ det ofarligt:
 1. `heat_pump.perceived_min_c: -7` gör att optimeraren aldrig planerar en offset
    den inte kan leverera. Det står redan så i exempelkonfigurationen.
 2. Innan riktig kyla: löd in en **andra MCP41100 i serie** och sätt
-   `pot.devices: 2`. Då når du −20 °C med samma steglängd — seriekopplade
-   kretsar ger räckvidd, inte upplösning.
+   `pot.devices: 2`. Det är ännu en likadan krets — en 100 **kΩ** 8-bitars
+   digitalpotentiometer, inte en fast resistor. Då når du −20 °C med samma
+   steglängd; seriekopplade kretsar ger räckvidd, inte upplösning. Höj sedan
+   gränsen utan att röra filen:
+
+   ```bash
+   hpmpc set heat_pump.perceived_min_c -20
+   ```
+3. Under gränsen slutar regulatorn styra och låter pumpen gå på sin egen
+   givare (`control.release_when_unreachable`). Det gör det ofarligt att köra
+   med en krets tills den andra är på plats — systemet tar helt enkelt paus de
+   timmar det är kallare än −7 °C ute, och återupptar av sig självt.
 
 Automationen `MPC potentiometer at end stop` i HA-paketet larmar om wipern
 står kvar i ett ändläge i en halvtimme.

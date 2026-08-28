@@ -193,3 +193,77 @@ def test_arrays_go_through_the_conversion_in_one_call():
     ohms = wiper_to_resistance(steps, pot)
     assert ohms.shape == steps.shape
     assert np.allclose(resistance_to_wiper(ohms, pot), steps)
+
+
+# ------------------------------------------- weather the hardware cannot lie about
+
+
+def controller_for(cfg, fake_ha):
+    from hpmpc.controller import Controller
+    from hpmpc.model.thermal import ThermalParams
+
+    return Controller(wired(cfg), ThermalParams(), fake_ha)
+
+
+def test_below_the_perceived_floor_the_pump_is_handed_back(cfg, fake_ha):
+    """One MCP41100 stops at -7 C. At -10 C outside, even offset zero is a lie,
+    so the honest move is to stop commanding entirely."""
+    controller = controller_for(cfg, fake_ha)
+    fake_ha.set("sensor.outdoor", -10.0)
+    report = controller.step(apply=True)
+    assert report["mode"] == "released"
+    assert report["outputs"] == []
+    assert fake_ha.written == []
+    assert "real sensor" in " ".join(report["notes"])
+
+
+def test_handing_back_still_publishes_status(cfg, fake_ha):
+    """Home Assistant has to hear about it - the dead-man switch releases the relay."""
+    cfg.entities.status_entity = "sensor.hpmpc_status"
+    controller = controller_for(cfg, fake_ha)
+    fake_ha.set("sensor.outdoor", -12.0)
+    controller.step(apply=True)
+    assert any("hpmpc_status" in path for path, _ in fake_ha.posted)
+
+
+def test_control_resumes_by_itself_when_it_warms_up(cfg, fake_ha):
+    controller = controller_for(cfg, fake_ha)
+    fake_ha.set("sensor.outdoor", -10.0)
+    assert controller.step(apply=True)["mode"] == "released"
+    fake_ha.set("sensor.outdoor", -3.0)
+    assert controller.step(apply=True)["mode"] != "released"
+    assert fake_ha.written
+
+
+def test_a_second_potentiometer_moves_the_threshold(cfg, fake_ha):
+    """The whole point of pot.devices: 2 - the same weather is now controllable."""
+    cfg = wired(cfg)
+    cfg.pot.devices = 2
+    cfg.heat_pump.perceived_min_c = -20.0
+    from hpmpc.controller import Controller
+    from hpmpc.model.thermal import ThermalParams
+
+    controller = Controller(cfg, ThermalParams(), fake_ha)
+    fake_ha.set("sensor.outdoor", -10.0)
+    assert controller.step(apply=True)["mode"] != "released"
+
+
+def test_handing_back_can_be_switched_off(cfg, fake_ha):
+    cfg = wired(cfg)
+    cfg.control.release_when_unreachable = False
+    from hpmpc.controller import Controller
+    from hpmpc.model.thermal import ThermalParams
+
+    controller = Controller(cfg, ThermalParams(), fake_ha)
+    fake_ha.set("sensor.outdoor", -10.0)
+    assert controller.step(apply=True)["mode"] != "released"
+
+
+def test_the_perceived_floor_can_be_raised_at_runtime(cfg):
+    """So fitting the second pot does not mean editing config.yaml."""
+    from hpmpc.settings import OVERRIDABLE, apply
+
+    assert "heat_pump.perceived_min_c" in OVERRIDABLE
+    working, notes = apply(cfg, {"heat_pump.perceived_min_c": -20.0})
+    assert working.heat_pump.perceived_min_c == pytest.approx(-20.0)
+    assert notes

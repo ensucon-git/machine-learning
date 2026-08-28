@@ -153,7 +153,7 @@ terminalvärderingen fixar, fast i utvärderingen.
 
 ## Verifierat kontra antaget
 
-**Verifierat** (303 tester, syntetiskt hus med känd sanning):
+**Verifierat** (309 tester, syntetiskt hus med känd sanning):
 - Identifieringen återfinner värmekurva (lutning 0,3495 mot 0,35, R² 0,997) och
   husparametrar (UA +3 %, Ci +4 %, `k_wind` +3 %, plattans tidskonstant inom 8 %).
 - Prediktionsfel 0,085 °C över 12 h, 0,066 °C över 48 h (persistensbaslinje 1,01 °C).
@@ -204,6 +204,12 @@ terminalvärderingen fixar, fast i utvärderingen.
   `entities.pot_wiper` tillbaka varje cykel. Fixen är en **andra MCP41100 i
   serie** och `pot.devices: 2` → −20,3 °C vid samma steglängd. Seriekopplade
   kretsar ger räckvidd, inte upplösning.
+- **Under `perceived_min_c` slutar regulatorn styra** i stället för att skriva
+  ett klippt värde (`control.release_when_unreachable`). Finns ingen resistans
+  som säger sanningen är den hederliga utvägen att inte skriva alls: ESP32:ns
+  watchdog släpper reläet och pumpen går på sin egen givare. Det är också det
+  som gör det ofarligt att installera med en MCP41100 och löda in den andra i
+  efterhand. `heat_pump.perceived_min_c` är därför ändringsbar i drift.
 - **`pot:` är skild från `ntc:` med flit.** `ntc:` är givarkurvan man kalibrerar,
   `pot:` är vad hårdvaran kan. En omkalibrering av kurvan får inte tyst ändra
   hårdvarans gränser.

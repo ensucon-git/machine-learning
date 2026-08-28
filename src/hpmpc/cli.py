@@ -938,12 +938,16 @@ def _print_plan(report: dict[str, Any]) -> None:
         # No plan means the controller fell back. Say why in words: a JSON dump
         # is the least helpful thing to hand someone whose heating just stopped
         # being optimised.
-        print(
-            f"\nNo plan this cycle - the controller fell back to {report.get('offset', 0.0):+.2f} K"
-            f"  [{report.get('mode')}]"
-        )
-        print("Would write:")
-        print(_format_outputs(report))
+        if report.get("mode") == "released":
+            print("\nNot controlling this cycle - the pump has been handed back to its real "
+                  "sensor  [released]")
+        else:
+            print(
+                f"\nNo plan this cycle - the controller fell back to "
+                f"{report.get('offset', 0.0):+.2f} K  [{report.get('mode')}]"
+            )
+            print("Would write:")
+            print(_format_outputs(report))
         for problem in report.get("problems", []):
             print(f"  problem: {problem}")
         for note in report.get("notes", []):

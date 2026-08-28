@@ -569,6 +569,47 @@ class Controller:
             )
         return notes
 
+    def _unreachable(self, t_outdoor: float | None) -> bool:
+        """Is it colder outside than the actuator can show the pump?
+
+        Below ``heat_pump.perceived_min_c`` there is no resistance to command:
+        every value, offset zero included, would be clamped to something warmer
+        than the truth, and the pump would quietly underheat. A single
+        MCP41100 runs out at about -7 C on a Daikin 20 kohm curve, so this is
+        an ordinary Swedish winter night, not an exotic corner.
+        """
+        if not self.cfg.control.release_when_unreachable or t_outdoor is None:
+            return False
+        return float(t_outdoor) < self.cfg.heat_pump.perceived_min_c - 0.05
+
+    def _release(self, now: datetime, t_outdoor: float | None,
+                 report: dict[str, Any]) -> dict[str, Any]:
+        """Stop commanding, and let the emulator fall back to the real sensor.
+
+        Nothing is written, deliberately: the ESP32 watchdog and the Home
+        Assistant dead-man switch both release the relay when commands stop, so
+        not writing IS the instruction. The pump then behaves exactly as it did
+        before any of this existed, which is the correct behaviour for weather
+        the hardware cannot lie about. Control resumes by itself as soon as it
+        warms back up.
+        """
+        floor = self.cfg.heat_pump.perceived_min_c
+        message = (
+            f"{t_outdoor:.1f} C outside is below what the pump can be shown ({floor:.1f} C), "
+            "so no offset can be delivered - handing the pump back to its real sensor. "
+            "Wire another potentiometer in series (pot.devices) to control through this weather."
+        )
+        report["mode"] = "released"
+        report["offset"] = 0.0
+        report["notes"].append(message)
+        report["outputs"] = []
+        log.warning("%s", message)
+        self._publish_status(report)
+        self.state.last_offset = 0.0
+        self.state.updated_at = now.isoformat()
+        self.state.save(self.cfg.paths.state_file)
+        return report
+
     def _safety_override(self, readings: dict[str, Any]) -> tuple[float | None, str]:
         c = self.cfg.control
         indoor = readings.get("t_indoor")
@@ -625,6 +666,12 @@ class Controller:
             readings["t_outdoor_age_min"] = 0.0      # a forecast for now is, by definition, now
 
         report["readings"] = {k: v for k, v in readings.items() if v is not None}
+
+        # Colder outside than the actuator can present? Then even offset 0 is a
+        # lie, and the honest move is to get out of the way entirely.
+        if self._unreachable(outdoor):
+            return self._release(now, outdoor, report)
+
         problems = self.check_readings(readings)
         if forecast is None:
             problems.append("no weather or price forecast available")
