@@ -239,6 +239,13 @@ terminalvärderingen fixar, fast i utvärderingen.
   styrningen predikterar ändå rätt. Det som *inte* absorberas är allt som hänger
   på ett absolut tröskelvärde: pumpens `heat_stop_temp`, `perceived_min_c/max_c`
   och semesterläget — som fungerar just genom att passera värmestoppet.
+- **hpmpc skapar inga entiteter i HA** — det skriver in i hjälpare som
+  `ha/packages/heatpump_mpc.yaml` skapar (`input_number.varmepump_offset`,
+  `input_number.varmepump_fiktiv_utetemp`). De står på `unknown` tills första
+  cykeln kört; därför faller resistansmallen tillbaka på den riktiga
+  utetemperaturen, annars har ESP:n inget att skicka efter en HA-omstart.
+  `sensor.utegivare_verklig` överst i paketet är den enda rad användaren måste
+  peka mot sina egna entiteter — alla skyddsnät läser den.
 - **Regulatorn skriver alla konfigurerade utgångar samtidigt**, inget `output_mode`.
   Samma beslut i kelvin, grader och ohm — då kan de inte säga emot varandra. Historiken
   läses tillbaka från kelvin-entiteten eftersom den inte kräver någon omräkning.

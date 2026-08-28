@@ -198,7 +198,15 @@ switch:
     restore_mode: ALWAYS_ON
 
 number:
-  # This is what Home Assistant (or hpmpc) writes to.
+  # Two ways in. Use whichever suits you and ignore the other; they end up in
+  # the same place.
+  #
+  #   Wiper target       - Home Assistant owns the NTC curve (the shipped
+  #                        package converts for you, so the curve is somewhere
+  #                        you can trim it against the pump's display).
+  #   Target temperature - this node owns the curve. Write the fictitious
+  #                        temperature straight from
+  #                        input_number.varmepump_fiktiv_utetemp.
   - platform: template
     name: "Wiper target"
     id: wiper_target
@@ -211,6 +219,43 @@ number:
       - script.execute:
           id: set_wiper
           step: !lambda "return (int) x;"
+
+  - platform: template
+    name: "Target temperature"
+    id: target_temperature
+    unit_of_measurement: "°C"
+    device_class: temperature
+    min_value: -25
+    max_value: 30
+    step: 0.1
+    optimistic: true
+    set_action:
+      - lambda: |-
+          // Temperature -> resistance -> wiper, with the same table the
+          // readback sensor uses. Keep both identical to the ntc: section of
+          // config.yaml.
+          static const float T[] = {-30,-25,-20,-15,-10,-5,0,5,10,15,20,25,30};
+          static const float R[] = {347667,260639,196648,149283,114003,87562,
+                                    67628,52514,40991,32159,25354,20084,15984};
+          const int N = 13;
+          float t = x;
+          if (t <= T[0]) t = T[0];
+          if (t >= T[N - 1]) t = T[N - 1];
+          float ohm = R[N - 1];
+          for (int i = 0; i < N - 1; i++) {
+            if (t >= T[i] && t <= T[i + 1]) {
+              float f = (t - T[i]) / (T[i + 1] - T[i]);
+              ohm = R[i] + f * (R[i + 1] - R[i]);
+              break;
+            }
+          }
+          const float PER_STEP = 100000.0 / 255.0;
+          const float WIPER_OHM = 100.0;
+          int step = (int) lroundf((ohm - WIPER_OHM) / PER_STEP);
+          if (step < 0) step = 0;
+          if (step > 255) step = 255;          // 255 * pot count, if you fit two
+          ESP_LOGD("hpmpc", "%.1f C -> %.0f ohm -> wiper %d", x, ohm, step);
+          id(set_wiper)->execute(step);
 
 sensor:
   # The readback. Set entities.pot_wiper to this: without the pump's own

@@ -33,6 +33,48 @@ offset 0 om kontrollern tystnar. (Det finns ingen termistor kvar att falla
 tillbaka på — potentiometern *är* pumpens givare — så säkert läge betyder
 "visa sanningen", inte "koppla bort".)
 
+**Redigera en rad i paketet:** mallsensorn `Utegivare verklig` överst är den
+riktiga utetemperaturen, och den enda plats du behöver peka mot dina egna
+entiteter. Alla skyddsnät faller tillbaka på den.
+
+### Vad hpmpc skriver — och vad du kopplar ESP:n till
+
+hpmpc skapar inga egna entiteter. Det **skriver in i två hjälpare** som paketet
+skapar, varje styrcykel:
+
+| entitet | enhet | vad det är |
+|---|---|---|
+| `input_number.varmepump_offset` | K | beslutet självt |
+| `input_number.varmepump_fiktiv_utetemp` | °C | riktig utetemp + offset — **temperaturen att visa pumpen** |
+
+Den andra är den du agerar på. Den är redan inkopplad i exempelkonfigurationen:
+
+```yaml
+entities:
+  offset_output: input_number.varmepump_offset
+  fake_temperature_output: input_number.varmepump_fiktiv_utetemp
+```
+
+**Båda står på `unknown` tills hpmpc kört sin första cykel.** Det är normalt på
+en färsk installation — `hpmpc plan` visar vad som *skulle* skrivas innan dess.
+Under tiden faller resistansmallen tillbaka på den riktiga utetemperaturen, så
+ESP:n har alltid ett värde att skicka.
+
+Sedan finns två vägar vidare till ESP:n, och du väljer den som passar din
+firmware:
+
+- **Din nod tar en wiperposition** (som den ESPHome-fil som ligger med): mallarna
+  `sensor.utegivare_malresistans` → `sensor.utegivare_wiper` gör omräkningen, och
+  automationen `MPC to digital resistor` skickar den. NTC-kurvan bor då i Home
+  Assistant där du kan trimma den mot pumpens display.
+- **Din nod tar en temperatur**: skicka `input_number.varmepump_fiktiv_utetemp`
+  rakt av. Automation **B)** längst ner i paketet gör precis det — avkommentera
+  den och ta bort A). ESPHome-filen har en `number.varmepump_proxy_target_temperature`
+  som tar emot grader och räknar om till wiper i firmware.
+
+Kolla entitets-id:t under **Utvecklarverktyg → Tillstånd** — det beror på vad din
+nod heter, inte på vad som står här.
+
 ### Recorder
 
 **hpmpc sparar sin egen historik.** Varje styrcykel kopierar det recordern har

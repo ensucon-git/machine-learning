@@ -6,9 +6,28 @@
 #   homeassistant:
 #     packages: !include_dir_named packages
 #
-# hpmpc writes the offset and the fictitious temperature here; the template
-# sensors below turn that into a resistance and a wiper position, so the sensor
-# curve stays where you can trim it against the pump's display.
+# WHAT hpmpc WRITES, AND WHERE IT GOES
+#
+# hpmpc does not create entities of its own - it writes into the two helpers
+# defined below, every control cycle:
+#
+#   input_number.varmepump_offset          the decision, in kelvin
+#   input_number.varmepump_fiktiv_utetemp  real outdoor + offset, in degrees
+#                                          == THE TEMPERATURE TO SHOW THE PUMP
+#
+# The second one is the one to act on. Point config.yaml at them:
+#
+#   entities:
+#     offset_output: input_number.varmepump_offset
+#     fake_temperature_output: input_number.varmepump_fiktiv_utetemp
+#
+# They stay at "unknown" until hpmpc's first cycle - that is normal on a fresh
+# install, and "hpmpc plan" shows what would be written before that happens.
+#
+# From there the template sensors below turn the fictitious temperature into a
+# resistance and a wiper position, so the sensor curve stays where you can trim
+# it against the pump's display. If your firmware takes a temperature instead,
+# see automation B) further down and skip the conversion entirely.
 #
 # READ THIS BEFORE CHANGING THE SAFETY NETS. The pump has no outdoor sensor of
 # its own any more - the potentiometer IS its sensor. So there is no such thing
@@ -158,6 +177,32 @@ input_number:
 
 template:
   - sensor:
+      # ===================================================================
+      # EDIT THIS ONE FIRST. It is the real outdoor temperature, and it is
+      # the only line in this file you have to point at your own entities.
+      #
+      # Every safety net here falls back to the truth rather than to
+      # nothing, and this is where "the truth" comes from. Put your own
+      # outdoor sensor first if you have one; otherwise any weather
+      # integration will do - it only has to be roughly right.
+      #
+      # If none of them is available this stays unknown, and the fallbacks
+      # deliberately hold the last value instead of inventing one. Writing
+      # a made-up 0 C to a pump that has no other sensor is worse than
+      # holding a reading from an hour ago.
+      # ===================================================================
+      - name: "Utegivare verklig"
+        unique_id: hpmpc_real_outdoor
+        unit_of_measurement: "°C"
+        device_class: temperature
+        state: >
+          {% set candidates = [
+               states('sensor.ute_temperatur'),
+               state_attr('weather.forecast_home', 'temperature'),
+               state_attr('weather.hemma', 'temperature') ] %}
+          {% set found = candidates | reject('in', [none, 'unknown', 'unavailable']) | list %}
+          {{ found[0] | float(none) if found else none }}
+
       # Your own calibration lives here: the curve that turns the fictitious
       # temperature into a resistance for the digital pot. Fit it against what
       # the pump's DISPLAY reads, not against a bench measurement of the
@@ -166,11 +211,20 @@ template:
       #
       # This example is a 20 kohm / B=3950 NTC. Adjust R25 and B until commanding
       # a value makes the pump's display agree with it.
+      #
+      # Before hpmpc's first cycle - a fresh install, or the minutes after a
+      # Home Assistant restart - the fictitious temperature is still unknown.
+      # The pump needs a resistance anyway, so fall through to the real outdoor
+      # temperature: that is offset zero, which is exactly right when nobody
+      # has an opinion yet.
       - name: "Utegivare mAlresistans"
         unique_id: hpmpc_target_resistance
         unit_of_measurement: "Ω"
         state: >
           {% set t = states('input_number.varmepump_fiktiv_utetemp') | float(none) %}
+          {% if t is none %}
+            {% set t = states('sensor.utegivare_verklig') | float(none) %}
+          {% endif %}
           {% if t is none %}
             {{ none }}
           {% else %}
@@ -295,12 +349,19 @@ automation:
           entity_id: input_number.varmepump_offset
         data:
           value: 0
-      - service: input_number.set_value
-        target:
-          entity_id: input_number.varmepump_fiktiv_utetemp
-        data:
-          value: >
-            {{ state_attr('weather.hemma', 'temperature') | float(0) }}
+      # Only if we actually know the real temperature. If we do not, the
+      # resistor keeps its last value, which is a far better sensor than a
+      # number we made up.
+      - if:
+          - condition: template
+            value_template: >
+              {{ states('sensor.utegivare_verklig') | float(none) is not none }}
+        then:
+          - service: input_number.set_value
+            target:
+              entity_id: input_number.varmepump_fiktiv_utetemp
+            data:
+              value: "{{ states('sensor.utegivare_verklig') | float }}"
       - service: persistent_notification.create
         data:
           title: "Heat pump MPC"
@@ -340,12 +401,16 @@ automation:
           entity_id: input_number.varmepump_offset
         data:
           value: 0
-      - service: input_number.set_value
-        target:
-          entity_id: input_number.varmepump_fiktiv_utetemp
-        data:
-          value: >
-            {{ state_attr('weather.hemma', 'temperature') | float(0) }}
+      - if:
+          - condition: template
+            value_template: >
+              {{ states('sensor.utegivare_verklig') | float(none) is not none }}
+        then:
+          - service: input_number.set_value
+            target:
+              entity_id: input_number.varmepump_fiktiv_utetemp
+            data:
+              value: "{{ states('sensor.utegivare_verklig') | float }}"
       - service: persistent_notification.create
         data:
           title: "Heat pump MPC stopped"
@@ -407,10 +472,21 @@ automation:
         data:
           option: normal
 
-  # ---- Push the calibrated resistance to the emulator -------------------
-  # hpmpc gives the fictitious temperature; the curve above turns it into ohm.
-  # Keeping the curve here means you can adjust it against the pump's display
-  # without touching the controller.
+  # ---- Push the target to the emulator ----------------------------------
+  #
+  # PICK THE ONE THAT MATCHES YOUR FIRMWARE, and delete the other. Both start
+  # from input_number.varmepump_fiktiv_utetemp, which is what hpmpc writes:
+  #
+  #   A) your node takes a WIPER POSITION (the shipped ESPHome config does):
+  #      fictitious temperature -> sensor.utegivare_malresistans (ohm)
+  #                             -> sensor.utegivare_wiper (0..255)
+  #   B) your node takes a TEMPERATURE and converts it itself:
+  #      write input_number.varmepump_fiktiv_utetemp straight across.
+  #
+  # Either way the conversion curve stays somewhere you can trim it against
+  # the pump's display without touching the controller.
+  #
+  # --- A) wiper position -------------------------------------------------
   - alias: "MPC to digital resistor"
     id: hpmpc_to_resistor
     mode: single
@@ -431,6 +507,32 @@ automation:
           entity_id: number.varmepump_proxy_wiper_target
         data:
           value: "{{ states('sensor.utegivare_wiper') | int }}"
+
+  # --- B) temperature ----------------------------------------------------
+  # Uncomment this and delete A) if your firmware owns the NTC curve. Note that
+  # hpmpc has already clamped the value to heat_pump.perceived_min_c/max_c, so
+  # anything arriving here is something the hardware is supposed to be able to
+  # present - if the firmware still has to clamp it, those settings are wrong.
+  #
+  # - alias: "MPC to sensor emulator"
+  #   id: hpmpc_to_emulator_temperature
+  #   mode: single
+  #   trigger:
+  #     - platform: state
+  #       entity_id: input_number.varmepump_fiktiv_utetemp
+  #   condition:
+  #     - condition: state
+  #       entity_id: input_boolean.varmepump_mpc_aktiv
+  #       state: "on"
+  #     - condition: template
+  #       value_template: >
+  #         {{ states('input_number.varmepump_fiktiv_utetemp') | float(none) is not none }}
+  #   action:
+  #     - service: number.set_value
+  #       target:
+  #         entity_id: number.varmepump_proxy_target_temperature
+  #       data:
+  #         value: "{{ states('input_number.varmepump_fiktiv_utetemp') | float }}"
 
   # ---- Actuator calibration drift --------------------------------------
   # Everything about the offset is open loop except this. If what the pump
