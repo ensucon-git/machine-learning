@@ -1026,10 +1026,16 @@ def _print_plan(report: dict[str, Any]) -> None:
         # No plan means the controller fell back. Say why in words: a JSON dump
         # is the least helpful thing to hand someone whose heating just stopped
         # being optimised.
-        print(
-            f"\nNo plan this cycle - the controller fell back to "
-            f"{report.get('offset', 0.0):+.2f} K  [{report.get('mode')}]"
-        )
+        if report.get("mode") == "collecting":
+            # Not a fallback: this is the first phase of an ordinary install,
+            # and it lasts weeks. Do not describe it as something going wrong.
+            print(f"\nCollecting history - no model yet, holding "
+                  f"{report.get('offset', 0.0):+.2f} K  [collecting]")
+        else:
+            print(
+                f"\nNo plan this cycle - the controller fell back to "
+                f"{report.get('offset', 0.0):+.2f} K  [{report.get('mode')}]"
+            )
         print("Would write:")
         print(_format_outputs(report))
         for problem in report.get("problems", []):

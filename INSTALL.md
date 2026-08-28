@@ -183,7 +183,14 @@ De två nycklarna gör olika saker, och det är lätt att blanda ihop dem:
 | `HA_TOKEN` | long-lived access token från din HA-profil. Utan den kommer hpmpc ingenstans |
 | `HPMPC_API_KEY` | skyddar **hpmpc:s eget** HTTP-API på port 8129. Skickas aldrig till Home Assistant, och behövs bara om du vill nå API:et |
 
-Två saker där som är värda en extra titt:
+Tre saker där som är värda en extra titt:
+
+`forecast.weather_source` står på `home_assistant`, alltså vädret via
+`entities.weather` (SMHI-integrationens `weather.smhi_home`). Det kräver
+ingenting utom Home Assistant. Vill du hämta direkt från SMHI istället — det ger
+luftfuktighet för varje steg, vilket driver avfrostningsmodellen — kolla först
+att det svarar med `hpmpc providers` och sätt sedan `weather_source: smhi`.
+
 
 `entities.outdoor_temp` är **tom med flit**. Utetemperaturen hämtas då från SMHI
 inne i kontrollern, så ingen utegivare behövs och Home Assistant är inte

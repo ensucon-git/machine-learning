@@ -53,16 +53,18 @@ entities:
   pump_outdoor_temp: ""
   solar_radiation: ""                             # W/m2 if you own a pyranometer
 
-  # A Home Assistant weather entity. Worth setting even with SMHI configured
-  # below: the controller falls back to it by itself when the direct connection
-  # fails, and its forecast can stand in for a missing outdoor sensor. The SMHI
-  # integration's own entity is the same data through Home Assistant.
+  # A Home Assistant weather entity. THIS IS THE WEATHER SOURCE by default -
+  # see forecast.weather_source below - and it also stands in for the missing
+  # outdoor sensor above, so it is doing most of the work here.
   #
-  # This is where a weather entity goes - NOT in outdoor_temp above. A weather
-  # entity's state is a condition ('cloudy'), and reading that as a number gives
-  # nothing. The measurements are attributes next to it: temperature, wind_speed,
-  # humidity. Configured here, both are used - the attributes for what it is like
-  # right now, and its forecast for the rest of the horizon.
+  # This is where a weather entity goes, NOT in outdoor_temp above. Its state is
+  # a condition word ('cloudy'), and reading that as a number gives nothing. The
+  # measurements are attributes next to it: temperature, wind_speed, humidity.
+  # Both halves are used - the attributes for what it is like right now, the
+  # forecast for the rest of the horizon.
+  #
+  # Install the SMHI integration in Home Assistant if you have not: it creates
+  # exactly this entity, from the same data as the direct route.
   weather: weather.smhi_home
 
   supply_temp: ""                                 # strongly recommended - transforms the fit
@@ -139,15 +141,31 @@ site:
   timezone: Europe/Stockholm
 
 forecast:
-  # smhi           - straight from SMHI open data: free, no key, ~10 days ahead.
-  #                  Falls back to entities.weather on its own if unreachable.
-  # home_assistant - use entities.weather only. Choose this if the direct
-  #                  connection is blocked on your network; the SMHI integration
-  #                  gives you the same forecast through Home Assistant.
-  weather_source: smhi
-  price_source: elprisetjustnu      # Nord Pool day-ahead per bidding area, free, no key
+  # Where the weather comes from.
+  #
+  #   home_assistant - the entities.weather entity above. Its attributes give
+  #                    what it is like right now and its forecast covers the
+  #                    horizon. With the SMHI integration installed this is the
+  #                    same data as the direct route, one hop further.
+  #   smhi           - straight from SMHI open data: free, no key, ~10 days
+  #                    ahead, and the only route that carries humidity for every
+  #                    step (which drives the defrost model). Falls back to
+  #                    entities.weather by itself when it cannot be reached.
+  #
+  # home_assistant by default because it is the one that needs nothing but Home
+  # Assistant, and 36 hours of horizon fits inside any forecast. Switch to smhi
+  # if you would rather not depend on the integration - check it answers first:
+  #
+  #   hpmpc providers
+  #
+  weather_source: home_assistant
+
+  # Prices go straight to the source: Nord Pool day-ahead per bidding area,
+  # free, no key. Falls back to entities.price if it cannot be reached.
+  price_source: elprisetjustnu
   price_area: SE3
-  weather_cache_minutes: 30         # SMHI updates hourly; be polite to a free service
+
+  weather_cache_minutes: 30         # be polite to a free service
   price_cache_minutes: 60
   timeout: 30
 

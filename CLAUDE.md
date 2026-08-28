@@ -252,7 +252,11 @@ terminalvärderingen fixar, fast i utvärderingen.
   prognosens första steg precis som en riktig givare. Den hör hemma i
   `entities.weather`, och konfigurationen avvisar den i `outdoor_temp`.
 - **SMHI faller tillbaka på `entities.weather` av sig själv** i `weather_points`.
-  Det är därför utebliven utgående trafik inte behöver stoppa något.
+  Det är därför utebliven utgående trafik inte behöver stoppa något. **Exempel-
+  konfigurationen står ändå på `weather_source: home_assistant`** — direktvägen
+  gav 404 med HTML hos användaren (elpriserna fungerade, så det är inte nätet),
+  och URL:en är fortfarande overifierad. Direktvägen är bättre när den fungerar:
+  den bär luftfuktighet för varje prognossteg.
 - **Nord Pool avräknar i kvartstimmar** — 96 priser per dygn. Ingenting i koden
   antar upplösning; den läses ur `time_start`.
 - **Morgondagens priser finns inte före ~13:00.** Det är normaltillstånd, inte fel.
