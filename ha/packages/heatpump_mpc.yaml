@@ -6,10 +6,16 @@
 #   homeassistant:
 #     packages: !include_dir_named packages
 #
-# With control.output_mode: resistance, hpmpc writes ohm straight to the
-# ESPHome number entity, so Home Assistant does no conversion. What it does
-# provide is the safety net: if the controller goes quiet, HA releases the
-# emulator and the pump goes back to its real sensor.
+# hpmpc writes the offset and the fictitious temperature here; the template
+# sensors below turn that into a resistance and a wiper position, so the sensor
+# curve stays where you can trim it against the pump's display.
+#
+# READ THIS BEFORE CHANGING THE SAFETY NETS. The pump has no outdoor sensor of
+# its own any more - the potentiometer IS its sensor. So there is no such thing
+# as "release the emulator and let the pump read its own sensor": that leaves an
+# open circuit. Every safety net here falls back to the TRUTH instead - offset
+# zero and the real outdoor temperature - which makes the pump behave exactly
+# as it would have without any of this.
 # ---------------------------------------------------------------------------
 
 input_boolean:
@@ -254,15 +260,20 @@ template:
         device_class: problem
         state: >
           {{ states('sensor.mpc_age') | float(9999) > 45
-             or not is_state('switch.emulated_outdoor_sensor_engaged', 'on') }}
+             or states('sensor.varmepump_proxy_mcp41100_wiper_0_255') in ['unknown', 'unavailable'] }}
 
 automation:
   # ---- Dead-man switch --------------------------------------------------
-  # If the controller stops reporting, release the emulator and let the pump
-  # read its own sensor again. A stuck faked temperature is the one failure
-  # mode that actually costs money or comfort, so this runs regardless of why
-  # the controller went away. The ESP32 has its own 45-minute watchdog as well;
-  # these two are deliberately independent.
+  # THE PUMP HAS NO SENSOR OF ITS OWN. The potentiometer is its outdoor sensor,
+  # so "release the emulator" is not a safe state - it leaves the pump with an
+  # open circuit or a stale value. Falling back means falling back to the TRUTH:
+  # write the real outdoor temperature, offset zero, and let the pump's own
+  # weather-dependent curve run exactly as it would have without any of this.
+  #
+  # A stuck faked temperature is the one failure that actually costs money or
+  # comfort, so this runs regardless of why the controller went away. The ESP32
+  # has its own watchdog with the same policy; the two are deliberately
+  # independent.
   - alias: "MPC dead-man switch"
     id: hpmpc_deadman
     mode: single
@@ -275,16 +286,28 @@ automation:
         entity_id: input_boolean.varmepump_mpc_aktiv
         to: "off"
     action:
-      - service: switch.turn_off
+      # Offset zero, and the fictitious temperature set to the real one. Use
+      # your own outdoor sensor here if you have one; otherwise any weather
+      # integration's current temperature will do - it only has to be roughly
+      # right, and roughly right beats stale.
+      - service: input_number.set_value
         target:
-          entity_id: switch.emulated_outdoor_sensor_engaged
+          entity_id: input_number.varmepump_offset
+        data:
+          value: 0
+      - service: input_number.set_value
+        target:
+          entity_id: input_number.varmepump_fiktiv_utetemp
+        data:
+          value: >
+            {{ state_attr('weather.hemma', 'temperature') | float(0) }}
       - service: persistent_notification.create
         data:
           title: "Heat pump MPC"
           message: >
             The controller has not reported for {{ states('sensor.mpc_age') }} minutes.
-            The outdoor sensor emulator has been released; the pump is reading its
-            own sensor again.
+            The pump is now being shown the real outdoor temperature with no offset,
+            so its own heating curve runs unmodified.
 
   # ---- Sanity check on the faked temperature ----------------------------
   # Independent of anything hpmpc does: if what the pump is being shown drifts
@@ -306,19 +329,29 @@ automation:
         entity_id: input_number.varmepump_offset
         below: -10
     action:
-      - service: switch.turn_off
-        target:
-          entity_id: switch.emulated_outdoor_sensor_engaged
+      # Same policy as the dead-man switch: fall back to the truth, not to
+      # nothing. Switching MPC off stops new offsets; the resistor keeps being
+      # driven, because the pump has nothing else to read.
       - service: input_boolean.turn_off
         target:
           entity_id: input_boolean.varmepump_mpc_aktiv
+      - service: input_number.set_value
+        target:
+          entity_id: input_number.varmepump_offset
+        data:
+          value: 0
+      - service: input_number.set_value
+        target:
+          entity_id: input_number.varmepump_fiktiv_utetemp
+        data:
+          value: >
+            {{ state_attr('weather.hemma', 'temperature') | float(0) }}
       - service: persistent_notification.create
         data:
           title: "Heat pump MPC stopped"
           message: >
-            The controller asked for an offset of {{ states('input_number.varmepump_offset') }} K,
-            showing the pump {{ states('input_number.varmepump_fiktiv_utetemp') }} °C.
-            The emulator has been released and MPC control switched off.
+            The controller asked for an offset of {{ states('input_number.varmepump_offset') }} K.
+            MPC control is off and the pump is being shown the real outdoor temperature.
 
   # ---- The potentiometer ran out of range -------------------------------
   # A single MCP41100 reaches about -7 C on a 20 kohm Daikin curve. Past that it
@@ -345,8 +378,9 @@ automation:
             The potentiometer has been at wiper {{ states('sensor.varmepump_proxy_mcp41100_wiper_0_255') }}
             for half an hour. The controller wants to show the pump
             {{ states('input_number.varmepump_fiktiv_utetemp') }} °C but the hardware cannot reach it,
-            so the pump is seeing something else. Raise heat_pump.perceived_min_c to what this
-            pot can do, or wire a second one in series and set pot.devices: 2.
+            so the pump is being shown something warmer and the house will drift cool.
+            This is a range limit, not a fault: wire a second MCP41100 in series, set
+            pot.devices: 2 and raise heat_pump.perceived_min_c to match.
 
   # ---- Come home from holiday ------------------------------------------
   # The controller already ramps the comfort band back at the return time, and

@@ -417,25 +417,39 @@ class Controller:
         ]
 
     def _limit(self, target: float, t_outdoor: float | None = None) -> tuple[float, list[str]]:
+        """Policy limits first, then the rate limiter, then physics.
+
+        The order matters. The perceived range is not a preference, it is what
+        the actuator can produce, so it has to be applied last: rate-limiting
+        after it would command a temperature the hardware then clamps on its own,
+        and the model would go on believing it had been applied. Commanding only
+        what can be delivered keeps the model and the pump telling the same
+        story - and a step that only exists because the potentiometer hit its
+        end stop is not the actuator hunting, so there is nothing for the rate
+        limiter to smooth.
+        """
         c = self.cfg.control
         pump = self.cfg.heat_pump
         notes: list[str] = []
         clamped = float(np.clip(target, c.offset_min, c.offset_max))
         if abs(clamped - target) > 1e-6:
             notes.append(f"clamped to [{c.offset_min}, {c.offset_max}]")
-        if t_outdoor is not None:
-            # Keep the temperature actually presented to the pump inside the
-            # range the machine is happy to see, whatever the offset says.
-            bounded = float(np.clip(t_outdoor + clamped, pump.perceived_min_c, pump.perceived_max_c)) - t_outdoor
-            if abs(bounded - clamped) > 1e-6:
-                notes.append(
-                    f"limited so the pump sees between {pump.perceived_min_c} and {pump.perceived_max_c} degC"
-                )
-                clamped = bounded
+
         delta = clamped - self.state.last_offset
         if abs(delta) > c.max_change_per_cycle:
             clamped = self.state.last_offset + np.sign(delta) * c.max_change_per_cycle
             notes.append(f"rate limited to {c.max_change_per_cycle} K/cycle")
+
+        if t_outdoor is not None:
+            bounded = float(
+                np.clip(t_outdoor + clamped, pump.perceived_min_c, pump.perceived_max_c)
+            ) - t_outdoor
+            if abs(bounded - clamped) > 1e-6:
+                notes.append(
+                    f"limited so the pump sees between {pump.perceived_min_c} and "
+                    f"{pump.perceived_max_c} degC"
+                )
+                clamped = bounded
         return float(clamped), notes
 
     def check_actuator(self, readings: dict[str, Any]) -> dict[str, Any] | None:
@@ -569,46 +583,39 @@ class Controller:
             )
         return notes
 
-    def _unreachable(self, t_outdoor: float | None) -> bool:
-        """Is it colder outside than the actuator can show the pump?
+    def range_shortfall(self, t_outdoor: float | None) -> dict[str, Any] | None:
+        """How far short of the truth the actuator is falling, if at all.
 
-        Below ``heat_pump.perceived_min_c`` there is no resistance to command:
-        every value, offset zero included, would be clamped to something warmer
-        than the truth, and the pump would quietly underheat. A single
-        MCP41100 runs out at about -7 C on a Daikin 20 kohm curve, so this is
-        an ordinary Swedish winter night, not an exotic corner.
-        """
-        if not self.cfg.control.release_when_unreachable or t_outdoor is None:
-            return False
-        return float(t_outdoor) < self.cfg.heat_pump.perceived_min_c - 0.05
+        There is no real sensor behind the emulator any more: the digital
+        potentiometer IS the pump's outdoor sensor. So when it runs out of
+        range the answer is never to stop commanding - the pump would be left
+        with an open circuit or a stale value. The answer is to command the
+        coldest thing the hardware can present, keep the heat coming, and say
+        clearly how much heat is being lost to the limit.
 
-    def _release(self, now: datetime, t_outdoor: float | None,
-                 report: dict[str, Any]) -> dict[str, Any]:
-        """Stop commanding, and let the emulator fall back to the real sensor.
-
-        Nothing is written, deliberately: the ESP32 watchdog and the Home
-        Assistant dead-man switch both release the relay when commands stop, so
-        not writing IS the instruction. The pump then behaves exactly as it did
-        before any of this existed, which is the correct behaviour for weather
-        the hardware cannot lie about. Control resumes by itself as soon as it
-        warms back up.
+        A single MCP41100 bottoms out near -7 C on a Daikin 20 kohm curve, so
+        this is an ordinary winter night, not an exotic corner.
         """
         floor = self.cfg.heat_pump.perceived_min_c
-        message = (
-            f"{t_outdoor:.1f} C outside is below what the pump can be shown ({floor:.1f} C), "
-            "so no offset can be delivered - handing the pump back to its real sensor. "
-            "Wire another potentiometer in series (pot.devices) to control through this weather."
-        )
-        report["mode"] = "released"
-        report["offset"] = 0.0
-        report["notes"].append(message)
-        report["outputs"] = []
-        log.warning("%s", message)
-        self._publish_status(report)
-        self.state.last_offset = 0.0
-        self.state.updated_at = now.isoformat()
-        self.state.save(self.cfg.paths.state_file)
-        return report
+        if t_outdoor is None or float(t_outdoor) >= floor - 0.05:
+            return None
+        gap = floor - float(t_outdoor)
+        # The curve turns outdoor temperature into supply temperature, so a gap
+        # in what the pump believes is a gap in the water it makes.
+        supply_loss = gap * self.cfg.heat_pump.curve_slope
+        return {
+            "outdoor_c": round(float(t_outdoor), 2),
+            "coldest_shown_c": round(float(floor), 2),
+            "gap_c": round(float(gap), 2),
+            "supply_shortfall_c": round(float(supply_loss), 2),
+            "warning": (
+                f"It is {t_outdoor:.1f} C out and the pump cannot be shown colder than "
+                f"{floor:.1f} C. It is being held at that floor - the most heat this hardware "
+                f"can ask for - but the heating curve is about {supply_loss:.1f} K of supply "
+                f"temperature short, so the house will drift cool. Wire another potentiometer "
+                f"in series (pot.devices) to control through this weather."
+            ),
+        }
 
     def _safety_override(self, readings: dict[str, Any]) -> tuple[float | None, str]:
         c = self.cfg.control
@@ -667,10 +674,13 @@ class Controller:
 
         report["readings"] = {k: v for k, v in readings.items() if v is not None}
 
-        # Colder outside than the actuator can present? Then even offset 0 is a
-        # lie, and the honest move is to get out of the way entirely.
-        if self._unreachable(outdoor):
-            return self._release(now, outdoor, report)
+        # Colder outside than the actuator can present? Keep commanding anyway -
+        # the emulator is the pump's only sensor now - but say what it is costing.
+        shortfall = self.range_shortfall(outdoor)
+        if shortfall:
+            report["range_shortfall"] = shortfall
+            report["notes"].append(shortfall["warning"])
+            log.warning("%s", shortfall["warning"])
 
         problems = self.check_readings(readings)
         if forecast is None:
@@ -873,6 +883,7 @@ class Controller:
             "setpoint": report.get("comfort", {}).get("setpoint_now"),
             "comfort_band": report.get("comfort", {}).get("comfort_band_now"),
             "actuator_error_c": report.get("actuator", {}).get("error_smoothed_c"),
+            "range_shortfall_c": report.get("range_shortfall", {}).get("gap_c"),
             "slab_temperature": round(self.state.t_mass, 2),
             "updated": report.get("timestamp"),
         }

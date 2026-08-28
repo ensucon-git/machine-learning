@@ -195,7 +195,12 @@ def test_arrays_go_through_the_conversion_in_one_call():
     assert np.allclose(resistance_to_wiper(ohms, pot), steps)
 
 
-# ------------------------------------------- weather the hardware cannot lie about
+# ----------------------------------------- weather the hardware cannot reach
+#
+# The pump has no outdoor sensor of its own: the potentiometer IS its sensor.
+# So running out of range must never mean "stop commanding" - the pump would be
+# left with an open circuit. It means "command the coldest thing the hardware
+# has, keep the heat coming, and say what it is costing".
 
 
 def controller_for(cfg, fake_ha):
@@ -205,38 +210,44 @@ def controller_for(cfg, fake_ha):
     return Controller(wired(cfg), ThermalParams(), fake_ha)
 
 
-def test_below_the_perceived_floor_the_pump_is_handed_back(cfg, fake_ha):
-    """One MCP41100 stops at -7 C. At -10 C outside, even offset zero is a lie,
-    so the honest move is to stop commanding entirely."""
-    controller = controller_for(cfg, fake_ha)
-    fake_ha.set("sensor.outdoor", -10.0)
-    report = controller.step(apply=True)
-    assert report["mode"] == "released"
-    assert report["outputs"] == []
-    assert fake_ha.written == []
-    assert "real sensor" in " ".join(report["notes"])
-
-
-def test_handing_back_still_publishes_status(cfg, fake_ha):
-    """Home Assistant has to hear about it - the dead-man switch releases the relay."""
-    cfg.entities.status_entity = "sensor.hpmpc_status"
+def test_below_the_floor_it_still_writes(cfg, fake_ha):
     controller = controller_for(cfg, fake_ha)
     fake_ha.set("sensor.outdoor", -12.0)
-    controller.step(apply=True)
-    assert any("hpmpc_status" in path for path, _ in fake_ha.posted)
-
-
-def test_control_resumes_by_itself_when_it_warms_up(cfg, fake_ha):
-    controller = controller_for(cfg, fake_ha)
-    fake_ha.set("sensor.outdoor", -10.0)
-    assert controller.step(apply=True)["mode"] == "released"
-    fake_ha.set("sensor.outdoor", -3.0)
-    assert controller.step(apply=True)["mode"] != "released"
+    report = controller.step(apply=True)
+    assert report["outputs"], "the pump must never be left without a value"
     assert fake_ha.written
 
 
-def test_a_second_potentiometer_moves_the_threshold(cfg, fake_ha):
-    """The whole point of pot.devices: 2 - the same weather is now controllable."""
+def test_below_the_floor_it_asks_for_all_the_heat_it_can(cfg, fake_ha):
+    """Pinned at the coldest the pot can present, which is maximum heat."""
+    controller = controller_for(cfg, fake_ha)
+    fake_ha.set("sensor.outdoor", -12.0)
+    report = controller.step(apply=True)
+    shown = {o["kind"]: o["value"] for o in report["outputs"]}["fake_temperature"]
+    assert shown == pytest.approx(cfg.heat_pump.perceived_min_c, abs=0.05)
+
+
+def test_the_shortfall_is_quantified_not_just_flagged(cfg, fake_ha):
+    """Knowing "it is limited" is not much use; knowing how much heat is missing is."""
+    controller = controller_for(cfg, fake_ha)
+    fake_ha.set("sensor.outdoor", -12.0)
+    report = controller.step(apply=True)
+    shortfall = report["range_shortfall"]
+    assert shortfall["gap_c"] == pytest.approx(5.0, abs=0.05)
+    expected = 5.0 * cfg.heat_pump.curve_slope
+    assert shortfall["supply_shortfall_c"] == pytest.approx(expected, abs=0.05)
+    assert "drift cool" in shortfall["warning"]
+
+
+def test_no_complaint_while_the_hardware_can_keep_up(cfg, fake_ha):
+    controller = controller_for(cfg, fake_ha)
+    fake_ha.set("sensor.outdoor", -3.0)
+    assert controller.range_shortfall(-3.0) is None
+    assert "range_shortfall" not in controller.step(apply=True)
+
+
+def test_a_second_potentiometer_removes_the_shortfall(cfg, fake_ha):
+    """The whole point of pot.devices: 2 - the same weather becomes controllable."""
     cfg = wired(cfg)
     cfg.pot.devices = 2
     cfg.heat_pump.perceived_min_c = -20.0
@@ -244,19 +255,34 @@ def test_a_second_potentiometer_moves_the_threshold(cfg, fake_ha):
     from hpmpc.model.thermal import ThermalParams
 
     controller = Controller(cfg, ThermalParams(), fake_ha)
-    fake_ha.set("sensor.outdoor", -10.0)
-    assert controller.step(apply=True)["mode"] != "released"
+    fake_ha.set("sensor.outdoor", -12.0)
+    report = controller.step(apply=True)
+    assert "range_shortfall" not in report
+    shown = {o["kind"]: o["value"] for o in report["outputs"]}["fake_temperature"]
+    assert shown < -12.0 + 0.1        # free to ask for more heat than the truth
 
 
-def test_handing_back_can_be_switched_off(cfg, fake_ha):
+def test_the_shortfall_reaches_home_assistant(cfg, fake_ha):
     cfg = wired(cfg)
-    cfg.control.release_when_unreachable = False
+    cfg.entities.status_entity = "sensor.hpmpc_status"
     from hpmpc.controller import Controller
     from hpmpc.model.thermal import ThermalParams
 
     controller = Controller(cfg, ThermalParams(), fake_ha)
-    fake_ha.set("sensor.outdoor", -10.0)
-    assert controller.step(apply=True)["mode"] != "released"
+    fake_ha.set("sensor.outdoor", -12.0)
+    controller.step(apply=True)
+    posted = [body for path, body in fake_ha.posted if "hpmpc_status" in path]
+    assert posted and posted[-1]["attributes"]["range_shortfall_c"] == pytest.approx(5.0, abs=0.05)
+
+
+def test_even_the_sensor_failure_path_keeps_the_pump_supplied(cfg, fake_ha):
+    """A stale indoor sensor must not leave the pump's own sensor input dark."""
+    controller = controller_for(cfg, fake_ha)
+    fake_ha.set("sensor.indoor", 21.0, age_minutes=600)
+    fake_ha.set("sensor.outdoor", -12.0)
+    report = controller.step(apply=True)
+    assert report["mode"] == "fallback"
+    assert report["outputs"] and fake_ha.written
 
 
 def test_the_perceived_floor_can_be_raised_at_runtime(cfg):

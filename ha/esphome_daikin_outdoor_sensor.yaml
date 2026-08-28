@@ -71,9 +71,32 @@
 # the price of the warm end - but holiday mode lives at the warm end, so prefer
 # the second pot.
 #
-# SAFETY: the real thermistor stays wired through the NC contact of a relay.
-# The ESP has to actively energise the relay to take over. Lose power, lose
-# Wi-Fi, crash the firmware - the pump falls back to its real sensor.
+# SAFETY, WITH NO SENSOR BEHIND THE EMULATOR
+# ---------------------------------------------------------------------------
+# This node is the pump's outdoor sensor. There is no thermistor behind it to
+# fall back to, which changes what "safe" means: an open circuit is not a safe
+# state, it is a sensor fault. Every layer here therefore falls back to a
+# PLAUSIBLE RESISTANCE, never to nothing.
+#
+#   1. hpmpc alive          -> the optimised offset.
+#   2. hpmpc silent, HA up  -> the dead-man automation writes the real outdoor
+#                              temperature with offset zero, so the pump's own
+#                              weather curve runs unmodified.
+#   3. HA silent too        -> this node holds its last commanded position. The
+#                              outdoor temperature moves slowly; a value a few
+#                              hours old is a far better sensor than none.
+#   4. Held too long        -> it drives FAILSAFE_WIPER below, a fixed position
+#                              chosen to be cold enough to keep the house warm
+#                              and mild enough not to cook it in summer.
+#   5. ESP unpowered        -> the relay drops to its NC contact. Wire a FIXED
+#                              RESISTOR there, sized for the same temperature as
+#                              FAILSAFE_WIPER (about 68 kohm for 0 C on a Daikin
+#                              20 kohm curve, 1% metal film). That is the only
+#                              layer that survives the ESP losing power, and it
+#                              costs one resistor.
+#
+# If you have not fitted that resistor yet, leave the relay permanently
+# energised and know that a dead ESP means a sensor fault on the pump.
 # ---------------------------------------------------------------------------
 
 esphome:
@@ -154,17 +177,25 @@ script:
 
           id(wiper_position) = step;
           id(last_command_ms) = millis();
+          // The pump has no other sensor, so the relay belongs on whenever we
+          // have something to say. It only drops on loss of power, to whatever
+          // fixed resistor is wired to its NC contact.
           if (!id(emulator_relay).state) {
             id(emulator_relay).turn_on();
           }
 
-# Energise to take over the sensor; de-energise to hand it back.
+# Energise to put the potentiometer on the pump's sensor input; de-energise to
+# fall through to whatever is on the relay's NC contact - which must be a fixed
+# resistor, not an open circuit, because there is no thermistor any more.
+#
+# restore_mode: ALWAYS_ON so that a reboot comes back controlling rather than
+# sitting on the fixed resistor waiting for someone to notice.
 switch:
   - platform: gpio
     id: emulator_relay
     name: "Emulated outdoor sensor engaged"
     pin: GPIO25
-    restore_mode: ALWAYS_OFF
+    restore_mode: ALWAYS_ON
 
 number:
   # This is what Home Assistant (or hpmpc) writes to.
@@ -226,18 +257,37 @@ sensor:
     update_interval: 30s
 
 interval:
-  # Watchdog: the third safety layer, after hpmpc's own limits and the Home
-  # Assistant dead-man switch. If no fresh command arrives, hand the pump back
-  # to its real sensor. A stuck emulated value is the one failure that costs
-  # real money, and this layer survives Home Assistant and hpmpc both dying.
+  # Watchdog: the layer that survives Home Assistant and hpmpc both dying.
+  #
+  # It does NOT release the relay. With no thermistor behind the emulator that
+  # would hand the pump an open circuit, which is worse than any stale value.
+  # Instead it holds the last commanded position for a few hours - outdoor
+  # temperature moves slowly - and only then falls to a fixed safe position.
+  #
+  # FAILSAFE_WIPER is that position: wiper 172 is about 68 kohm, which a Daikin
+  # 20 kohm curve reads as 0 C. Cold enough that the house stays warm through a
+  # winter outage, mild enough that a summer outage does not run the pump flat
+  # out. Recompute it for your own curve with 'hpmpc ntc-table'.
   - interval: 60s
     then:
       - lambda: |-
-          const uint32_t TIMEOUT_MS = 45 * 60 * 1000UL;
-          if (id(emulator_relay).state && id(last_command_ms) > 0 &&
-              (millis() - id(last_command_ms)) > TIMEOUT_MS) {
-            ESP_LOGW("hpmpc", "No command for 45 minutes - releasing to the real sensor");
-            id(emulator_relay).turn_off();
+          const uint32_t HOLD_MS   = 4 * 60 * 60 * 1000UL;   // trust the last value this long
+          const int FAILSAFE_WIPER = 172;                    // ~0 C
+          static bool announced = false;
+          if (id(last_command_ms) == 0) return;              // never commanded yet
+          uint32_t quiet = millis() - id(last_command_ms);
+          if (quiet > HOLD_MS && id(wiper_position) != FAILSAFE_WIPER) {
+            ESP_LOGW("hpmpc", "No command for %u min - driving the failsafe position",
+                     quiet / 60000U);
+            id(set_wiper)->execute(FAILSAFE_WIPER);
+            // set_wiper stamps last_command_ms, so hold the original stamp to
+            // keep reporting the real silence rather than resetting the clock.
+            id(last_command_ms) = millis() - HOLD_MS;
+            announced = true;
+          } else if (quiet > 30 * 60 * 1000UL && !announced) {
+            ESP_LOGW("hpmpc", "No command for %u min - holding the last position",
+                     quiet / 60000U);
+            announced = true;
           }
 
 
@@ -259,6 +309,9 @@ interval:
 # 3. Connect the pump with control.dry_run: true and offset 0. The pump's own
 #    display should read the real outdoor temperature. If it does not, the
 #    calibration is wrong - fix it before going further.
+# 3b. Pull the ESP's power for a minute and read the display again. It should
+#    show whatever the fixed resistor on the relay's NC contact represents. If
+#    it shows an error, that resistor is missing - fit it.
 # 4. Command a steady -2 K offset for a day and check that the leaving water
 #    temperature rises by about slope * 2 K. Only then let the controller run.
 # 5. Before the first real cold snap, decide about the second pot. Below -7 C

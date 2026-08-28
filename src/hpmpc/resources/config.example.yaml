@@ -195,13 +195,6 @@ pot:
   series_ohm: 0                     # a fixed resistor in series, if you fit one
 
 control:
-  # Colder outside than perceived_min_c? Then no resistance can tell the pump the
-  # truth, let alone a lie, so stop commanding and let the emulator fall back to
-  # the real sensor. The pump then behaves exactly as it did before hpmpc
-  # existed, and control resumes by itself once it warms up. With one MCP41100
-  # that happens below about -7 C; with two in series, below about -20 C.
-  release_when_unreachable: true
-
   offset_min: -6.0                  # more negative = pump thinks it is colder = more heat
   offset_max: 4.0
   max_change_per_cycle: 1.0         # kelvin per cycle; keeps the pump from hunting

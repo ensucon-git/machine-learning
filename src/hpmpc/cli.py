@@ -938,16 +938,12 @@ def _print_plan(report: dict[str, Any]) -> None:
         # No plan means the controller fell back. Say why in words: a JSON dump
         # is the least helpful thing to hand someone whose heating just stopped
         # being optimised.
-        if report.get("mode") == "released":
-            print("\nNot controlling this cycle - the pump has been handed back to its real "
-                  "sensor  [released]")
-        else:
-            print(
-                f"\nNo plan this cycle - the controller fell back to "
-                f"{report.get('offset', 0.0):+.2f} K  [{report.get('mode')}]"
-            )
-            print("Would write:")
-            print(_format_outputs(report))
+        print(
+            f"\nNo plan this cycle - the controller fell back to "
+            f"{report.get('offset', 0.0):+.2f} K  [{report.get('mode')}]"
+        )
+        print("Would write:")
+        print(_format_outputs(report))
         for problem in report.get("problems", []):
             print(f"  problem: {problem}")
         for note in report.get("notes", []):
@@ -968,6 +964,11 @@ def _print_plan(report: dict[str, Any]) -> None:
     source = report.get("readings", {}).get("t_outdoor_source")
     if source:
         print(f"    outdoor temperature from {source}")
+    shortfall = report.get("range_shortfall")
+    if shortfall:
+        print(f"    LIMITED: {shortfall['outdoor_c']:+.1f} C out, pump held at "
+              f"{shortfall['coldest_shown_c']:+.1f} C - {shortfall['supply_shortfall_c']:.1f} K "
+              "of supply temperature short")
     print(
         f"Horizon: {mpc['horizon_kwh']} kWh / {mpc['horizon_cost_sek']} SEK; "
         f"indoor {mpc['predicted_indoor_min']}-{mpc['predicted_indoor_max']} C "

@@ -47,7 +47,6 @@ OVERRIDABLE: dict[str, tuple[float, float]] = {
     "control.weight_backup_heater": (0.0, 100.0),
     "control.max_electric_power_kw": (0.0, 100.0),
     "control.dry_run": (0.0, 1.0),
-    "control.release_when_unreachable": (0.0, 1.0),
     "heat_pump.curve_slope": (0.0, 2.0),
     "heat_pump.curve_offset": (0.0, 60.0),
     "heat_pump.curve_ref": (0.0, 40.0),
@@ -60,7 +59,7 @@ OVERRIDABLE: dict[str, tuple[float, float]] = {
     "heat_pump.efficiency_scale": (0.3, 3.0),
 }
 
-BOOLEAN_FIELDS = {"control.dry_run", "control.release_when_unreachable"}
+BOOLEAN_FIELDS = {"control.dry_run"}
 
 
 class SettingError(ValueError):

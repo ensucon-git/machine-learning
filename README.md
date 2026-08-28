@@ -1005,17 +1005,37 @@ Sex oberoende lager:
    fast ett gammalt extremvärde.
 4. **Absolut gräns för den falska temperaturen** (`heat_pump.perceived_min_c` /
    `perceived_max_c`). Oberoende av offseten får pumpen aldrig visas ett värde utanför
-   sitt normala driftområde. Modellen respekterar samma gräns, så optimeraren planerar
-   aldrig något regulatorn sedan måste klippa bort.
-5. **Dödmansgrepp i Home Assistant** — om regulatorn slutar rapportera släpper HA
-   emulatorn och skickar en notis. Paketet innehåller också en rimlighetsspärr som
-   stoppar allt om den visade temperaturen avviker mer än 8 K från den riktiga.
-6. **Watchdog i ESP32:n** — släpper emulatorn efter 45 minuter utan kommando, plus en
-   egen rimlighetsspärr på resistansen. Det lagret överlever att både Home Assistant
-   och hpmpc dör.
+   vad hårdvaran kan producera. Gränsen läggs på *sist*, efter hastighetsbegränsningen,
+   så att det kommenderade värdet alltid är något som faktiskt går att leverera —
+   annars skulle potentiometern klippa på egen hand och modellen tro att den fick sin
+   vilja igenom.
+5. **Dödmansgrepp i Home Assistant** — slutar regulatorn rapportera skriver HA
+   offset 0 och den *riktiga* utetemperaturen, så pumpens egen värmekurva går
+   omodifierad. Paketet innehåller också en rimlighetsspärr på offsetens storlek.
+6. **Watchdog i ESP32:n** — håller kvar sitt senaste värde i fyra timmar och går sedan
+   till en fast reservposition. Det lagret överlever att både Home Assistant och hpmpc
+   dör.
 
-Och i hårdvaran: reläet defaultar till den **riktiga** utegivaren när ESP:n är strömlös.
-Pumpen ska alltid se en trovärdig givare, särskilt när det här projektet inte kör.
+### Det finns ingen givare att falla tillbaka på
+
+Den fysiska termistorn är borta: **potentiometern *är* pumpens utegivare**. Det ändrar
+vad "säkert läge" betyder. Att koppla bort emulatorn är inte ett säkert läge — det ger
+pumpen ett brutet givarkretslopp, alltså ett fel. Därför faller varje lager tillbaka på
+ett *rimligt motstånd*, aldrig på ingenting:
+
+| läge | vad pumpen ser |
+|---|---|
+| hpmpc kör | den optimerade offseten |
+| hpmpc tyst, HA uppe | riktig utetemperatur, offset 0 — pumpens egen kurva, omodifierad |
+| HA också tyst | senaste kommenderade värdet, i fyra timmar |
+| tyst längre än så | fast reservposition (`FAILSAFE_WIPER`, ungefär 0 °C) |
+| ESP32 strömlös | vad som sitter på reläets NC-kontakt |
+
+Det sista lagret är det enda som överlever att ESP:n blir strömlös, och det kräver
+hårdvara: **löd en fast resistor på reläets NC-kontakt**, dimensionerad för samma
+temperatur som reservpositionen — ungefär 68 kΩ för 0 °C på Daikinkurvan, 1 %
+metallfilm. Utan den betyder en död ESP32 ett givarfel på pumpen. Den kostar några
+kronor och är värd att göra innan skarp drift.
 
 Inställningar som ändras i drift går genom samma sorts spärrar: varje fält har ett
 tillåtet intervall, och en ändring som gör konfigurationen inkonsekvent rullas tillbaka
@@ -1090,25 +1110,20 @@ underhettar utan att någonting säger ifrån. Tre lager fångar det:
 3. Automationen `MPC potentiometer at end stop` i HA-paketet larmar om wipern står kvar
    i ändläge en halvtimme.
 
-Och under gränsen gör regulatorn det enda hederliga: **den slutar styra.** Är det
-kallare ute än `perceived_min_c` finns ingen resistans som ens säger sanningen,
-än mindre en lögn — så den skriver ingenting alls, ESP32:ns watchdog släpper
-reläet, och pumpen går på sin egen givare precis som innan det här projektet
-fanns. Styrningen återupptas av sig själv när det blir varmare. Det syns i
-planen:
+Under gränsen fortsätter regulatorn styra — den **måste**, för potentiometern är
+pumpens enda givare. Den kommenderar då det kallaste hårdvaran kan visa, alltså
+så mycket värme det går att be om, och säger hur mycket som fattas:
 
 ```
-Not controlling this cycle - the pump has been handed back to its real sensor  [released]
-  note: -10.0 C outside is below what the pump can be shown (-7.0 C), so no offset can be
-        delivered - handing the pump back to its real sensor. Wire another potentiometer
-        in series (pot.devices) to control through this weather.
+Offset now: +5.00 K   [mpc]
+    LIMITED: -12.0 C out, pump held at -7.0 C - 1.5 K of supply temperature short
 ```
 
-Det gör det tryggt att installera med en krets nu och löda in den andra i
-efterhand: det värsta som händer under tiden är att systemet tar paus de
-timmarna det är kallare än −7 °C ute. `control.release_when_unreachable: false`
-stänger av beteendet om `perceived_min_c` skulle vara ett policyval snarare än
-en hårdvarugräns.
+Det är inte ett fel utan en räckviddsgräns, och den är kvantifierad: gapet gånger
+`curve_slope` är hur många kelvin framledning som fattas. Vid −12 °C ute med en
+krets och lutning 0,30 blir det ungefär 1,5 K — huset kryper nedåt, långsamt.
+Vid −9 °C är det 0,6 K och knappt märkbart. Siffran går också ut till
+`sensor.hpmpc_status` som `range_shortfall_c`, så det går att larma på den.
 
 Den riktiga lösningen är billig: **en andra MCP41100 i serie**, och `pot.devices: 2`.
 Alltså ännu en likadan krets — en 100 **kΩ** 8-bitars digitalpotentiometer med
@@ -1127,11 +1142,8 @@ istället, men på bekostnad av den varma änden, och semesterläget bor i den v
 
 `ha/esphome_daikin_outdoor_sensor.yaml` är en komplett ESPHome-nod för MCP41100 med
 plats förberedd för den andra kretsen, en oberoende rimlighetsspärr i firmware, och en
-watchdog som släpper emulatorn efter 45 minuter utan kommando.
-
-**Den riktiga givaren sitter kvar** via ett reläs NC-kontakt. ESP:n måste aktivt dra
-reläet för att ta över. Strömavbrott, wifi-tapp, kraschad firmware — pumpen faller
-tillbaka på sin egen givare.
+watchdog som håller kvar sitt senaste värde i stället för att koppla bort sig — se
+[Det finns ingen givare att falla tillbaka på](#det-finns-ingen-givare-att-falla-tillbaka-på).
 
 ### Utgångarna
 

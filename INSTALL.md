@@ -28,8 +28,10 @@ homeassistant:
 ```
 
 Starta om HA. Du får då hjälparna för läge, börvärde, semesterläge och
-hemkomsttid — plus dödmansgreppet som släpper givaremulatorn om kontrollern
-tystnar.
+hemkomsttid — plus dödmansgreppet som skriver den riktiga utetemperaturen med
+offset 0 om kontrollern tystnar. (Det finns ingen termistor kvar att falla
+tillbaka på — potentiometern *är* pumpens givare — så säkert läge betyder
+"visa sanningen", inte "koppla bort".)
 
 ### Recorder
 
@@ -186,10 +188,23 @@ det ofarligt:
    ```bash
    hpmpc set heat_pump.perceived_min_c -20
    ```
-3. Under gränsen slutar regulatorn styra och låter pumpen gå på sin egen
-   givare (`control.release_when_unreachable`). Det gör det ofarligt att köra
-   med en krets tills den andra är på plats — systemet tar helt enkelt paus de
-   timmar det är kallare än −7 °C ute, och återupptar av sig självt.
+3. Under gränsen fortsätter regulatorn styra — den måste, potentiometern är
+   pumpens enda givare. Den kommenderar det kallaste hårdvaran kan visa och
+   rapporterar hur mycket framledning som fattas:
+
+   ```
+   LIMITED: -12.0 C out, pump held at -7.0 C - 1.5 K of supply temperature short
+   ```
+
+   Huset kryper då nedåt de timmarna, långsamt. Det går att kompensera under
+   tiden genom att höja värmekurvan lite (`hpmpc set heat_pump.curve_offset`)
+   och sänka den igen när den andra kretsen sitter.
+
+**Löd också en fast resistor på reläets NC-kontakt** — ungefär 68 kΩ, 1 %
+metallfilm, vilket Daikinkurvan läser som 0 °C. Det är det enda skyddet som
+överlever att ESP32:n blir strömlös; utan den betyder ett strömavbrott ett
+givarfel på pumpen, eftersom det inte finns någon termistor kvar bakom
+emulatorn.
 
 Automationen `MPC potentiometer at end stop` i HA-paketet larmar om wipern
 står kvar i ett ändläge i en halvtimme.
