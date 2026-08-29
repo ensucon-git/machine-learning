@@ -229,6 +229,11 @@ terminalvärderingen fixar, fast i utvärderingen.
 - **`_limit` lägger den perceived-gränsen sist**, efter hastighetsbegränsningen.
   Annars kommenderas ett värde potentiometern klipper på egen hand, och modellen
   tror att det tillämpades.
+- **`pot:`-geometrin går att ändra i drift** (`pot.devices`, `resistance_ohm`,
+  `wiper_ohm`, `series_ohm` finns i `OVERRIDABLE`). Det är precis de tal man mäter
+  vid idrifttagning och ändrar igen dagen den andra kretsen sitter, så de ska inte
+  kräva att man redigerar filen. `pot.devices` tvingas till heltal via
+  `INTEGER_FIELDS` — annars står det `2.0` i filen.
 - **`pot:` är skild från `ntc:` med flit.** `ntc:` är givarkurvan man kalibrerar,
   `pot:` är vad hårdvaran kan. En omkalibrering av kurvan får inte tyst ändra
   hårdvarans gränser.
@@ -248,6 +253,10 @@ terminalvärderingen fixar, fast i utvärderingen.
   recordern har ingen historik och `hpmpc collect` föll på
   `missing required signals: t_outdoor`. Bara signaler utan konfigurerad entitet
   skrivs — finns en givare är recorderns historik tätare och närmare huset.
+  **Spotpriset ingår** av samma skäl: husmodellen bryr sig inte om vad el kostar,
+  men ett backtest mot ett påhittat platt pris är värdelöst, och det är just den
+  siffran det graderar besparingen på. Sparas som spot — påslag och moms läggs
+  på vid läsning, så arkivet och en Nord Pool-entitet är utbytbara.
 - **En väderentitet är inte en temperaturgivare, men bär alla talen.**
   `weather.smhi_home` har tillståndet `cloudy`; mätvärdena ligger som *attribut*
   (`temperature`, `wind_speed`, `humidity`) och prognosen i tjänsten
