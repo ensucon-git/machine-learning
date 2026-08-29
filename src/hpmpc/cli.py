@@ -844,6 +844,13 @@ def _check_actuator_calibration(cfg: Config, ha: HomeAssistant) -> None:
         elif commanded is not None and abs(error) > cfg.control.actuator_error_warn_c:
             print(f"\n  WARNING: {abs(error):.1f} K off. Check the NTC table before running for real.")
     elif has_wiper:
+        # The wiper -> ohm step is pot geometry, not the sensor curve, so this
+        # number is valid even when the node owns the NTC table. It is half of a
+        # calibration pair; the pump's display is the other half.
+        ohm_now = float(wiper_to_resistance(float(wiper.numeric), cfg.pot))
+        print(f"\n  -> read the pump's display now, and that reading pairs with {ohm_now:.0f} ohm:\n"
+              f"       hpmpc calibrate-ntc --point=<display>:{ohm_now:.0f} --point=...\n"
+              "     Give the pump an hour to settle first - it filters its outdoor reading.")
         print(
             "\n  Note: this checks the chain as far as the ESP32 only. It cannot see a wrong NTC\n"
             "  table - for that, read the pump's display once and run 'hpmpc calibrate-ntc'.\n"
