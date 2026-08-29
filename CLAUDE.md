@@ -23,7 +23,7 @@ bestämt, varför, och vilka fällor som redan är upptäckta.
 | Effektmätning | Victron, **hela husets effekt per fas** — ingen mätare enbart på pumpen |
 | Elbilsladdare | 11 kW över alla tre faser, `binary_sensor.eh6nh5cd_charging` (`Charging` / `Not charging`) |
 | Körs på | NUC, Docker (Portainer), skilt från Home Assistant |
-| Utegivare | **ingen** — utetemperaturen hämtas från SMHI. `entities.outdoor_temp` finns kvar för att koppla in en givare senare |
+| Utegivare | **ingen** — utetemperaturen hämtas via `weather.smhi_home` i Home Assistant (direkt-SMHI gav 404 hos användaren). `entities.outdoor_temp` finns kvar för att koppla in en givare senare |
 
 Entiteterna, som de faktiskt heter:
 
@@ -295,10 +295,21 @@ terminalvärderingen fixar, fast i utvärderingen.
 - **Arkivet och recordern kan inte hamna i konflikt.** Raderas arkivet fyller det
   sig från det recordern har kvar; kortas recorderns retention behåller arkivet
   det redan kopierat. `training.archive: false` går direkt mot recordern som förut.
-- **Utetemperaturen kommer från SMHI** eftersom `entities.outdoor_temp` är tom här.
-  En givare vid huset är bättre när den finns — den mäter luften byggnaden faktiskt
-  förlorar värme till — och vinner automatiskt så fort entiteten fylls i. Det ska
-  inte vara ett krav att ha HA i loopen för det.
+- **Utetemperaturen kommer från `weather.smhi_home` via Home Assistant**, inte
+  direkt-SMHI, eftersom `entities.outdoor_temp` är tom här. Direktvägen gav 404
+  hos användaren (se ovan); väderentitetens *attribut* (`temperature`,
+  `wind_speed`, `humidity`) läses och används på samma sätt en riktig givare
+  skulle vara — dess *tillstånd* är bara ett väderomdöme (`cloudy`) och bär
+  ingen siffra. En givare vid huset är bättre om den tillkommer — den mäter
+  luften byggnaden faktiskt förlorar värme till — och vinner automatiskt så
+  fort entiteten fylls i.
+- **Automatisk omträning finns bara i `hpmpc serve`, inte i `hpmpc run`.**
+  `maybe_retrain()` (i `api.py`) kör var `training.retrain_days` (30 som
+  standard) vid `retrain_hour` (natten), bygger dataset ur arkivet och byter
+  modell utan omstart. Containern kör `serve`, så det gäller normalt — men
+  körs `hpmpc run` fristående för felsökning sker ingen periodisk omträning
+  där, bara `hpmpc train` manuellt eller att en modell som redan finns på disk
+  plockas upp.
 - **Kalibrera mot pumpens display, inte mot givaren.** Ett par avlästa som
   "jag skickade R, pumpen säger T" innefattar kabelresistans, kontakt och
   pumpens egen linjärisering. En bänkmätning av termistorn missar allt det.
