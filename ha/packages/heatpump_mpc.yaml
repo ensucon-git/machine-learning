@@ -222,6 +222,15 @@ template:
         unit_of_measurement: "Ω"
         state: >
           {% set t = states('input_number.varmepump_fiktiv_utetemp') | float(none) %}
+          {# An input_number with no `initial:` starts at its MINIMUM, so before
+             hpmpc has ever written to it this reads -40. That is not a
+             temperature, it is "never set" - and taken literally it means about
+             800 kohm, the pot's end stop, the coldest the pump can be shown, and
+             therefore maximum heat. Anything outside the band the controller is
+             allowed to command is treated as no value at all. #}
+          {% if t is not none and (t <= -35 or t >= 35) %}
+            {% set t = none %}
+          {% endif %}
           {% if t is none %}
             {% set t = states('sensor.utegivare_verklig') | float(none) %}
           {% endif %}

@@ -330,3 +330,41 @@ def test_the_controller_archives_the_weather_it_used(cfg, fake_ha):
 
     assert "t_outdoor" in report["archive"]["recorded"]
     assert "t_outdoor" in open_archive(cfg).load().columns
+
+
+def test_the_price_the_controller_planned_against_is_kept(cfg):
+    """Identification does not care what electricity costs, but a backtest
+    graded against a flat invented price is worthless."""
+    from hpmpc.archive import record_resolved
+
+    cfg = no_sensor(cfg)
+    cfg.entities.price = ""
+    now = pd.Timestamp("2026-01-15 08:00", tz="UTC")
+    assert "price" in record_resolved(cfg, {"t_outdoor": -4.0, "price": 1.87}, now)
+    assert open_archive(cfg).load()["price"].iloc[0] == pytest.approx(1.87)
+
+
+def test_a_configured_price_entity_is_left_to_the_recorder(cfg):
+    from hpmpc.archive import record_resolved
+
+    cfg = no_sensor(cfg)
+    cfg.entities.price = "sensor.price"
+    recorded = record_resolved(cfg, {"t_outdoor": -4.0, "price": 1.87},
+                               pd.Timestamp("2026-01-15 08:00", tz="UTC"))
+    assert "price" not in recorded
+
+
+def test_the_controller_archives_the_spot_price_it_planned_against(cfg, fake_ha):
+    from hpmpc.controller import Controller
+    from hpmpc.model.thermal import ThermalParams
+
+    cfg = no_sensor(cfg)
+    cfg.entities.price = ""
+    cfg.entities.weather = "weather.home"
+    cfg.forecast.weather_source = "home_assistant"
+    cfg.forecast.price_source = "home_assistant"
+    controller = Controller(cfg, ThermalParams(), fake_ha)
+    report = controller.step(apply=True)
+
+    assert "price" in report["archive"]["recorded"]
+    assert open_archive(cfg).load()["price"].notna().any()

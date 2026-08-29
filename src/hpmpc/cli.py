@@ -862,6 +862,12 @@ def cmd_collect(args: argparse.Namespace) -> int:
     if source.get("source") == "archive":
         print(f"Archive: +{source.get('rows_added', 0)} new rows "
               f"({source.get('reason')}), {source.get('span_days')} days stored")
+        stored = open_archive(cfg).describe()["rows"]
+        if stored and len(frame) < 0.9 * stored:
+            print(f"\nOnly {len(frame)} of {stored} archived rows are usable - the rest are "
+                  "missing a\nrequired signal, usually the outdoor temperature from before the "
+                  "controller\nstarted recording it. Those rows cannot be recovered; the usable "
+                  "span grows\nfrom here.\n")
     print(f"Saved {len(frame)} rows to {path}")
     print(json.dumps(info, indent=2))
     excitation = info.get("offset_excitation", {})

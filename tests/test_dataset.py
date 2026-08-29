@@ -10,6 +10,7 @@ from hpmpc.dataset import (
     build_dataset,
     column_map,
     describe,
+    finish_dataset,
     load_dataset,
     pivot_history,
     save_dataset,
@@ -130,3 +131,54 @@ def test_describe_flags_missing_excitation():
     info = describe(frame)
     assert info["rows"] == 100
     assert info["offset_excitation"]["std"] == 0.0
+
+
+# ----------------------------- helpers that were never written to
+
+
+def test_a_helper_at_its_minimum_is_not_an_offset(cfg):
+    """An input_number with no `initial:` starts at its minimum - -40 in the
+    shipped package. Reconstructing an offset from that gives a number that
+    looks like a hard-limited command instead of the missing data it is."""
+    cfg.entities.offset_output = ""
+    cfg.entities.fake_temperature_output = "input_number.fake_temp"
+    index = pd.date_range("2026-08-28 20:30", periods=6, freq="15min", tz="UTC")
+    frame = pd.DataFrame(
+        {
+            "t_indoor": 22.2,
+            "t_outdoor": 17.7,
+            # The first four rows are the never-written minimum; then hpmpc writes.
+            "output_fake_temp": [-40.0, -40.0, -40.0, -40.0, 17.7, 19.7],
+        },
+        index=index,
+    )
+    offset = add_derived(frame, cfg)["offset"]
+    assert offset.iloc[3] == pytest.approx(0.0), "-40 must not become an offset"
+    assert offset.iloc[4] == pytest.approx(0.0, abs=0.05)
+    assert offset.iloc[5] == pytest.approx(2.0, abs=0.05)
+
+
+def test_a_real_cold_command_is_still_kept(cfg):
+    """The guard must not throw away legitimate winter commands."""
+    cfg.entities.offset_output = ""
+    cfg.entities.fake_temperature_output = "input_number.fake_temp"
+    cfg.heat_pump.perceived_min_c = -20.0
+    index = pd.date_range("2026-01-15", periods=3, freq="15min", tz="UTC")
+    frame = pd.DataFrame(
+        {"t_indoor": 21.0, "t_outdoor": -12.0, "output_fake_temp": -17.0}, index=index
+    )
+    assert add_derived(frame, cfg)["offset"].iloc[-1] == pytest.approx(-5.0, abs=0.05)
+
+
+def test_rows_without_an_outdoor_temperature_are_dropped_loudly(cfg, caplog):
+    """92% of the archive silently becoming one afternoon is how you end up
+    wondering where 45 days went."""
+    import logging
+
+    index = pd.date_range("2026-08-20", periods=100, freq="15min", tz="UTC")
+    outdoor = [float("nan")] * 90 + [17.0] * 10
+    frame = pd.DataFrame({"t_indoor": 22.0, "t_outdoor": outdoor}, index=index)
+    with caplog.at_level(logging.WARNING, logger="hpmpc.dataset"):
+        usable = finish_dataset(frame, cfg)
+    assert len(usable) == 10
+    assert "Dropped 90 of 100 rows with no t_outdoor" in caplog.text

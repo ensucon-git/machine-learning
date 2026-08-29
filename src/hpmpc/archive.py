@@ -232,6 +232,11 @@ RESOLVED_SIGNALS = {
     "wind": "wind_speed",
     "cloud": "cloud_cover",
     "humidity": "outdoor_humidity",
+    # The spot price comes straight from elprisetjustnu and never passes through
+    # Home Assistant either. Identification does not care - the house does not
+    # know what electricity costs - but a backtest replayed against a flat
+    # made-up price is worthless, and that is the number it grades savings on.
+    "price": "price",
 }
 
 

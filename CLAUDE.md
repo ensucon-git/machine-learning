@@ -159,7 +159,7 @@ terminalvärderingen fixar, fast i utvärderingen.
 
 ## Verifierat kontra antaget
 
-**Verifierat** (356 tester, syntetiskt hus med känd sanning):
+**Verifierat** (362 tester, syntetiskt hus med känd sanning):
 - Identifieringen återfinner värmekurva (lutning 0,3495 mot 0,35, R² 0,997) och
   husparametrar (UA +3 %, Ci +4 %, `k_wind` +3 %, plattans tidskonstant inom 8 %).
   `hpmpc train` skriver ut vad den lärt sig om sol och vind som area och
@@ -310,6 +310,17 @@ terminalvärderingen fixar, fast i utvärderingen.
   körs `hpmpc run` fristående för felsökning sker ingen periodisk omträning
   där, bara `hpmpc train` manuellt eller att en modell som redan finns på disk
   plockas upp.
+- **En `input_number` utan `initial:` startar på sitt MINIMUM.** Paketets
+  `varmepump_fiktiv_utetemp` läste alltså −40 innan hpmpc skrivit första gången,
+  och −40 °C är ~800 kΩ = wiper 255 = kallast pumpen kan visas = maximal värme.
+  Mallen behandlar nu värden utanför ±35 som "aldrig satt" och faller tillbaka på
+  den riktiga utetemperaturen. `applied_offset` gör samma sak vid inläsning: ett
+  orimligt perceived-värde blir NaN, inte en offset som ser hårdklippt ut.
+  (`initial:` går inte att sätta — då tappar hjälparen sitt värde vid omstart.)
+- **`collect` kan tyst kasta nästan hela arkivet.** Rader utan `t_outdoor`
+  faller bort i `dropna(subset=REQUIRED)`, och historik från före
+  `record_resolved` fanns saknar den kolumnen helt. Både loggen och `collect`
+  säger nu hur många rader som föll och varför.
 - **Kalibrera mot pumpens display, inte mot givaren.** Ett par avlästa som
   "jag skickade R, pumpen säger T" innefattar kabelresistans, kontakt och
   pumpens egen linjärisering. En bänkmätning av termistorn missar allt det.

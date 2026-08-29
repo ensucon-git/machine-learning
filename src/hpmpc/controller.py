@@ -702,6 +702,11 @@ class Controller:
             for column in ("t_outdoor", "wind", "cloud", "humidity"):
                 if values.get(column) is None and column in forecast:
                     values[column] = float(forecast[column].iloc[0])
+            # The SPOT price, matching what a Nord Pool entity would have put in
+            # the recorder - the surcharge and VAT are applied on top at read
+            # time, so the two sources stay interchangeable.
+            if "spot_price" in forecast:
+                values["price"] = float(forecast["spot_price"].iloc[0])
         try:
             recorded = record_resolved(self.cfg, values, now)
         except (ValueError, OSError) as exc:

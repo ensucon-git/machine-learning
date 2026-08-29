@@ -140,13 +140,13 @@ def applied_offset(frame: pd.DataFrame, cfg: Config) -> pd.Series:
     if "output_offset" in frame and frame["output_offset"].notna().any():
         value = frame["output_offset"]
     elif "output_fake_temp" in frame and frame["output_fake_temp"].notna().any():
-        value = frame["output_fake_temp"] - frame["t_outdoor"]
+        value = _plausible_perceived(frame["output_fake_temp"], cfg) - frame["t_outdoor"]
     elif "output_resistance" in frame and frame["output_resistance"].notna().any():
         fake = pd.Series(
             resistance_to_temperature(frame["output_resistance"].to_numpy(dtype=float), cfg.ntc),
             index=frame.index,
         )
-        value = fake - frame["t_outdoor"]
+        value = _plausible_perceived(fake, cfg) - frame["t_outdoor"]
     else:
         wiper = next(
             (c for c in ("output_wiper", "pot_wiper") if c in frame and frame[c].notna().any()),
@@ -156,8 +156,21 @@ def applied_offset(frame: pd.DataFrame, cfg: Config) -> pd.Series:
             return zeros
         ohm = wiper_to_resistance(frame[wiper].to_numpy(dtype=float), cfg.pot)
         fake = pd.Series(resistance_to_temperature(ohm, cfg.ntc), index=frame.index)
-        value = fake - frame["t_outdoor"]
+        value = _plausible_perceived(fake, cfg) - frame["t_outdoor"]
     return value.astype(float).ffill().fillna(0.0).clip(cfg.control.offset_min, cfg.control.offset_max)
+
+
+def _plausible_perceived(fake: pd.Series, cfg: Config, margin: float = 2.0) -> pd.Series:
+    """Drop perceived temperatures the controller could never have commanded.
+
+    A helper that has never been written to sits at its minimum - -40 in the
+    shipped package - and reconstructing an offset from that produces a number
+    that looks like a hard-limited command rather than the missing data it is.
+    Forward filling from the last real value is the honest reading.
+    """
+    pump = cfg.heat_pump
+    inside = fake.between(pump.perceived_min_c - margin, pump.perceived_max_c + margin)
+    return fake.where(inside)
 
 
 def finish_dataset(frame: pd.DataFrame, cfg: Config) -> pd.DataFrame:
@@ -170,7 +183,23 @@ def finish_dataset(frame: pd.DataFrame, cfg: Config) -> pd.DataFrame:
     missing = [c for c in REQUIRED if c not in frame or frame[c].isna().all()]
     if missing:
         raise ValueError(_missing_signals_message(missing, cfg))
-    return frame.dropna(subset=REQUIRED)
+    usable = frame.dropna(subset=REQUIRED)
+    dropped = len(frame) - len(usable)
+    if dropped:
+        # Silently returning a fraction of the archive is how you end up
+        # wondering why 45 days of history became one afternoon. Name the
+        # column that did it: on this project it is almost always t_outdoor,
+        # from the stretch before the controller started recording it.
+        culprits = {
+            c: int(frame[c].isna().sum() - usable[c].isna().sum())
+            for c in REQUIRED if c in frame
+        }
+        worst = max(culprits, key=lambda c: culprits[c])
+        log.warning(
+            "Dropped %d of %d rows with no %s; %d usable rows remain",
+            dropped, len(frame), worst, len(usable),
+        )
+    return usable
 
 
 def _missing_signals_message(missing: list[str], cfg: Config) -> str:
