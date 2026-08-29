@@ -486,62 +486,70 @@ automation:
   # PICK THE ONE THAT MATCHES YOUR FIRMWARE, and delete the other. Both start
   # from input_number.varmepump_fiktiv_utetemp, which is what hpmpc writes:
   #
-  #   A) your node takes a WIPER POSITION (the shipped ESPHome config does):
+  #   A) your node takes a TEMPERATURE and owns the NTC table itself - this is
+  #      the shipped ESPHome config, and the one enabled below.
+  #   B) your node takes a WIPER POSITION, so Home Assistant owns the table:
   #      fictitious temperature -> sensor.utegivare_malresistans (ohm)
   #                             -> sensor.utegivare_wiper (0..255)
-  #   B) your node takes a TEMPERATURE and converts it itself:
-  #      write input_number.varmepump_fiktiv_utetemp straight across.
   #
-  # Either way the conversion curve stays somewhere you can trim it against
-  # the pump's display without touching the controller.
+  # A) keeps the conversion in one place. B) lets you trim the curve against
+  # the pump's display without reflashing, at the cost of two tables that have
+  # to agree - and 'hpmpc check' converts the wiper readback through hpmpc's
+  # own pot:/ntc: sections, so a disagreement shows up there as a standing
+  # actuator error rather than as anything obviously wrong.
   #
-  # --- A) wiper position -------------------------------------------------
-  - alias: "MPC to digital resistor"
-    id: hpmpc_to_resistor
+  # Note that hpmpc has already clamped the value to
+  # heat_pump.perceived_min_c/max_c before it gets here. If the firmware still
+  # has to clamp it, those settings do not match the hardware.
+  #
+  # --- A) temperature (default) ------------------------------------------
+  - alias: "MPC to sensor emulator"
+    id: hpmpc_to_emulator_temperature
     mode: single
     trigger:
       - platform: state
-        entity_id: sensor.utegivare_wiper
+        entity_id: input_number.varmepump_fiktiv_utetemp
     condition:
       - condition: state
         entity_id: input_boolean.varmepump_mpc_aktiv
         state: "on"
+      # Never push the never-written minimum: an input_number with no
+      # `initial:` sits at -40 until hpmpc first writes, and -40 C is the
+      # coldest the pump can be shown, which means maximum heat.
       - condition: template
-        value_template: "{{ states('sensor.utegivare_wiper') | float(-1) >= 0 }}"
+        value_template: >
+          {% set t = states('input_number.varmepump_fiktiv_utetemp') | float(none) %}
+          {{ t is not none and -35 < t < 35 }}
     action:
-      # Must match what your ESP node actually exposes - check Developer Tools ->
-      # States for the number entity belonging to the varmepump_proxy node.
+      # Must match what your ESP node actually exposes - check Developer Tools
+      # -> States for the number entity belonging to the varmepump_proxy node.
       - service: number.set_value
         target:
-          entity_id: number.varmepump_proxy_wiper_target
+          entity_id: number.varmepump_proxy_simulerad_utetemperatur
         data:
-          value: "{{ states('sensor.utegivare_wiper') | int }}"
+          value: "{{ states('input_number.varmepump_fiktiv_utetemp') | float }}"
 
-  # --- B) temperature ----------------------------------------------------
-  # Uncomment this and delete A) if your firmware owns the NTC curve. Note that
-  # hpmpc has already clamped the value to heat_pump.perceived_min_c/max_c, so
-  # anything arriving here is something the hardware is supposed to be able to
-  # present - if the firmware still has to clamp it, those settings are wrong.
+  # --- B) wiper position --------------------------------------------------
+  # Uncomment this and delete A) if Home Assistant should own the NTC curve.
   #
-  # - alias: "MPC to sensor emulator"
-  #   id: hpmpc_to_emulator_temperature
+  # - alias: "MPC to digital resistor"
+  #   id: hpmpc_to_resistor
   #   mode: single
   #   trigger:
   #     - platform: state
-  #       entity_id: input_number.varmepump_fiktiv_utetemp
+  #       entity_id: sensor.utegivare_wiper
   #   condition:
   #     - condition: state
   #       entity_id: input_boolean.varmepump_mpc_aktiv
   #       state: "on"
   #     - condition: template
-  #       value_template: >
-  #         {{ states('input_number.varmepump_fiktiv_utetemp') | float(none) is not none }}
+  #       value_template: "{{ states('sensor.utegivare_wiper') | float(-1) >= 0 }}"
   #   action:
   #     - service: number.set_value
   #       target:
-  #         entity_id: number.varmepump_proxy_target_temperature
+  #         entity_id: number.varmepump_proxy_wiper_target
   #       data:
-  #         value: "{{ states('input_number.varmepump_fiktiv_utetemp') | float }}"
+  #         value: "{{ states('sensor.utegivare_wiper') | int }}"
 
   # ---- Actuator calibration drift --------------------------------------
   # Everything about the offset is open loop except this. If what the pump

@@ -201,12 +201,14 @@ number:
   # Two ways in. Use whichever suits you and ignore the other; they end up in
   # the same place.
   #
-  #   Wiper target       - Home Assistant owns the NTC curve (the shipped
-  #                        package converts for you, so the curve is somewhere
-  #                        you can trim it against the pump's display).
-  #   Target temperature - this node owns the curve. Write the fictitious
-  #                        temperature straight from
-  #                        input_number.varmepump_fiktiv_utetemp.
+  #   Simulerad utetemperatur - this node owns the NTC table. The Home
+  #                        Assistant package writes the fictitious temperature
+  #                        straight here; one table, one place to fix it.
+  #                        This is the default.
+  #   Wiper target       - Home Assistant owns the table instead, so you can
+  #                        trim it against the pump's display without
+  #                        reflashing - at the cost of two tables that have to
+  #                        agree with each other.
   - platform: template
     name: "Wiper target"
     id: wiper_target
@@ -220,8 +222,10 @@ number:
           id: set_wiper
           step: !lambda "return (int) x;"
 
+  # -> number.varmepump_proxy_simulerad_utetemperatur, which is what the Home
+  # Assistant package writes to. Rename both together or neither.
   - platform: template
-    name: "Target temperature"
+    name: "Simulerad utetemperatur"
     id: target_temperature
     unit_of_measurement: "°C"
     device_class: temperature

@@ -846,7 +846,10 @@ def _check_actuator_calibration(cfg: Config, ha: HomeAssistant) -> None:
     elif has_wiper:
         print(
             "\n  Note: this checks the chain as far as the ESP32 only. It cannot see a wrong NTC\n"
-            "  table - for that, read the pump's display once and run 'hpmpc calibrate-ntc'."
+            "  table - for that, read the pump's display once and run 'hpmpc calibrate-ntc'.\n"
+            "  The wiper is read back through hpmpc's own ntc:/pot: sections, so if the node\n"
+            "  owns the conversion instead, a standing error here means those two tables\n"
+            "  disagree - not that anything is failing to arrive."
         )
 
     _pot_range_warning(cfg)

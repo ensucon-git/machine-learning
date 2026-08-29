@@ -63,14 +63,17 @@ ESP:n har alltid ett värde att skicka.
 Sedan finns två vägar vidare till ESP:n, och du väljer den som passar din
 firmware:
 
-- **Din nod tar en wiperposition** (som den ESPHome-fil som ligger med): mallarna
-  `sensor.utegivare_malresistans` → `sensor.utegivare_wiper` gör omräkningen, och
-  automationen `MPC to digital resistor` skickar den. NTC-kurvan bor då i Home
-  Assistant där du kan trimma den mot pumpens display.
-- **Din nod tar en temperatur**: skicka `input_number.varmepump_fiktiv_utetemp`
-  rakt av. Automation **B)** längst ner i paketet gör precis det — avkommentera
-  den och ta bort A). ESPHome-filen har en `number.varmepump_proxy_target_temperature`
-  som tar emot grader och räknar om till wiper i firmware.
+- **Din nod tar en temperatur** (standard, och det den medskickade ESPHome-filen
+  gör): automationen `MPC to sensor emulator` skickar
+  `input_number.varmepump_fiktiv_utetemp` rakt till
+  `number.varmepump_proxy_simulerad_utetemperatur`. NTC-tabellen bor då i
+  firmware — en tabell, ett ställe att rätta den på.
+- **Din nod tar en wiperposition**: mallarna `sensor.utegivare_malresistans` →
+  `sensor.utegivare_wiper` gör omräkningen. Avkommentera automation **B)** och ta
+  bort A). Kurvan bor då i Home Assistant där du kan trimma den mot pumpens
+  display utan att flasha om — men då finns två tabeller som måste vara överens,
+  och `hpmpc check` läser tillbaka wipern genom *sin* tabell, så en avvikelse
+  syns där som ett stående ställdonsfel.
 
 Kolla entitets-id:t under **Utvecklarverktyg → Tillstånd** — det beror på vad din
 nod heter, inte på vad som står här.

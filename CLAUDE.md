@@ -32,6 +32,7 @@ Entiteterna, som de faktiskt heter:
 | innetemperatur (mitt i huset) | `sensor.hall_temperature_2` |
 | husets effekt per fas | `sensor.gx_device_consumption_power_l1` / `_l2` / `_l3` |
 | laddstatus | `binary_sensor.eh6nh5cd_charging` |
+| ESP32:ns ingång (grader) | `number.varmepump_proxy_simulerad_utetemperatur` — noden äger NTC-tabellen |
 | wiperavläsning från ESP32 | `sensor.varmepump_proxy_mcp41100_wiper_0_255` |
 | utgångar | `input_number.varmepump_offset`, `input_number.varmepump_fiktiv_utetemp` |
 
@@ -321,6 +322,12 @@ terminalvärderingen fixar, fast i utvärderingen.
   faller bort i `dropna(subset=REQUIRED)`, och historik från före
   `record_resolved` fanns saknar den kolumnen helt. Både loggen och `collect`
   säger nu hur många rader som föll och varför.
+- **ESP32:n tar en temperatur, inte en wiperposition.** Kedjan är
+  `input_number.varmepump_fiktiv_utetemp` → automationen `MPC to sensor emulator`
+  → `number.varmepump_proxy_simulerad_utetemperatur`, och noden räknar om själv.
+  Wiper-vägen finns kvar utkommenterad i paketet. Följd: `hpmpc check` läser
+  tillbaka wipern genom *hpmpc:s* `ntc:`/`pot:`, så ett stående ställdonsfel där
+  betyder att de två tabellerna är oense — inte att något inte kommer fram.
 - **Kalibrera mot pumpens display, inte mot givaren.** Ett par avlästa som
   "jag skickade R, pumpen säger T" innefattar kabelresistans, kontakt och
   pumpens egen linjärisering. En bänkmätning av termistorn missar allt det.
