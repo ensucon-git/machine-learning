@@ -4,7 +4,8 @@ Självhostad modellprediktiv styrning (MPC) av en luft/vatten-värmepump på
 golvvärme. Systemet lär sig huset från Home Assistants historik och styr pumpen
 genom att manipulera vilken utetemperatur den *tror* att den ser.
 
-Läs `README.md` för hur det fungerar och `INSTALL.md` för hur det installeras.
+Läs `README.md` för hur det fungerar, `INSTALL.md` för hur det installeras och
+`docs/HARDWARE.md` för NTC-kalibrering och bytet till två potentiometrar.
 Den här filen är till för att snabbt komma in i projektet igen: vad som är
 bestämt, varför, och vilka fällor som redan är upptäckta.
 
@@ -160,7 +161,7 @@ terminalvärderingen fixar, fast i utvärderingen.
 
 ## Verifierat kontra antaget
 
-**Verifierat** (362 tester, syntetiskt hus med känd sanning):
+**Verifierat** (364 tester, syntetiskt hus med känd sanning):
 - Identifieringen återfinner värmekurva (lutning 0,3495 mot 0,35, R² 0,997) och
   husparametrar (UA +3 %, Ci +4 %, `k_wind` +3 %, plattans tidskonstant inom 8 %).
   `hpmpc train` skriver ut vad den lärt sig om sol och vind som area och

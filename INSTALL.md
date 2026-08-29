@@ -267,6 +267,9 @@ docker compose exec hpmpc hpmpc mode         # aktivt komfortläge
 marginalkostnaden med ditt tillägg och din moms — det är den siffran
 optimeraren faktiskt planerar mot, och den enda som är värd att kontrollräkna.
 
+Detaljerna för båda de här sakerna — kalibrering steg för steg, och vad du gör
+den dag den andra kretsen sitter — ligger i [`docs/HARDWARE.md`](docs/HARDWARE.md).
+
 **Läs `hpmpc ntc-table` noga.** Den skriver ut vilket temperaturband
 potentiometern faktiskt når, och varnar om `heat_pump.perceived_min_c` ligger
 utanför det. Med en enda MCP41100:

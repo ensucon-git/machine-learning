@@ -293,3 +293,25 @@ def test_the_perceived_floor_can_be_raised_at_runtime(cfg):
     working, notes = apply(cfg, {"heat_pump.perceived_min_c": -20.0})
     assert working.heat_pump.perceived_min_c == pytest.approx(-20.0)
     assert notes
+
+
+def test_the_potentiometer_geometry_is_settable_without_editing_the_file(cfg):
+    """docs/HARDWARE.md tells you to run these; they have to exist."""
+    from hpmpc.settings import OVERRIDABLE, coerce
+
+    for field in ("pot.devices", "pot.resistance_ohm", "pot.wiper_ohm", "pot.series_ohm"):
+        assert field in OVERRIDABLE, f"{field} must be settable with 'hpmpc set'"
+    # A count stays a count rather than becoming 2.0 in the file.
+    assert coerce("pot.devices", "2") == 2
+    assert isinstance(coerce("pot.devices", 2.0), int)
+
+
+def test_setting_two_devices_moves_the_reachable_range(cfg):
+    """The whole point of the upgrade the guide describes."""
+    from hpmpc.settings import apply
+
+    cfg.ntc = DAIKIN
+    before = reachable_temperatures(cfg.pot, cfg.ntc)[0]
+    working, _ = apply(cfg, {"pot.devices": 2, "heat_pump.perceived_min_c": -20.0})
+    after = reachable_temperatures(working.pot, working.ntc)[0]
+    assert before > -8.0 and after < -20.0

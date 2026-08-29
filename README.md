@@ -1176,6 +1176,10 @@ Samma steglängd, dubbla räckvidden — seriekopplade kretsar köper räckvidd,
 upplösning. En fast resistor i serie (`pot.series_ohm`) skjuter hela bandet kallare
 istället, men på bekostnad av den varma änden, och semesterläget bor i den varma änden.
 
+**Steg-för-steg för båda sakerna:** [`docs/HARDWARE.md`](docs/HARDWARE.md) — hur du
+kalibrerar NTC-tabellen mot pumpens display, och vad du gör den dag den andra
+kretsen sitter på plats.
+
 `ha/esphome_daikin_outdoor_sensor.yaml` är en komplett ESPHome-nod för MCP41100 med
 plats förberedd för den andra kretsen, en oberoende rimlighetsspärr i firmware, och en
 watchdog som håller kvar sitt senaste värde i stället för att koppla bort sig — se

@@ -56,10 +56,21 @@ OVERRIDABLE: dict[str, tuple[float, float]] = {
     # editing the file: the hardware's reach is what they describe.
     "heat_pump.perceived_min_c": (-40.0, 0.0),
     "heat_pump.perceived_max_c": (0.0, 40.0),
+    # The potentiometer as built. These are the numbers you measure at
+    # commissioning and change again the day you wire a second device in
+    # series, so they should not require editing the file by hand.
+    "pot.devices": (1.0, 8.0),
+    "pot.resistance_ohm": (1000.0, 1000000.0),
+    "pot.wiper_ohm": (0.0, 1000.0),
+    "pot.series_ohm": (0.0, 1000000.0),
     "heat_pump.efficiency_scale": (0.3, 3.0),
 }
 
 BOOLEAN_FIELDS = {"control.dry_run"}
+INTEGER_FIELDS = {"pot.devices"}
+"""Fields that are counts. Storing 2.0 where the dataclass says int works by
+accident everywhere it is used; writing it back into the file as "2.0" does
+not look like something anyone chose."""
 
 
 class SettingError(ValueError):
@@ -95,7 +106,9 @@ def coerce(path: str, value: Any) -> Any:
     low, high = OVERRIDABLE[path]
     if not low <= number <= high:
         raise SettingError(f"{path}={number} is outside the allowed range [{low}, {high}]")
-    return bool(round(number)) if path in BOOLEAN_FIELDS else number
+    if path in BOOLEAN_FIELDS:
+        return bool(round(number))
+    return int(round(number)) if path in INTEGER_FIELDS else number
 
 
 def apply(cfg: Config, values: dict[str, Any]) -> tuple[Config, list[str]]:
