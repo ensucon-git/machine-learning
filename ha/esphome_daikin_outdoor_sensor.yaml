@@ -1,9 +1,13 @@
 # ---------------------------------------------------------------------------
-# ESP32 outdoor-sensor emulator for a Daikin Altherma
+# ESP32-C3 outdoor-sensor proxy for a Daikin Altherma
 # (ERLQ016CAW1 outdoor unit + EHVH16S26CB9W hydrobox)
 #
-# Written for the hardware actually in use here: one MCP41100 (8-bit, 100 kohm,
-# SPI). Read the RANGE section below before trusting it through a winter.
+# Written for the hardware actually in use here:
+#
+#   Waveshare ESP32-C3-Zero-M      18 pins, 9 per row
+#   2 x MCP41100 in series         8-bit, 100 kohm each -> 0..200 kohm
+#   74HCT125                       3.3 V -> 5 V buffer on the four SPI lines
+#   20 kohm 1% + 1 kohm + 100 nF   divider that reads the real outdoor sensor
 #
 # Two ways to drive this node:
 #
@@ -30,73 +34,114 @@
 #
 # Look up the field setting in YOUR installer manual - the code differs between
 # Altherma generations, and guessing at it is not something to do to a heat
-# pump. Search the manual for "external outdoor sensor" / "ambient sensor".
-#
-# If you do end up on R1T anyway, keep control.offset_min/offset_max small
-# (about +/- 4 K) and keep heat_pump.perceived_min_c well above the unit's
-# -25 C operating limit, so the lie never reaches a threshold that matters.
+# pump.
 #
 #
-# RANGE: what one MCP41100 can and cannot do
+# SUPPLY RAILS - the one wiring mistake that destroys hardware
+# ---------------------------------------------------------------------------
+# The pump's sensor terminals measure 4.97 V open circuit. Its excitation is a
+# pull-up from that rail, so the potentiometer's terminals can approach 4.97 V
+# whenever the chain sits high. MCP41100 terminals must never exceed its own
+# VDD, so:
+#
+#   U1, U2, U3   ->  +5 V, taken straight from the screw terminal, NOT from the
+#                    module's 5V pin (some Zero boards drop a diode there and
+#                    deliver 4.6 V, which is below the pump's rail).
+#   divider, module -> 3.3 V from the module's own regulator.
+#
+# At VDD = 5 V the MCP41100 wants 3.5 V to read a one (0.7 x VDD) and the C3
+# gives 3.3 V. That is why the 74HCT125 is here and not optional: TTL inputs
+# accept anything over 2.0 V, CMOS outputs swing to 5 V. It must be HCT or
+# AHCT - a plain 74HC125 has the same 0.7 x VDD threshold and solves nothing.
+#
+# Nothing brings 5 V back to the C3: MCP41100 has no output, so the bus is
+# one-way.
+#
+#
+# PIN MAP - chosen from where the pins SIT, not only what they can do
+# ---------------------------------------------------------------------------
+# The C3-Zero puts 5V, GND, 3V3 and all five ADC pins in one row and the SPI
+# pins in the other. Lay the module on its side with USB-C facing the board
+# edge: power and the analog cluster then land in one end of the module and all
+# four digital lines in the other.
+#
+#   pin 1  5V         supply in
+#   pin 2  GND
+#   pin 3  3V3 (out)  divider excitation and the CS pull-ups
+#   pin 4  GPIO0      ADC_IN      - ADC1_CH0, and next door to 3V3 and GND
+#   pin 5  GPIO1      relay drive - reserved, see STAGE 2 below
+#   pin 8  GPIO4      CS1         -> U3 pin 9
+#   pin 9  GPIO5      CS2         -> U3 pin 12
+#   pin 10 GPIO6      SPI_CLK     -> U3 pin 2
+#   pin 11 GPIO7      SPI_SI      -> U3 pin 5
+#
+# Four pins per row are unusable and none of them is obvious:
+#   GPIO2, GPIO8   strapping, must be high at boot
+#   GPIO9          the BOOT button is wired to it
+#   GPIO10         the on-board WS2812
+#   GPIO18/19      USB D-/D+
+#   GPIO20/21      UART0
+#
+#
+# RANGE: two MCP41100 in series
 # ---------------------------------------------------------------------------
 # A Daikin 20 kohm outdoor thermistor spans roughly 25 kohm at +20 C to
-# 197 kohm at -20 C. One MCP41100 covers 0-100 kohm, so:
+# 197 kohm at -20 C. One MCP41100 covers 0-100 kohm and runs out at about
+# -7.4 C - the pot sits at its end stop, the pump is shown -7 C on a -15 C day,
+# and the house underheats with nothing anywhere to say why.
 #
-#     hpmpc ntc-table --low -20 --high 20
+# Two in series reach -20.3 C at the same 392 ohm step: series devices buy
+# range, not resolution. Set pot.devices: 2 and heat_pump.perceived_min_c: -20
+# in config.yaml to match, and check with 'hpmpc ntc-table'.
 #
-#       temp (C)         ohm   wiper     K per 392 ohm
-#          -20.0      196648      --      <- out of the pot's range
-#          -10.0      114003      --      <- out of the pot's range
-#           -5.0       87562     223             0.074
-#            0.0       67628     172             0.098
-#           10.0       40991     104             0.170
-#           20.0       25354      64             0.288
 #
-# RESOLUTION is fine - 0.10 K per step around freezing, well under the 0.2 K
-# where quantisation starts to show. RANGE is not: the coldest temperature this
-# pot can present is about -7.4 C.
-#
-# That is a real problem below -7 C outdoors, and not a subtle one. The pot sits
-# at wiper 255, the pump is shown -7 C on a -15 C day, and the house underheats
-# with nothing anywhere to say why. Two things to do about it:
-#
-#   - set heat_pump.perceived_min_c to -7 so the controller never plans an
-#     offset it cannot deliver ('hpmpc check' warns when these disagree); and
-#   - before real cold, wire a SECOND MCP41100 in series and set pot.devices: 2.
-#     That reaches -20 C at the same 392 ohm step - series devices buy range,
-#     not resolution. Drive the second one from the spill-over in set_wiper()
-#     below.
-#
-# A fixed resistor in series (pot.series_ohm) shifts the whole band colder for
-# the price of the warm end - but holiday mode lives at the warm end, so prefer
-# the second pot.
-#
-# SAFETY, WITH NO SENSOR BEHIND THE EMULATOR
+# WHAT HAPPENS WHEN THINGS FAIL
 # ---------------------------------------------------------------------------
-# This node is the pump's outdoor sensor. There is no thermistor behind it to
-# fall back to, which changes what "safe" means: an open circuit is not a safe
-# state, it is a sensor fault. Every layer here therefore falls back to a
-# PLAUSIBLE RESISTANCE, never to nothing.
+# This node is the pump's outdoor sensor. There is no thermistor behind the
+# emulator, so an open circuit is not a safe state - it is a sensor fault.
+# Every layer therefore falls back to a PLAUSIBLE RESISTANCE.
 #
 #   1. hpmpc alive          -> the optimised offset.
 #   2. hpmpc silent, HA up  -> the dead-man automation writes the real outdoor
 #                              temperature with offset zero, so the pump's own
 #                              weather curve runs unmodified.
-#   3. HA silent too        -> this node holds its last commanded position. The
-#                              outdoor temperature moves slowly; a value a few
-#                              hours old is a far better sensor than none.
-#   4. Held too long        -> it drives FAILSAFE_WIPER below, a fixed position
-#                              chosen to be cold enough to keep the house warm
-#                              and mild enough not to cook it in summer.
-#   5. ESP unpowered        -> the relay drops to its NC contact. Wire a FIXED
-#                              RESISTOR there, sized for the same temperature as
-#                              FAILSAFE_WIPER (about 68 kohm for 0 C on a Daikin
-#                              20 kohm curve, 1% metal film). That is the only
-#                              layer that survives the ESP losing power, and it
-#                              costs one resistor.
+#   3. HA silent too        -> this node holds its last commanded position and
+#                              keeps rewriting it. Outdoor temperature moves
+#                              slowly; a value a few hours old is a far better
+#                              sensor than none.
+#   4. Held too long        -> FAILSAFE_WIPER below, a fixed position chosen to
+#                              be cold enough to keep the house warm and mild
+#                              enough not to cook it in summer.
+#   5. ESP unpowered        -> the MCP41100 resistor tracks are passive, and
+#                              PA0 is strapped to PW0 on each device, so the
+#                              pump sees roughly 200 kohm - about -20 C. Wrong,
+#                              but a reading rather than a sensor fault. Verify
+#                              it with a multimeter at commissioning: pull the
+#                              board's power and measure across J2.
 #
-# If you have not fitted that resistor yet, leave the relay permanently
-# energised and know that a dead ESP means a sensor fault on the pump.
+# Layer 5 is the weak one. In winter -20 C is roughly what you would have
+# wanted anyway; in the shoulder season it means the pump heats flat out until
+# someone notices. Two mitigations, in order of cost:
+#
+#   - Alarm on binary_sensor.varmepump_proxy_online below. It goes off the
+#     moment the node stops answering, and the failure that matters here - the
+#     board losing power while the pump runs - is by definition one where Home
+#     Assistant and the network are still up.
+#   - STAGE 2: two DPDT signal relays that hand the pump the REAL outdoor
+#     sensor instead. See docs/HARDWARE.md.
+#
+#
+# NO READBACK - why the wiper is rewritten on a timer
+# ---------------------------------------------------------------------------
+# The 8-pin MCP41100 has no output. The wiper sensor below reports this node's
+# own variable, that is, what the ESP believes it sent - nothing anywhere can
+# say what the chip actually holds. A single mislatched bit would therefore be
+# a silent, permanent error, and with the spill-over below a bad byte on the
+# second device is worth up to 100 kohm.
+#
+# So the 30 s interval below rewrites the same value over and over. A mislatched bit then
+# heals itself within half a minute, and the pump filters its outdoor reading
+# over hours, so half a minute barely moves the leaving water temperature.
 # ---------------------------------------------------------------------------
 
 esphome:
@@ -104,9 +149,14 @@ esphome:
   friendly_name: Varmepump proxy
 
 esp32:
-  board: esp32dev
+  board: esp32-c3-devkitm-1
+  framework:
+    type: esp-idf
 
+# GPIO20/21 carry UART0 and are deliberately left alone; the C3 logs over its
+# native USB serial/JTAG, so the console survives even with the header full.
 logger:
+
 api:
   encryption:
     key: !secret api_encryption_key
@@ -115,27 +165,36 @@ ota:
 wifi:
   ssid: !secret wifi_ssid
   password: !secret wifi_password
-  # If Wi-Fi drops the node keeps running; the watchdog below hands the pump
-  # back to its real sensor rather than freezing on a stale value.
+  # If Wi-Fi drops the node keeps running; the watchdog below hands the pump a
+  # safe position rather than freezing on a stale value for ever.
   reboot_timeout: 0s
 
+# The alarm that stands in for the stage-2 relay. Trigger a notification in
+# Home Assistant on this going 'off' for ten minutes - and if you have any way
+# to switch the pump off from HA, do that instead of only notifying.
+binary_sensor:
+  - platform: status
+    name: "Online"
+
 spi:
-  clk_pin: GPIO18
-  mosi_pin: GPIO23
-  miso_pin: GPIO19
+  clk_pin: GPIO6
+  mosi_pin: GPIO7
+  # No miso_pin: MCP41100 is write-only. Nothing 5 V ever reaches the C3.
 
 # MCP41100. 16 bits per transfer: command byte then wiper byte.
 # 0x11 = write data to potentiometer 0. Mode 0,0.
+# Both chip selects go through the 74HCT125, and both carry a 4k7 pull-up to
+# 3V3 on the buffer's INPUT side so the chips stay deselected while the module
+# boots and its GPIOs are still high-impedance.
 spi_device:
   - id: pot_primary
+    cs_pin: GPIO4
+    data_rate: 1MHz
+    mode: 0
+  - id: pot_secondary
     cs_pin: GPIO5
     data_rate: 1MHz
     mode: 0
-  # A second device wired in series goes here; see set_wiper() below.
-  # - id: pot_secondary
-  #   cs_pin: GPIO17
-  #   data_rate: 1MHz
-  #   mode: 0
 
 globals:
   - id: wiper_position
@@ -148,6 +207,29 @@ globals:
     initial_value: '0'
 
 script:
+  # Hardware write only. Deliberately does NOT stamp last_command_ms, so the
+  # periodic refresh cannot reset the watchdog clock and hide a silent network.
+  - id: write_pots
+    parameters:
+      step: int
+    then:
+      - lambda: |-
+          // Two devices in series: the first fills to 255, the rest spills into
+          // the second. Total range 0..510.
+          const int PER_DEVICE = 255;
+          int a = step > PER_DEVICE ? PER_DEVICE : step;
+          int b = step > PER_DEVICE ? step - PER_DEVICE : 0;
+
+          uint8_t frame[2] = {0x11, (uint8_t) a};
+          id(pot_primary)->enable();
+          id(pot_primary)->write_array(frame, 2);
+          id(pot_primary)->disable();
+
+          uint8_t frame2[2] = {0x11, (uint8_t) b};
+          id(pot_secondary)->enable();
+          id(pot_secondary)->write_array(frame2, 2);
+          id(pot_secondary)->disable();
+
   - id: set_wiper
     parameters:
       step: int
@@ -157,45 +239,14 @@ script:
           // shown, and so does Home Assistant, but the firmware must not trust
           // the network: a corrupted value must not reach the pump.
           const int STEP_MIN = 0;
-          const int STEP_MAX = 255;      // per device
+          const int STEP_MAX = 510;      // 255 per device, two in series
           if (step < STEP_MIN || step > STEP_MAX) {
             ESP_LOGW("hpmpc", "Rejected out-of-band wiper %d", step);
             return;
           }
-          uint8_t frame[2] = {0x11, (uint8_t) step};
-          id(pot_primary)->enable();
-          id(pot_primary)->write_array(frame, 2);
-          id(pot_primary)->disable();
-
-          // With a second device in series, the first fills to 255 and the rest
-          // spills into the second:
-          //   int spill = step > 255 ? step - 255 : 0;
-          //   uint8_t frame2[2] = {0x11, (uint8_t) spill};
-          //   id(pot_secondary)->enable();
-          //   id(pot_secondary)->write_array(frame2, 2);
-          //   id(pot_secondary)->disable();
-
+          id(write_pots)->execute(step);
           id(wiper_position) = step;
           id(last_command_ms) = millis();
-          // The pump has no other sensor, so the relay belongs on whenever we
-          // have something to say. It only drops on loss of power, to whatever
-          // fixed resistor is wired to its NC contact.
-          if (!id(emulator_relay).state) {
-            id(emulator_relay).turn_on();
-          }
-
-# Energise to put the potentiometer on the pump's sensor input; de-energise to
-# fall through to whatever is on the relay's NC contact - which must be a fixed
-# resistor, not an open circuit, because there is no thermistor any more.
-#
-# restore_mode: ALWAYS_ON so that a reboot comes back controlling rather than
-# sitting on the fixed resistor waiting for someone to notice.
-switch:
-  - platform: gpio
-    id: emulator_relay
-    name: "Emulated outdoor sensor engaged"
-    pin: GPIO25
-    restore_mode: ALWAYS_ON
 
 number:
   # Two ways in. Use whichever suits you and ignore the other; they end up in
@@ -214,7 +265,7 @@ number:
     id: wiper_target
     unit_of_measurement: "step"
     min_value: 0
-    max_value: 255
+    max_value: 510
     step: 1
     optimistic: true
     set_action:
@@ -229,7 +280,7 @@ number:
     id: target_temperature
     unit_of_measurement: "°C"
     device_class: temperature
-    min_value: -25
+    min_value: -20            # two devices reach -20.3 C; below that they clamp
     max_value: 30
     step: 0.1
     optimistic: true
@@ -253,19 +304,73 @@ number:
               break;
             }
           }
+          // Keep in step with pot: in config.yaml.
+          const int DEVICES = 2;
           const float PER_STEP = 100000.0 / 255.0;
           const float WIPER_OHM = 100.0;
-          int step = (int) lroundf((ohm - WIPER_OHM) / PER_STEP);
+          int step = (int) lroundf((ohm - DEVICES * WIPER_OHM) / PER_STEP);
           if (step < 0) step = 0;
-          if (step > 255) step = 255;          // 255 * pot count, if you fit two
+          if (step > 255 * DEVICES) step = 255 * DEVICES;
           ESP_LOGD("hpmpc", "%.1f C -> %.0f ohm -> wiper %d", x, ohm, step);
           id(set_wiper)->execute(step);
 
 sensor:
-  # The readback. Set entities.pot_wiper to this: without the pump's own
-  # reading it is the only thing that says the write arrived - and, more
-  # useful, the only thing that says the pot hit an end stop and clamped
-  # instead of applying what was asked for.
+  # ---- the real outdoor sensor -------------------------------------------
+  # The pump's own thermistor now hangs on this board instead of on the pump,
+  # which is what makes entities.outdoor_temp a measurement at the house rather
+  # than an SMHI grid point.
+  #
+  # Divider: 3V3 -> sensor -> node -> 20k -> GND, with 1k and 100 nF at the pin.
+  # That orientation matters. The other way round puts the whole winter above
+  # 2.5 V where the C3's ADC saturates; this way cold reads LOW - 0.18 V at
+  # -30 C, 1.83 V at +30 C, and 14-42 mV per kelvin across the range.
+  - platform: adc
+    pin: GPIO0                    # ADC1_CH0. ADC2 is unusable with Wi-Fi up.
+    id: ntc_voltage
+    attenuation: 12db             # '11db' on ESPHome older than 2023.12
+    update_interval: 500ms
+    filters:
+      # A median, not a mean: Wi-Fi transmit bursts pull the 3.3 V rail down for
+      # a few milliseconds at a low duty cycle, and a median throws those away
+      # while an average folds them in. One value every 7.5 s.
+      - median:
+          window_size: 15
+          send_every: 15
+
+  - platform: resistance
+    sensor: ntc_voltage
+    id: ntc_resistance
+    configuration: UPSTREAM       # the thermistor is the upstream leg
+    resistor: 20kOhm
+    reference_voltage: 3.3V
+
+  - platform: ntc
+    sensor: ntc_resistance
+    name: "Verklig utetemperatur"
+    id: real_outdoor
+    device_class: temperature
+    accuracy_decimals: 1
+    calibration:                  # same three points as the ntc: table above
+      - 196648Ohm -> -20°C
+      - 67628Ohm -> 0°C
+      - 20084Ohm -> 25°C
+    filters:
+      # The C3's ADC carries a percent or two of per-chip offset and gain. That
+      # is the dominant error here and it is not self-correcting, because this
+      # reading does not go to the pump - trim it once against a reference
+      # thermometer and put the result here.
+      - calibrate_linear:
+          - 0.0 -> 0.0
+          - 20.0 -> 20.0
+
+  # ---- what we are driving the pot to ------------------------------------
+  # Set entities.pot_wiper to this. Without the pump's own reading it is the
+  # only thing that says the write arrived - and, more useful, the only thing
+  # that says the pot hit an end stop and clamped instead of applying what was
+  # asked for.
+  #
+  # The name still says 0-255 because that is the entity id already in use in
+  # Home Assistant and in config.yaml. With two devices the value spans 0-510.
   - platform: template
     name: "MCP41100 wiper (0-255)"
     id: mcp41100_wiper
@@ -291,9 +396,10 @@ sensor:
       const int N = 13;
       if (id(wiper_position) < 0) return {};
       // Keep in step with pot: in config.yaml.
+      const int DEVICES = 2;
       const float PER_STEP = 100000.0 / 255.0;
       const float WIPER_OHM = 100.0;
-      float r = id(wiper_position) * PER_STEP + WIPER_OHM;
+      float r = id(wiper_position) * PER_STEP + DEVICES * WIPER_OHM;
       if (r <= 0) return {};
       // R decreases as T increases, so walk down.
       for (int i = 0; i < N - 1; i++) {
@@ -306,17 +412,28 @@ sensor:
     update_interval: 30s
 
 interval:
+  # Refresh: rewrite the same value the pots should already hold. See NO
+  # READBACK above - this is what turns a mislatched bit from a permanent error
+  # into a 30 second one.
+  - interval: 30s
+    then:
+      - lambda: |-
+          if (id(wiper_position) >= 0) {
+            id(write_pots)->execute(id(wiper_position));
+          }
+
   # Watchdog: the layer that survives Home Assistant and hpmpc both dying.
   #
-  # It does NOT release the relay. With no thermistor behind the emulator that
-  # would hand the pump an open circuit, which is worse than any stale value.
-  # Instead it holds the last commanded position for a few hours - outdoor
-  # temperature moves slowly - and only then falls to a fixed safe position.
+  # It holds the last commanded position for a few hours - outdoor temperature
+  # moves slowly - and only then falls to a fixed safe position. There is no
+  # relay to release in stage 1, and releasing one would be wrong anyway while
+  # the emulator is the pump's only sensor.
   #
-  # FAILSAFE_WIPER is that position: wiper 172 is about 68 kohm, which a Daikin
-  # 20 kohm curve reads as 0 C. Cold enough that the house stays warm through a
-  # winter outage, mild enough that a summer outage does not run the pump flat
-  # out. Recompute it for your own curve with 'hpmpc ntc-table'.
+  # FAILSAFE_WIPER is that position: with two devices, wiper 172 is about
+  # 68 kohm, which a Daikin 20 kohm curve reads as 0 C. Cold enough that the
+  # house stays warm through a winter outage, mild enough that a summer outage
+  # does not run the pump flat out. Recompute it for your own curve with
+  # 'hpmpc ntc-table'.
   - interval: 60s
     then:
       - lambda: |-
@@ -341,28 +458,30 @@ interval:
 
 
 # ---------------------------------------------------------------------------
-# COMMISSIONING
+# COMMISSIONING - the order matters, each step catches its own class of error
 #
-# 1. Do not connect the pump yet. Command a few wiper positions and measure the
-#    output with a multimeter. The MCP41100 is a +/-20% part with tens of ohms
-#    of wiper resistance - measure, do not assume, and put what you measure into
-#    pot.resistance_ohm and pot.wiper_ohm.
-# 2. Calibrate against the PUMP, not against the sensor. Connect the emulator,
-#    command a position, and read what the pump's display says it means.
-#    Repeat at two or three well-separated values:
-#       hpmpc calibrate-ntc --point=-5.4:87500 --point=2.1:58000 --point=9.6:41000
-#    Pairs taken this way include the wiring resistance, the connector and the
-#    pump's own linearisation - all of which a bench measurement of the
-#    thermistor misses. 'hpmpc check' prints a ready-made --point for whatever
-#    the pot is set to right now.
-# 3. Connect the pump with control.dry_run: true and offset 0. The pump's own
+# 1. Power the board with EMPTY sockets. Measure between pin 8 and pin 4 of the
+#    MCP sockets, and between pin 14 and pin 7 of the U3 socket: 5 V, not 3.3.
+#    Wiring VDD to the wrong rail is the one mistake that can destroy both the
+#    chips and the pump's input.
+# 2. Fit U3 alone. Toggle CS1 and CS2 and measure U3 pins 8 and 11: they must
+#    swing 0 to 5 V, and rest at 5 V thanks to the pull-ups. 3.3 V out means you
+#    have an HC where an HCT belongs.
+# 3. Fit the pots. Do NOT connect the pump yet. Command a few positions and
+#    measure across J2 with a multimeter:
+#       wiper   0 -> ~0.2 kohm      wiper 255 -> ~100 kohm
+#       wiper 128 -> ~50 kohm       wiper 510 -> ~200 kohm
+#    The MCP41100 is a +/-20% part. Put what you MEASURED into pot.resistance_ohm
+#    and pot.wiper_ohm, and set pot.devices: 2.
+# 4. Pull the board's power and measure across J2 again: about 200 kohm through
+#    the passive tracks, thanks to the PA0-to-PW0 straps. An open circuit here
+#    means the straps are wrong, and a dead board would be a sensor fault on the
+#    pump instead of a cold lie.
+# 5. Feed a known resistor across J1 in place of the sensor and check the ADC
+#    chain: 20 kohm -> 1.650 V, 68 kohm -> 0.750 V, 200 kohm -> 0.300 V.
+# 6. Connect the pump with control.dry_run: true and offset 0. The pump's own
 #    display should read the real outdoor temperature. If it does not, the
-#    calibration is wrong - fix it before going further.
-# 3b. Pull the ESP's power for a minute and read the display again. It should
-#    show whatever the fixed resistor on the relay's NC contact represents. If
-#    it shows an error, that resistor is missing - fit it.
-# 4. Command a steady -2 K offset for a day and check that the leaving water
+#    calibration is wrong - fix it before going further, see docs/HARDWARE.md.
+# 7. Command a steady -2 K offset for a day and check that the leaving water
 #    temperature rises by about slope * 2 K. Only then let the controller run.
-# 5. Before the first real cold snap, decide about the second pot. Below -7 C
-#    outdoors, one MCP41100 cannot tell this pump the truth.
 # ---------------------------------------------------------------------------

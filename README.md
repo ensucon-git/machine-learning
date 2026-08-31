@@ -1065,13 +1065,23 @@ ett *rimligt motstånd*, aldrig på ingenting:
 | hpmpc tyst, HA uppe | riktig utetemperatur, offset 0 — pumpens egen kurva, omodifierad |
 | HA också tyst | senaste kommenderade värdet, i fyra timmar |
 | tyst längre än så | fast reservposition (`FAILSAFE_WIPER`, ungefär 0 °C) |
-| ESP32 strömlös | vad som sitter på reläets NC-kontakt |
+| ESP32 strömlös | potentiometrarnas passiva motståndsbanor, ≈ 200 kΩ |
 
-Det sista lagret är det enda som överlever att ESP:n blir strömlös, och det kräver
-hårdvara: **löd en fast resistor på reläets NC-kontakt**, dimensionerad för samma
-temperatur som reservpositionen — ungefär 68 kΩ för 0 °C på Daikinkurvan, 1 %
-metallfilm. Utan den betyder en död ESP32 ett givarfel på pumpen. Den kostar några
-kronor och är värd att göra innan skarp drift.
+Det sista lagret är det enda som överlever att ESP:n blir strömlös, och det kostar
+ingenting extra: **bygla PA0 till wipern på varje MCP41100**. Motståndsbanan i kretsen
+är passiv, så hela banan ligger kvar när kretsen är spänningslös, och pumpen ser ungefär
+200 kΩ i stället för ett brott — omkring −20 °C på Daikinkurvan. Fel, men en avläsning
+och inte ett givarfel. Verifiera det vid idrifttagningen: dra kortets matning och mät
+över pumpplinten; oändligt betyder att bygeln är fel dragen.
+
+Svagheten är höst och vår. På vintern är −20 °C ungefär vad man ändå velat; i
+mellansäsong betyder det att pumpen värmer för fullt tills någon märker det. Två
+åtgärder, i kostnadsordning: **larma** på att noden slutat svara
+(`binary_sensor.varmepump_proxy_online`) — det felet som spelar roll här, kortets
+matning dör medan pumpen går, är per definition ett där Home Assistant och nätet är
+uppe — och därefter **två DPDT-signalreläer** som växlar över husets riktiga utegivare
+direkt till pumpen. Då får pumpen sanningen i stället för en mindre lögn. Kopplingen
+står i [`docs/HARDWARE.md`](docs/HARDWARE.md#kortet).
 
 Inställningar som ändras i drift går genom samma sorts spärrar: varje fält har ett
 tillåtet intervall, och en ändring som gör konfigurationen inkonsekvent rullas tillbaka
@@ -1180,9 +1190,13 @@ istället, men på bekostnad av den varma änden, och semesterläget bor i den v
 kalibrerar NTC-tabellen mot pumpens display, och vad du gör den dag den andra
 kretsen sitter på plats.
 
-`ha/esphome_daikin_outdoor_sensor.yaml` är en komplett ESPHome-nod för MCP41100 med
-plats förberedd för den andra kretsen, en oberoende rimlighetsspärr i firmware, och en
-watchdog som håller kvar sitt senaste värde i stället för att koppla bort sig — se
+`ha/esphome_daikin_outdoor_sensor.yaml` är en komplett ESPHome-nod, skriven för den
+uppsättning som faktiskt sitter här: ESP32-C3, två MCP41100 i serie, en 74HCT125 som
+nivåomvandlare och en ADC-kanal som läser husets riktiga utegivare. Den har en oberoende
+rimlighetsspärr i firmware, skriver om wiperpositionen var trettionde sekund eftersom
+MCP41100 saknar återläsning, och har en watchdog som håller kvar sitt senaste värde i
+stället för att koppla bort sig. Stiftval, matningsrälar och kortlayout står i
+[`docs/HARDWARE.md`](docs/HARDWARE.md#kortet) — se också
 [Det finns ingen givare att falla tillbaka på](#det-finns-ingen-givare-att-falla-tillbaka-på).
 
 ### Utgångarna
