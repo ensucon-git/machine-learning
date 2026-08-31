@@ -195,6 +195,16 @@ terminalvärderingen fixar, fast i utvärderingen.
   motsvarande wheel-installationen är verifierad, inklusive paketdata.
 - **Ingenting har körts mot en riktig Home Assistant.** HA-klienten är testad mot
   en fake som härmar REST-API:ets format.
+- **Proxykortet är konstruerat men inte byggt, och firmware aldrig kompilerad.**
+  `ha/esphome_daikin_outdoor_sensor.yaml` är omskriven för ESP32-C3-Zero-M men har
+  varken flashats eller ens körts genom `esphome compile` — utvecklingsmiljön har
+  ingen ESPHome-installation. Räkna med att någon nyckel kan heta annorlunda i
+  just din version; `attenuation: 12db` hette `11db` före ESPHome 2023.12.
+  Stiftvalet och rälarna är däremot härledda ur Waveshares pinout och uppmätta
+  4,97 V, inte gissade.
+- **Delarens siffror är räknade, inte uppmätta.** 20 kΩ mot en Daikin 20 kΩ-kurva
+  ger 0,18–1,83 V över −30…+30 °C. Kontrollera med kända motstånd över J1 vid
+  idrifttagning: 20 kΩ → 1,650 V, 68 kΩ → 0,750 V, 200 kΩ → 0,300 V.
 
 ---
 
@@ -426,11 +436,52 @@ hpmpc run / hpmpc serve
 
 ---
 
+## Var vi står
+
+Kortet är **konstruerat och dokumenterat, men inte byggt.** Designen är låst efter
+en genomgång som gav fem beslut värda att inte riva upp:
+
+1. **Två MCP41100 i serie** direkt från start — en enda tar slut vid −7,4 °C.
+2. **5 V-matning till U1/U2/U3, tagen från skruvplinten**, eftersom pumpen
+   exciterar med uppmätta 4,97 V.
+3. **74HCT125** som följd av det — C3:ans 3,3 V når inte 0,7 × VDD.
+4. **Bygeln PA0↔wiper** i stället för fast failsafe-motstånd på ett relä.
+5. **Reläväxlingen uppskjuten** till steg 2, med larm som ersättning och tre lösa
+   trådbyglar (L1–L3) på kortet så tillägget inte rör något annat.
+
+Användaren har modul, potentiometrar, plintar, hållare, hylslister, 3× 100 nF,
+20 kΩ, 4,7 kΩ, 1 kΩ och ett 70 × 50 mm hålmatriskort. Kvar att köpa: 74HCT125 +
+14-polig hållare, en fjärde 100 nF, ett 4,7 kΩ till, två 10 kΩ och en tvåpolig
+5 V-adapter.
+
+Byggblad med schema, nätlista, zonplan och idrifttagningsordning finns som artefakt
+i den session där kortet togs fram; källan till samma innehåll är
+`docs/HARDWARE.md#kortet` och kommentarerna i ESPHome-filen.
+
 ## Nästa steg för användaren
 
+**A. Bygg och verifiera kortet** (`docs/HARDWARE.md#kortet`, och
+idrifttagningslistan sist i ESPHome-filen). Kort: matningen med tomma hållare,
+bufferten ensam, potentiometrarna utan pumpen, det strömlösa provet över J2,
+delaren mot kända motstånd. Först därefter pumpen.
+
+**B. Koppla ihop ESP32:n med hpmpc.** Det är den öppna arbetsuppgiften när
+hårdvaran finns, och det som troligen behöver ses över:
+- `pot.devices: 2`, `pot.resistance_ohm`/`wiper_ohm` från multimetern,
+  `heat_pump.perceived_min_c: -20`.
+- `entities.outdoor_temp` kan äntligen peka på nodens `Verklig utetemperatur` —
+  räkna med ett steg i träningsdatan mot den SMHI-härledda historiken.
+- `entities.pot_wiper` mot wiperavläsningen, och kontrollera vad `hpmpc check`
+  säger om ställdonskedjan.
+- De två ställena i `ha/packages/heatpump_mpc.yaml` som fortfarande antar en
+  krets: `{% set pots = 1 %}` och ändlägeslarmets `to: "255"`.
+- `binary_sensor.varmepump_proxy_online` in i en HA-automation — helst en som
+  stänger av värmen, inte bara notifierar.
+
+**C. Sedan den ursprungliga listan:**
 1. `hpmpc providers` — stäm av marginalkostnaden mot elfakturan.
-2. Bestäm vilken givare som ska emuleras (helst innedelens externa, inte R1T).
-3. `hpmpc calibrate-ntc` på den faktiska givaren.
+2. Bestäm vilken givare som emuleras (helst innedelens externa, inte R1T).
+3. `hpmpc calibrate-ntc` mot pumpens display.
 4. `hpmpc curve` med de två kurvpunkterna från pumpens display.
 5. En vecka `hpmpc excite`.
 6. `hpmpc collect && hpmpc train && hpmpc power`.
