@@ -148,6 +148,64 @@ Givaren blir därmed en riktig `entities.outdoor_temp` — en mätning vid huset
 stället för SMHI:s rutpunkt. Räkna med ett steg i träningsdatan när du byter, och
 kör `hpmpc train` igen när du har några veckor med den.
 
+### Nätlista
+
+Den auktoritativa listan. Kontinuitetsmät varje rad med tomma hållare och
+modulen ur, innan något sätts i.
+
+| Nät | Antal | Förbindelser |
+|---|---|---|
+| `GND` | 18 | J3.2 · A1 stift 2 · U1 stift 4 · U2 stift 4 · **U2 stift 7 (PB0)** · U3 stift 1, 4, 7, 10, 13 · J2.2 · R1 nedre · R7 nedre · R8 nedre · C1–C4 jordsida |
+| `+5V` | 8 | **J3.1** · A1 stift 1 · U1 stift 8 · U2 stift 8 · U3 stift 14 · C1, C2, C4 |
+| `+3V3` | 4 | A1 stift 3 · J1.1 (via L1) · R3 övre · R4 övre |
+| `NTC_SENSE` | 3 | J1.2 (via L2) · R1 övre · R2 |
+| `ADC_IN` | 3 | R2 · C3 signalsida · A1 stift 4 |
+| `CS1` | 3 | A1 stift 8 · U3 stift 9 · R3 nedre |
+| `CS1_5V` | 2 | U3 stift 8 · U1 stift 1 |
+| `CS2` | 3 | A1 stift 9 · U3 stift 12 · R4 nedre |
+| `CS2_5V` | 2 | U3 stift 11 · U2 stift 1 |
+| `SPI_CLK` | 3 | A1 stift 10 · U3 stift 2 · R7 övre |
+| `SPI_CLK_5V` | 3 | U3 stift 3 · U1 stift 2 · U2 stift 2 |
+| `SPI_SI` | 3 | A1 stift 11 · U3 stift 5 · R8 övre |
+| `SPI_SI_5V` | 3 | U3 stift 6 · U1 stift 3 · U2 stift 3 |
+| `POT_HI` | 3 | U1 stift 6 (PW0) · U1 stift 5 (PA0) · J2.1 (via L3) |
+| `POT_MID` | 3 | U1 stift 7 (PB0) · U2 stift 6 (PW0) · U2 stift 5 (PA0) |
+
+**Alla fyra pull-motstånden sitter på buffertens 3,3 V-sida**, alltså mellan
+modulen och U3 — inte på potentiometrarnas chip-select-stift. R3 och R4 håller
+`CS1` och `CS2` höga medan modulen bootar och dess stift ännu är högimpedanta;
+R7 och R8 gör samma sak nedåt för klocka och data. Sätter man dem efter
+bufferten motarbetar de i stället dess utgång.
+
+**U2 stift 7 är PB0**, inte en matningsanslutning — det är potentiometerkedjans
+nedre ände och ska ligga på jord. Lätt att missa i en rad av VSS-stift.
+
+`74AHCT125N` fungerar lika bra som `74HCT125N`: AHCT har samma TTL-ingångar,
+allt över 2,0 V räknas som hög. Bara en ren `74HC125` vore fel. Enable är
+aktiv-låg, så alla fyra `OE` går till GND.
+
+### 74AHCT125, 14-polig DIP
+
+| Stift | Namn | Nät |
+|---|---|---|
+| 1 | 1OE | `GND` |
+| 2 | 1A · in | `SPI_CLK` |
+| 3 | 1Y · ut | `SPI_CLK_5V` |
+| 4 | 2OE | `GND` |
+| 5 | 2A · in | `SPI_SI` |
+| 6 | 2Y · ut | `SPI_SI_5V` |
+| 7 | GND | `GND` |
+| 8 | 3Y · ut | `CS1_5V` |
+| 9 | 3A · in | `CS1` |
+| 10 | 3OE | `GND` |
+| 11 | 4Y · ut | `CS2_5V` |
+| 12 | 4A · in | `CS2` |
+| 13 | 4OE | `GND` |
+| 14 | VCC | `+5V`, med C4 över stift 14 och 7 |
+
+Kanal 3 och 4 är spegelvända: på högra sidan kommer *utgången* före ingången.
+Stift 8 är alltså en utgång, stift 9 en ingång.
+
 ### Lägg modulen på tvären
 
 Pinouten avgör layouten. Upprätt hamnar matningen och alla ADC-stift i ena raden
