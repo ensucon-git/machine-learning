@@ -190,6 +190,13 @@ template:
       # deliberately hold the last value instead of inventing one. Writing
       # a made-up 0 C to a pump that has no other sensor is worse than
       # holding a reading from an hour ago.
+      #
+      # The proxy node's own reading goes FIRST when the board carries the
+      # divider that reads the real outdoor sensor: it measures the air the
+      # building actually loses heat to, rather than a weather provider's grid
+      # point. It is safe to depend on because the list falls through - if the
+      # node is offline the entity goes unavailable and the weather entity
+      # takes over. Drop that first line if your board has no sensor on J1.
       # ===================================================================
       - name: "Utegivare verklig"
         unique_id: hpmpc_real_outdoor
@@ -197,6 +204,7 @@ template:
         device_class: temperature
         state: >
           {% set candidates = [
+               states('sensor.varmepump_proxy_verklig_utetemperatur'),
                states('sensor.ute_temperatur'),
                state_attr('weather.forecast_home', 'temperature'),
                state_attr('weather.hemma', 'temperature') ] %}
