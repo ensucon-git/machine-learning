@@ -242,10 +242,17 @@ template:
             {{ (r25 * (2.718281828459045 ** (beta * (1/(t + 273.15) - 1/298.15)))) | round(0) }}
           {% endif %}
 
-      # The same target as a wiper position, which is what the ESP32 actually
-      # sets. One MCP41100: 100 kohm across 256 taps, plus ~100 ohm of wiper.
-      # Set POTS to the number wired in series - two doubles the range, which is
-      # what it takes to reach -20 C on the curve above.
+      # The same target as a wiper position.
+      #
+      # NOT IN THE CONTROL PATH with the shipped ESPHome config. Automation A)
+      # below sends the fictitious TEMPERATURE straight to the node, and the
+      # node owns the NTC table - so this sensor and the one above are only
+      # consumed by automation B), which is commented out. They are kept for
+      # the B) path and because they are readable on a dashboard.
+      #
+      # POTS must match what is actually wired. It is 2 here: two MCP41100 in
+      # series, 0..510 taps, which is what it takes to reach -20 C on the curve
+      # above. It was 1 while a single device was fitted.
       #
       # This CLAMPS, and that matters: a target beyond the last tap cannot be
       # applied, and rounding it to the end stop silently is how the pump ends up
@@ -256,7 +263,7 @@ template:
         unit_of_measurement: "step"
         state: >
           {% set r = states('sensor.utegivare_malresistans') | float(none) %}
-          {% set pots = 1 %}
+          {% set pots = 2 %}
           {% if r is none %}
             {{ none }}
           {% else %}
@@ -428,17 +435,24 @@ automation:
             MPC control is off and the pump is being shown the real outdoor temperature.
 
   # ---- The potentiometer ran out of range -------------------------------
-  # A single MCP41100 reaches about -7 C on a 20 kohm Daikin curve. Past that it
-  # sits at its end stop and the pump is shown something warmer than asked for,
-  # with nothing in any log to say so - the house just underheats. Two in series
-  # fix it; until then, this says it out loud.
+  # Sitting at an end stop means the pump is shown something other than what was
+  # asked for, with nothing in any log to say so - the house just drifts. This
+  # says it out loud.
+  #
+  # THE END STOP DEPENDS ON HOW MANY DEVICES ARE WIRED: 255 for one MCP41100,
+  # 510 for two in series. Two are fitted here, so it is 510.
+  #
+  # Watching 255 with two devices fitted would be actively wrong: 255 is then
+  # the MIDDLE of the range, the point where the first device fills up and the
+  # spill-over starts, and the wiper passes through it in ordinary operation
+  # every time the weather crosses about -7 C.
   - alias: "MPC potentiometer at end stop"
     id: hpmpc_pot_end_stop
     mode: single
     trigger:
       - platform: state
         entity_id: sensor.varmepump_proxy_mcp41100_wiper_0_255
-        to: "255"
+        to: "510"
         for: "00:30:00"
       - platform: state
         entity_id: sensor.varmepump_proxy_mcp41100_wiper_0_255
@@ -452,9 +466,10 @@ automation:
             The potentiometer has been at wiper {{ states('sensor.varmepump_proxy_mcp41100_wiper_0_255') }}
             for half an hour. The controller wants to show the pump
             {{ states('input_number.varmepump_fiktiv_utetemp') }} °C but the hardware cannot reach it,
-            so the pump is being shown something warmer and the house will drift cool.
-            This is a range limit, not a fault: wire a second MCP41100 in series, set
-            pot.devices: 2 and raise heat_pump.perceived_min_c to match.
+            so the pump is being shown something other than what was asked for.
+            This is a range limit, not a fault. With two MCP41100 in series the chain
+            spans about -20.3 to +30 C; check that heat_pump.perceived_min_c and
+            perceived_max_c match, with 'hpmpc ntc-table'.
 
   # ---- Come home from holiday ------------------------------------------
   # The controller already ramps the comfort band back at the return time, and

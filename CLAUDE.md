@@ -20,7 +20,7 @@ bestämt, varför, och vilka fällor som redan är upptäckta.
 | Ort | Falkvägen, Norrköping (58.5877, 16.1924) |
 | Elområde | SE3, rörligt pris |
 | Elöverföring + energiskatt | **0,7084 kr/kWh exkl. moms** (= 0,8855 inkl.) |
-| Ställdon | ESP32 + **MCP41100** (8 bitar, 100 kΩ, SPI) på pumpens utegivare |
+| Ställdon | **ESP32-C3-Zero-M** + **2× MCP41100** i serie (8 bitar, 100 kΩ styck, SPI) + **74HCT125** som nivåomvandlare, på pumpens utegivare. Bygget: `docs/HARDWARE.md#kortet` |
 | Effektmätning | Victron, **hela husets effekt per fas** — ingen mätare enbart på pumpen |
 | Elbilsladdare | 11 kW över alla tre faser, `binary_sensor.eh6nh5cd_charging` (`Charging` / `Not charging`) |
 | Körs på | NUC, Docker (Portainer), skilt från Home Assistant |
@@ -195,6 +195,16 @@ terminalvärderingen fixar, fast i utvärderingen.
   motsvarande wheel-installationen är verifierad, inklusive paketdata.
 - **Ingenting har körts mot en riktig Home Assistant.** HA-klienten är testad mot
   en fake som härmar REST-API:ets format.
+- **Proxykortet är konstruerat men inte byggt, och firmware aldrig kompilerad.**
+  `ha/esphome_daikin_outdoor_sensor.yaml` är omskriven för ESP32-C3-Zero-M men har
+  varken flashats eller ens körts genom `esphome compile` — utvecklingsmiljön har
+  ingen ESPHome-installation. Räkna med att någon nyckel kan heta annorlunda i
+  just din version; `attenuation: 12db` hette `11db` före ESPHome 2023.12.
+  Stiftvalet och rälarna är däremot härledda ur Waveshares pinout och uppmätta
+  4,97 V, inte gissade.
+- **Delarens siffror är räknade, inte uppmätta.** 20 kΩ mot en Daikin 20 kΩ-kurva
+  ger 0,18–1,83 V över −30…+30 °C. Kontrollera med kända motstånd över J1 vid
+  idrifttagning: 20 kΩ → 1,650 V, 68 kΩ → 0,750 V, 200 kΩ → 0,300 V.
 
 ---
 
@@ -214,14 +224,51 @@ terminalvärderingen fixar, fast i utvärderingen.
   `entities.pot_wiper` tillbaka varje cykel. Fixen är en **andra MCP41100 i
   serie** och `pot.devices: 2` → −20,3 °C vid samma steglängd. Seriekopplade
   kretsar ger räckvidd, inte upplösning.
+- **Pumpen exciterar givaringången med 4,97 V, uppmätt i tomgång.** Det är taket
+  för vad potentiometerns terminaler kan nå, så **MCP-kretsarna måste matas med
+  ≥ 4,97 V** — annars klämmer deras ESD-dioder banan i just de kallaste lägena.
+  Följden: vid VDD = 5 V kräver MCP41100 3,5 V för en etta (0,7 × VDD) och C3:an
+  ger 3,3 V, alltså behövs en **74HCT125** på SCK, SI, CS1 och CS2. Inte HC —
+  den har samma tröskel. Matningen tas från skruvplinten, inte från modulens
+  `5V`-stift: en del Zero-kort har en diod från USB och ger 4,6 V.
+- **Fyra stift per rad går bort på C3-Zero:n, och inget av dem är självklart.**
+  GP2 och GP8 är strapping (måste ligga högt vid boot), **GP9 sitter på
+  BOOT-knappen**, GP10 på WS2812-lysdioden, GP18/19 på USB och GP20/21 på UART0.
+  Kvar: GP0, GP1, GP3, GP4, GP5, GP6, GP7 — sju stift, bygget behöver sex.
+  ADC hamnade på **GP0** för att den är granne med 3V3 och GND, så hela den
+  analoga klungan får plats utan att korsa kortet.
+- **MCP41100 har ingen återläsning.** 8-polsvarianten saknar utgång, och
+  `sensor.varmepump_proxy_mcp41100_wiper_0_255` rapporterar nodens egen variabel
+  — vad ESP:n *tror* att den skickade. En felläst bit vore alltså ett tyst,
+  bestående fel, och med spill-over-logiken är en trasig databyte på andra
+  kretsen värd 100 kΩ. Därför skriver firmware om samma wipervärde var 30:e
+  sekund: felet blir övergående i stället för permanent, och pumpen filtrerar
+  ändå sin utegivare över timmar.
 - **Pumpen har ingen egen utegivare kvar** — potentiometern *är* givaren.
   Därför är "koppla bort emulatorn" aldrig ett säkert läge: det ger pumpen ett
   brutet givarkretslopp. Varje reservväg faller tillbaka på ett rimligt
   motstånd: HA skriver riktig utetemperatur med offset 0, ESP32:n håller sitt
-  senaste värde i fyra timmar och går sedan till `FAILSAFE_WIPER` (~0 °C), och
-  reläets NC-kontakt ska ha en **fast resistor** (~68 kΩ) för det strömlösa
-  fallet. Det här revs upp en gång: en tidigare version slutade skriva under
+  senaste värde i fyra timmar och går sedan till `FAILSAFE_WIPER` (~0 °C).
+  Det här revs upp en gång: en tidigare version slutade skriva under
   `perceived_min_c`, vilket var precis fel.
+- **Strömlöst kort ger ~200 kΩ, inte brott — tack vare bygeln PA0↔PW0.**
+  Motståndsbanan i en MCP41100 är passiv, så med PA0 byglad till wipern ligger
+  hela banan kvar när kretsen är spänningslös. Pumpen ser då ≈ −20 °C: fel, men
+  en avläsning. Det ersätter det fasta 68 kΩ-motstånd på ett reläs NC-kontakt
+  som stod här tidigare. **Verifiera bygeln vid idrifttagning** — dra matningen
+  och mät över J2; oändligt betyder att den är fel dragen. Svagheten är höst och
+  vår, då −20 °C betyder att pumpen värmer för fullt tills någon märker det;
+  larmet på `binary_sensor.varmepump_proxy_online` är ersättningen tills
+  reläväxlingen i steg 2 finns.
+- **Reläväxlingen i steg 2 kräver tre växlande poler, inte två**, och guldkontakter.
+  Poler: givarens tråd A (3V3 ↔ pumpens terminal A), givarens tråd B (mätnoden ↔
+  GND), och pumpens terminal A (POT_HI ↔ bruten). Utan den första hamnar 3V3 på
+  pumpens ingång; utan den andra ser pumpen givaren i serie med R1 *och* en
+  ~1 kΩ shunt genom R2 in i den döda modulens ESD-diod; utan den tredje hänger
+  digipotarna kvar parallellt. Kontakterna måste vara **guldpläterade och
+  bifurkerade** — det här är en torrkrets på tiotals mikroampere, och ett vanligt
+  effektreläs silverkontakter bygger oxidfilm och blir glappande. Båda spolarna
+  på samma drivsteg, annars kan polerna hamna i otakt.
 - **Under `perceived_min_c` kommenderas det kallaste hårdvaran kan visa**, och
   gapet rapporteras kvantifierat (`range_shortfall`, gap × `curve_slope` = kelvin
   framledning som fattas). `heat_pump.perceived_min_c` är ändringsbar i drift, så
@@ -389,11 +436,52 @@ hpmpc run / hpmpc serve
 
 ---
 
+## Var vi står
+
+Kortet är **konstruerat och dokumenterat, men inte byggt.** Designen är låst efter
+en genomgång som gav fem beslut värda att inte riva upp:
+
+1. **Två MCP41100 i serie** direkt från start — en enda tar slut vid −7,4 °C.
+2. **5 V-matning till U1/U2/U3, tagen från skruvplinten**, eftersom pumpen
+   exciterar med uppmätta 4,97 V.
+3. **74HCT125** som följd av det — C3:ans 3,3 V når inte 0,7 × VDD.
+4. **Bygeln PA0↔wiper** i stället för fast failsafe-motstånd på ett relä.
+5. **Reläväxlingen uppskjuten** till steg 2, med larm som ersättning och tre lösa
+   trådbyglar (L1–L3) på kortet så tillägget inte rör något annat.
+
+Användaren har modul, potentiometrar, plintar, hållare, hylslister, 3× 100 nF,
+20 kΩ, 4,7 kΩ, 1 kΩ och ett 70 × 50 mm hålmatriskort. Kvar att köpa: 74HCT125 +
+14-polig hållare, en fjärde 100 nF, ett 4,7 kΩ till, två 10 kΩ och en tvåpolig
+5 V-adapter.
+
+Byggblad med schema, nätlista, zonplan och idrifttagningsordning finns som artefakt
+i den session där kortet togs fram; källan till samma innehåll är
+`docs/HARDWARE.md#kortet` och kommentarerna i ESPHome-filen.
+
 ## Nästa steg för användaren
 
+**A. Bygg och verifiera kortet** (`docs/HARDWARE.md#kortet`, och
+idrifttagningslistan sist i ESPHome-filen). Kort: matningen med tomma hållare,
+bufferten ensam, potentiometrarna utan pumpen, det strömlösa provet över J2,
+delaren mot kända motstånd. Först därefter pumpen.
+
+**B. Koppla ihop ESP32:n med hpmpc.** Det är den öppna arbetsuppgiften när
+hårdvaran finns, och det som troligen behöver ses över:
+- `pot.devices: 2`, `pot.resistance_ohm`/`wiper_ohm` från multimetern,
+  `heat_pump.perceived_min_c: -20`.
+- `entities.outdoor_temp` kan äntligen peka på nodens `Verklig utetemperatur` —
+  räkna med ett steg i träningsdatan mot den SMHI-härledda historiken.
+- `entities.pot_wiper` mot wiperavläsningen, och kontrollera vad `hpmpc check`
+  säger om ställdonskedjan.
+- De två ställena i `ha/packages/heatpump_mpc.yaml` som fortfarande antar en
+  krets: `{% set pots = 1 %}` och ändlägeslarmets `to: "255"`.
+- `binary_sensor.varmepump_proxy_online` in i en HA-automation — helst en som
+  stänger av värmen, inte bara notifierar.
+
+**C. Sedan den ursprungliga listan:**
 1. `hpmpc providers` — stäm av marginalkostnaden mot elfakturan.
-2. Bestäm vilken givare som ska emuleras (helst innedelens externa, inte R1T).
-3. `hpmpc calibrate-ntc` på den faktiska givaren.
+2. Bestäm vilken givare som emuleras (helst innedelens externa, inte R1T).
+3. `hpmpc calibrate-ntc` mot pumpens display.
 4. `hpmpc curve` med de två kurvpunkterna från pumpens display.
 5. En vecka `hpmpc excite`.
 6. `hpmpc collect && hpmpc train && hpmpc power`.

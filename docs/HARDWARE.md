@@ -1,15 +1,18 @@
 # Givaren och potentiometern
 
-Två saker som görs sällan men måste göras rätt: kalibrera NTC-tabellen mot
-pumpen, och gå över till två potentiometrar i serie när räckvidden tar slut.
+Hur ställdonet byggs, och de två sakerna som görs sällan men måste göras rätt:
+kalibrera NTC-tabellen mot pumpen, och gå över till två potentiometrar i serie
+när räckvidden tar slut.
 
-Läs `INSTALL.md` först — det här förutsätter att systemet redan kör.
+Läs `INSTALL.md` först — de numrerade avsnitten förutsätter att systemet redan
+kör. Ska du bygga kortet är det [Kortet](#kortet) som gäller.
 
 ---
 
 ## Innehåll
 
 - [Varför det här spelar roll](#varför-det-här-spelar-roll)
+- [Kortet](#kortet)
 - [1. Kalibrera NTC-tabellen](#1-kalibrera-ntc-tabellen)
 - [2. Gå över till två MCP41100 i serie](#2-gå-över-till-två-mcp41100-i-serie)
 - [Två tabeller som måste vara överens](#två-tabeller-som-måste-vara-överens)
@@ -35,6 +38,255 @@ pumpens `heat_stop_temp`, `perceived_min_c`/`perceived_max_c`, och semesterläge
 att en inställning gör något annat än den säger.
 
 Så: kalibrera, men få inte panik över en halv grad.
+
+---
+
+## Kortet
+
+Ställdonet är ett hålmatriskort med en ESP32-C3, två digitalpotentiometrar i
+serie och en nivåomvandlare. Det driver pumpens givaringång, och läser samtidigt
+husets riktiga utegivare på en ADC-kanal.
+
+`ha/esphome_daikin_outdoor_sensor.yaml` är firmware för exakt den här
+uppsättningen, och dess kommentarer bär idrifttagningsordningen.
+
+### Vad som sitter på det
+
+| Bet. | Komponent | Roll |
+|---|---|---|
+| A1 | Waveshare ESP32-C3-Zero-M | 18 stift, 9 per rad |
+| U1, U2 | MCP41100, 8-pol DIP | i serie → 0–200 kΩ mot pumpen |
+| U3 | **74HCT125**, 14-pol DIP | 3,3 V → 5 V på SCK, SI, CS1 och CS2 |
+| R1 | 20 kΩ metallfilm 1 % | referensmotstånd i givardelaren |
+| R2 | 1 kΩ | serieskydd vid ADC-stiftet, värdet okritiskt |
+| R3, R4 | 4,7 kΩ | pull-up på CS1 och CS2, på buffertens 3,3 V-sida |
+| R7, R8 | 10 kΩ | pull-down på SCK och SI, samma sida |
+| C1–C4 | 100 nF X7R | avkoppling, en per krets plus en vid ADC-stiftet |
+| J1, J2, J3 | skruvplint 4-pol | givaren, pumpen, matningen |
+
+### Två rälar, och varför
+
+Pumpens givarterminaler mäter **4,97 V i tomgång** — det är rälen bakom dess
+pull-up, och därmed taket för vad potentiometerns terminaler kan nå när banan
+står högt. MCP41100:ans terminaler får aldrig gå över dess egen VDD, så:
+
+- **U1, U2 och U3 matas med 5 V**, taget direkt från J3.1. Inte från modulens
+  `5V`-stift — en del Zero-kort har en diod från USB och levererar 4,6 V, vilket
+  ligger under pumpens räl. Felet skulle bara märkas i de kallaste lägena.
+- **Delaren och modulen går på 3,3 V** från modulens egen regulator.
+
+Vid VDD = 5 V kräver MCP41100 3,5 V för att garanterat läsa en etta
+(0,7 × VDD), och C3:an ger 3,3 V. Därför är **74HCT125 inte valfri**: TTL-ingångar
+tar allt över 2,0 V och CMOS-utgångarna svänger till 5 V. Det måste stå **HCT**
+eller **AHCT** — en 74HC125 har samma 0,7 × VDD-tröskel och löser ingenting.
+
+Åt andra hållet kommer inga 5 V tillbaka: MCP41100 saknar utgång, så bussen är
+enkelriktad.
+
+> **Innan du bonderar jordarna:** kortets GND kopplas ihop med pumpens
+> givarretur, annars flyter potentiometrarnas terminaler. Mät först spänningen
+> mellan pumpens båda givarterminaler och skyddsjord, och mata ESP:n från en
+> **tvåpolig, ojordad** adapter — inte från en jordad laptop.
+
+### Stiftvalet
+
+Pinnarna är valda efter var de *sitter*, inte bara efter vad de kan. Fyra i
+varje rad går bort, och ingen av dem är självklar.
+
+| Stift | Namn | Nät | Varför |
+|---|---|---|---|
+| 1 | 5V | `+5V` | matning in från J3.1 |
+| 2 | GND | `GND` | jordbussens startpunkt |
+| 3 | 3V3 (OUT) | `+3V3` | delaren och pull-upparna |
+| 4 | GP0 | `ADC_IN` | ADC1_CH0, **och granne med 3V3 och GND** |
+| 5 | GP1 | `RELAY_DRV` | reserverad för steg 2 |
+| 6 | GP2 | — | strapping, måste ligga högt vid boot |
+| 7 | GP3 | — | ledig reserv |
+| 8 | GP4 | `CS1` | nederst i vänsterraden |
+| 9 | GP5 | `CS2` | granne med CS1 |
+| 10 | GP6 | `SPI_CLK` | nederst i högerraden |
+| 11 | GP7 | `SPI_SI` | granne med CLK |
+| 12 | GP8 | — | strapping, måste ligga högt vid boot |
+| 13 | GP9 | — | **BOOT-knappen sitter här** |
+| 14 | GP10 | — | kortets WS2812-lysdiod |
+| 15–16 | GP18, GP19 | — | USB DM och DP |
+| 17–18 | GP20, GP21 | — | UART0 |
+
+Att just GP0 blev ADC-ingång är ingen slump: den ligger direkt under 3V3 och
+GND, så R1, R2 och C3 får plats på tre intilliggande hålrader utan att någon
+analog tråd korsar kortet.
+
+### Delaren åt rätt håll
+
+```
+3V3 ── J1.1 ══ utegivaren ══ J1.2 ──┬──[ R2 1k ]──┬── GP0
+                                    │             │
+                               [ R1 20k ]     [ C3 100n ]
+                                    │             │
+                                   GND           GND
+```
+
+Vändningen avgör om det går att mäta alls. Med motståndet uppåt mot 3V3 och
+givaren mot jord hamnar hela vinterhalvåret över 2,5 V, där C3:ans ADC är
+komprimerad och mättar. Så här ger kyla **låg** spänning:
+
+| ute | givaren | ADC | känslighet |
+|---|---|---|---|
+| −30 °C | 348 kΩ | 0,18 V | 8,8 mV/K |
+| −20 °C | 197 kΩ | 0,30 V | 16 mV/K |
+| 0 °C | 67,6 kΩ | 0,75 V | 30 mV/K |
+| +20 °C | 25,4 kΩ | 1,46 V | 39 mV/K |
+| +30 °C | 16,0 kΩ | 1,83 V | 42 mV/K |
+
+Den dominerande felkällan är inte upplösningen utan ADC:ns absoluta offset och
+förstärkning, ett par procent per chip. Det felet är **inte** självläkande som
+NTC-tabellens är — kurvanpassningen absorberar det inte, för den här avläsningen
+går inte till pumpen. Trimma bort det en gång med `calibrate_linear` mot en
+referenstermometer.
+
+Givaren blir därmed en riktig `entities.outdoor_temp` — en mätning vid huset i
+stället för SMHI:s rutpunkt. Räkna med ett steg i träningsdatan när du byter, och
+kör `hpmpc train` igen när du har några veckor med den.
+
+### Nätlista
+
+Den auktoritativa listan. Kontinuitetsmät varje rad med tomma hållare och
+modulen ur, innan något sätts i.
+
+| Nät | Antal | Förbindelser |
+|---|---|---|
+| `GND` | 18 | J3.2 · A1 stift 2 · U1 stift 4 · U2 stift 4 · **U2 stift 7 (PB0)** · U3 stift 1, 4, 7, 10, 13 · J2.2 · R1 nedre · R7 nedre · R8 nedre · C1–C4 jordsida |
+| `+5V` | 8 | **J3.1** · A1 stift 1 · U1 stift 8 · U2 stift 8 · U3 stift 14 · C1, C2, C4 |
+| `+3V3` | 4 | A1 stift 3 · J1.1 (via L1) · R3 övre · R4 övre |
+| `NTC_SENSE` | 3 | J1.2 (via L2) · R1 övre · R2 |
+| `ADC_IN` | 3 | R2 · C3 signalsida · A1 stift 4 |
+| `CS1` | 3 | A1 stift 8 · U3 stift 9 · R3 nedre |
+| `CS1_5V` | 2 | U3 stift 8 · U1 stift 1 |
+| `CS2` | 3 | A1 stift 9 · U3 stift 12 · R4 nedre |
+| `CS2_5V` | 2 | U3 stift 11 · U2 stift 1 |
+| `SPI_CLK` | 3 | A1 stift 10 · U3 stift 2 · R7 övre |
+| `SPI_CLK_5V` | 3 | U3 stift 3 · U1 stift 2 · U2 stift 2 |
+| `SPI_SI` | 3 | A1 stift 11 · U3 stift 5 · R8 övre |
+| `SPI_SI_5V` | 3 | U3 stift 6 · U1 stift 3 · U2 stift 3 |
+| `POT_HI` | 3 | U1 stift 6 (PW0) · U1 stift 5 (PA0) · J2.1 (via L3) |
+| `POT_MID` | 3 | U1 stift 7 (PB0) · U2 stift 6 (PW0) · U2 stift 5 (PA0) |
+
+**Alla fyra pull-motstånden sitter på buffertens 3,3 V-sida**, alltså mellan
+modulen och U3 — inte på potentiometrarnas chip-select-stift. R3 och R4 håller
+`CS1` och `CS2` höga medan modulen bootar och dess stift ännu är högimpedanta;
+R7 och R8 gör samma sak nedåt för klocka och data. Sätter man dem efter
+bufferten motarbetar de i stället dess utgång.
+
+**U2 stift 7 är PB0**, inte en matningsanslutning — det är potentiometerkedjans
+nedre ände och ska ligga på jord. Lätt att missa i en rad av VSS-stift.
+
+`74AHCT125N` fungerar lika bra som `74HCT125N`: AHCT har samma TTL-ingångar,
+allt över 2,0 V räknas som hög. Bara en ren `74HC125` vore fel. Enable är
+aktiv-låg, så alla fyra `OE` går till GND.
+
+### 74AHCT125, 14-polig DIP
+
+| Stift | Namn | Nät |
+|---|---|---|
+| 1 | 1OE | `GND` |
+| 2 | 1A · in | `SPI_CLK` |
+| 3 | 1Y · ut | `SPI_CLK_5V` |
+| 4 | 2OE | `GND` |
+| 5 | 2A · in | `SPI_SI` |
+| 6 | 2Y · ut | `SPI_SI_5V` |
+| 7 | GND | `GND` |
+| 8 | 3Y · ut | `CS1_5V` |
+| 9 | 3A · in | `CS1` |
+| 10 | 3OE | `GND` |
+| 11 | 4Y · ut | `CS2_5V` |
+| 12 | 4A · in | `CS2` |
+| 13 | 4OE | `GND` |
+| 14 | VCC | `+5V`, med C4 över stift 14 och 7 |
+
+Kanal 3 och 4 är spegelvända: på högra sidan kommer *utgången* före ingången.
+Stift 8 är alltså en utgång, stift 9 en ingång.
+
+### Lägg modulen på tvären
+
+Pinouten avgör layouten. Upprätt hamnar matningen och alla ADC-stift i ena raden
+och SPI-stiften i den andra, så signalerna måste korsa kortet. **Lagd på sidan
+med USB-C mot kortkanten** hamnar matning och analog klunga i modulens ena ände
+och alla fyra digitala stiften i den andra.
+
+På ett 70 × 50 mm kort:
+
+- **J1 och J2 diagonalt** — nedre vänstra och övre högra hörnet. Det är två
+  likadana tvåledarkablar och den ena får inte hamna där den andra ska sitta.
+  Märk plintarna med penna medan du löder.
+- **Analog klunga** (R1, R2, C3) vid modulens stift 2–4.
+- **U3, U1, U2** till höger, nära stift 8–11.
+- **Radavståndet mellan modulens stiftrader** är troligen 6 hål — mät, och löd
+  hylslisterna med modulen isatt så de blir parallella. Det är det enda måttet
+  som inte går att rätta efteråt.
+
+Lödningen: **blank förtennad tråd på ovansidan** för `GND` och `+5V`, som är
+näten med flest anslutningar; **isolerad enkeltrådig tråd på undersidan** för
+signalerna, som korsar varandra; **avklippta komponentben** för hopp på två–tre
+hål. Kedjor av hopklickade lödöar drar mycket tenn, ger kalla fogar i mitten och
+går inte att ändra — två öar ihop går bra, tio gör det inte.
+
+### Tre trådbyglar som håller dörren öppen
+
+Löd de här tre som **lösa byglar i avvikande färg**, inte som fasta trådar:
+
+| Bygel | Från | Till |
+|---|---|---|
+| L1 | `+3V3` | J1.1 — givarens tråd A |
+| L2 | J1.2 — givarens tråd B | `NTC_SENSE`, mätnoden |
+| L3 | `POT_HI`, U1 stift 5+6 | J2.1 |
+
+Det är exakt de tre som reläväxlingen i steg 2 tar över. Klipp tre, koppla in
+sex, och ingenting annat på kortet rörs.
+
+### Steg 2: reläväxlingen, om den behövs
+
+Säkerhetstrappan i ESPHome-filen har fem lager. Lager 1–4 klarar sig utan extra
+hårdvara — de förutsätter att noden lever. Bara det femte, *ESP:n strömlös medan
+pumpen går*, behöver ett relä.
+
+Utan relä: potentiometrarnas motståndsbanor är passiva och PA0 är byglad till
+PW0 på varje krets, så pumpen ser omkring 200 kΩ ≈ −20 °C. Fel, men en avläsning
+och inte ett givarfel. **Verifiera det vid idrifttagningen** — dra kortets
+matning och mät över J2. Blir det oändligt är byglarna fel dragna.
+
+Tre poler växlar i steg 2, och alla tre behövs:
+
+| Pol | Gemensam | Draget — normalt | Släppt — bypass |
+|---|---|---|---|
+| 1 | givarens tråd A | `+3V3` | pumpens terminal A |
+| 2 | givarens tråd B | `NTC_SENSE` | `GND` |
+| 3 | pumpens terminal A | `POT_HI` | bruten |
+
+Utan pol 1 hamnar +3V3 rakt på pumpens givaringång. Utan pol 2 ser pumpen
+givaren i serie med R1, och pumpens ström hittar dessutom en väg genom R2 in i
+den döda modulens ESD-diod — en ~1 kΩ shunt som fäller avläsningen. Utan pol 3
+hänger digipotarna kvar parallellt, vilket blir −7 °C när det är −20 ute.
+
+Vinsten är att pumpen då får **sanningen**, inte en mindre lögn. En oktoberdag
+vid +12 ute, med exempelkurvan `hpmpc curve --point=-15:40 --point=15:25`:
+
+| | pumpen visas | framledning |
+|---|---|---|
+| inget relä | −20 °C | 42,5 °C |
+| relä + fast 68 kΩ | 0 °C | 32,5 °C |
+| relä + riktiga givaren | +12 °C | 26,5 °C |
+
+Delar: **två DPDT-signalreläer med guldpläterade bifurkerade kontakter** och
+5 V-spole (Omron G6K-2F-Y; kontrollera *single side stable*, inte latching),
+en 2N7000, en 1N4148 och två motstånd. Ett vanligt effektrelä duger inte — det
+här är en torrkrets på tiotals mikroampere, och silverkontakter bygger oxidfilm
+vid de nivåerna och blir glappande. Driv **båda spolarna från samma drivsteg**,
+annars finns ett läge där den ena polen växlat och den andra inte.
+
+Tills dess är larmet ersättningen: `binary_sensor.varmepump_proxy_online` går
+`off` så fort noden slutar svara. Just det fel reläet finns för — kortets
+matning dör medan pumpen går — är per definition ett där Home Assistant och
+nätet är uppe. Sätt gärna ESP:ns adapter på samma säkring som pumpen också.
 
 ---
 
@@ -242,6 +494,22 @@ Pot:       2 x mcp41100 in series, 511 positions, 392 ohm per step
 
 Ingen `WARNING` om `perceived_min_c` betyder att inställningen och hårdvaran är
 överens.
+
+### Tre ställen till som måste följa med
+
+Antalet kretsar står på fler ställen än i `pot:`, och de sitter i olika filer.
+Missar du något av dem märks det inte förrän mitt i vintern.
+
+| var | vad |
+|---|---|
+| `config/config.yaml` | `pot.devices: 2` |
+| `ha/esphome_daikin_outdoor_sensor.yaml` | `DEVICES` i de två lambdorna, och `STEP_MAX` i `set_wiper` |
+| `ha/packages/heatpump_mpc.yaml` | `{% set pots = 1 %}` i mallen `Utegivare wiper` |
+| samma fil | automationen `MPC potentiometer at end stop` triggar på `"255"` — med två kretsar är ändläget 510, och 255 passeras varje gång wipern går förbi mitten |
+
+Den medskickade ESPHome-filen står redan på två kretsar. De två i HA-paketet
+gör det inte, eftersom exempelkonfigurationen fortfarande levereras med
+`devices: 1`.
 
 ### Låt hpmpc äga wiperkurvan
 
