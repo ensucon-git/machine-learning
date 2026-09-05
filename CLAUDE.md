@@ -256,14 +256,25 @@ terminalvärderingen fixar, fast i utvärderingen.
   senaste värde i fyra timmar och går sedan till `FAILSAFE_WIPER` (~0 °C).
   Det här revs upp en gång: en tidigare version slutade skriva under
   `perceived_min_c`, vilket var precis fel.
-- **Provet "strömlöst kort" kräver att USB-C också dras.** En modul som lever på
-  USB backmatar +5V-rälen genom ESD-dioderna på U3:s ingångar, så U1/U2 vaknar
-  halvvägs på ett par volt och svarar med varken kommenderat läge eller passiv
-  bana. Ett lågt värde med USB i betyder ingenting alls. (Uppmätt 61,6 kΩ i
-  stället för 195 en gång, av just den anledningen.) Är det lågt med allt urdraget
-  är det på riktigt: mät de två halvorna var för sig vid hållarna, vänd
-  mätsladdarna — resistivt läser lika åt båda håll, halvledare gör det inte — och
-  lyft sedan A1 ur sin hylslist.
+- **Ett lågt värde i provet "strömlöst kort" är en diod, inte ett motstånd.**
+  Uppmätt 61,6 kΩ i stället för 195 en gång. Det kan inte vara en parallell
+  läcka — hade en sådan funnits hade *det spänningssatta* provet vid wiper 510
+  läst 195 ∥ läckan, alltså just 61,6 k, och det läste 195,0. En resistans som
+  bara finns när matningen är borta är ingen resistans. Mätarens testspänning
+  leder in i POT_HI:s ESD-diod, upp i den flytande +5V-rälen och vidare till jord
+  genom modulens 5 V-stift. Kvittot: **värdet ändras med multimeterns
+  mätområde**, eftersom varje område har sin egen testspänning — ett verkligt
+  motstånd läser lika på alla områden som räcker till. Dra USB-C också (en modul
+  på USB backmatar rälen genom U3:s ingångsdioder), lyft A1 ur hylslisten och mät
+  om. Kvarstår det: **failsafe-värdet är då inte de 195 kΩ konstruktionen räknar
+  med**, och det enda prov som räknas är vad pumpens display säger med kortet
+  spänningslöst.
+- **Flussmedel spelar roll på det här kortet.** I drift är kedjan en torrkrets på
+  några tiotals mikroampere, så en läckbana på hundratals kΩ är ett förstahandsfel
+  och inte kosmetik. Tvätta med 99 % isopropanol och borste, båda sidor, och mät
+  först när det är helt torrt — blöt IPA leder själv. Har man ingen aning om
+  mätaren: mät ett känt motstånd (20 kΩ) på två områden. Skiljer de sig mer än
+  någon procent är det mätaren eller batteriet, inte kortet.
 - **Strömlöst kort ger ~200 kΩ, inte brott — tack vare bygeln PA0↔PW0.**
   Motståndsbanan i en MCP41100 är passiv, så med PA0 byglad till wipern ligger
   hela banan kvar när kretsen är spänningslös. Pumpen ser då ≈ −20 °C: fel, men
