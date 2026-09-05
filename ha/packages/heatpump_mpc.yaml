@@ -476,8 +476,9 @@ automation:
             {{ states('input_number.varmepump_fiktiv_utetemp') }} °C but the hardware cannot reach it,
             so the pump is being shown something other than what was asked for.
             This is a range limit, not a fault. With two MCP41100 in series the chain
-            spans about -20.3 to +30 C; check that heat_pump.perceived_min_c and
-            perceived_max_c match, with 'hpmpc ntc-table'.
+            spans about -19.8 to +30 C on the chips measured here; check that
+            heat_pump.perceived_min_c and perceived_max_c match, with
+            'hpmpc ntc-table'.
 
   # ---- Come home from holiday ------------------------------------------
   # The controller already ramps the comfort band back at the return time, and

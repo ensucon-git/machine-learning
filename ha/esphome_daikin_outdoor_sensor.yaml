@@ -330,7 +330,8 @@ number:
     id: target_temperature
     unit_of_measurement: "°C"
     device_class: temperature
-    # Deliberately wider than the hardware reaches (-20.3 C with two devices).
+    # Deliberately wider than the hardware reaches (-19.8 C measured on the
+    # two devices actually fitted; -20.3 is the nominal figure).
     # A template number REJECTS a value outside its range instead of clamping
     # it, so a narrow band here would silently drop writes from Home Assistant
     # rather than doing the nearest possible thing. The lambda below clamps to
@@ -360,10 +361,15 @@ number:
               break;
             }
           }
-          // Keep in step with pot: in config.yaml.
+          // Measured on this board at commissioning, not datasheet typicals.
+          // Keep in step with pot: in config.yaml - hpmpc uses the same two
+          // numbers to read the wiper back, so they must not drift apart.
+          //   wiper   0 ->     246 ohm   both wipers, 123 ohm each
+          //   wiper 255 ->  96 454 ohm   U1's track
+          //   wiper 510 -> 195 000 ohm   both tracks (U2 is 98 300)
           const int DEVICES = 2;
-          const float PER_STEP = 100000.0 / 255.0;
-          const float WIPER_OHM = 100.0;
+          const float PER_STEP = 97377.0 / 255.0;   // 381.9 ohm per step
+          const float WIPER_OHM = 123.0;
           int step = (int) lroundf((ohm - DEVICES * WIPER_OHM) / PER_STEP);
           if (step < 0) step = 0;
           if (step > 255 * DEVICES) step = 255 * DEVICES;
@@ -451,10 +457,10 @@ sensor:
                                 67628,52514,40991,32159,25354,20084,15984};
       const int N = 13;
       if (id(wiper_position) < 0) return {};
-      // Keep in step with pot: in config.yaml.
+      // Measured, not nominal - see the note in the number above.
       const int DEVICES = 2;
-      const float PER_STEP = 100000.0 / 255.0;
-      const float WIPER_OHM = 100.0;
+      const float PER_STEP = 97377.0 / 255.0;   // 381.9 ohm per step
+      const float WIPER_OHM = 123.0;
       float r = id(wiper_position) * PER_STEP + DEVICES * WIPER_OHM;
       if (r <= 0) return {};
       // R decreases as T increases, so walk down.
@@ -539,11 +545,22 @@ interval:
 #    UNDEFINED with a 3.3 V input, and at room temperature it would most likely
 #    read high and appear to work. Read the marking on the package instead.
 # 3. Fit the pots. Do NOT connect the pump yet. Command a few positions and
-#    measure across J2 with a multimeter:
-#       wiper   0 -> ~0.2 kohm      wiper 255 -> ~100 kohm
-#       wiper 128 -> ~50 kohm       wiper 510 -> ~200 kohm
+#    measure across J2 with a multimeter. Nominal, then what this board did:
+#
+#       wiper   0 -> ~0.2 kohm      0.246      both wipers, 123 ohm each
+#       wiper 128 -> ~50 kohm      48.7 kohm   check: model says 48.66
+#       wiper 255 -> ~100 kohm     96.7 kohm   U1's track alone
+#       wiper 383 -> ~150 kohm    146.3 kohm   check: model says 146.04
+#       wiper 510 -> ~200 kohm    195.0 kohm   both tracks
+#
+#    Three points solve the geometry and the other two check it - here to within
+#    0.08% and 0.18%, which is better than the multimeter. That single table
+#    proves the whole chain at once: both chip selects, the buffer, the SPI path
+#    and both resistive tracks. There is no other test that covers all of it.
+#
 #    The MCP41100 is a +/-20% part. Put what you MEASURED into pot.resistance_ohm
-#    and pot.wiper_ohm, and set pot.devices: 2.
+#    and pot.wiper_ohm, set pot.devices: 2, and copy the same two numbers into
+#    the PER_STEP and WIPER_OHM constants in the two lambdas above.
 # 4. Pull the board's power and measure across J2 again: about 200 kohm through
 #    the passive tracks, thanks to the PA0-to-PW0 straps. An open circuit here
 #    means the straps are wrong, and a dead board would be a sensor fault on the
