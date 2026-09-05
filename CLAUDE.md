@@ -256,6 +256,14 @@ terminalvärderingen fixar, fast i utvärderingen.
   senaste värde i fyra timmar och går sedan till `FAILSAFE_WIPER` (~0 °C).
   Det här revs upp en gång: en tidigare version slutade skriva under
   `perceived_min_c`, vilket var precis fel.
+- **Provet "strömlöst kort" kräver att USB-C också dras.** En modul som lever på
+  USB backmatar +5V-rälen genom ESD-dioderna på U3:s ingångar, så U1/U2 vaknar
+  halvvägs på ett par volt och svarar med varken kommenderat läge eller passiv
+  bana. Ett lågt värde med USB i betyder ingenting alls. (Uppmätt 61,6 kΩ i
+  stället för 195 en gång, av just den anledningen.) Är det lågt med allt urdraget
+  är det på riktigt: mät de två halvorna var för sig vid hållarna, vänd
+  mätsladdarna — resistivt läser lika åt båda håll, halvledare gör det inte — och
+  lyft sedan A1 ur sin hylslist.
 - **Strömlöst kort ger ~200 kΩ, inte brott — tack vare bygeln PA0↔PW0.**
   Motståndsbanan i en MCP41100 är passiv, så med PA0 byglad till wipern ligger
   hela banan kvar när kretsen är spänningslös. Pumpen ser då ≈ −20 °C: fel, men

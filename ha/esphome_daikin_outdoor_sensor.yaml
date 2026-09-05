@@ -561,10 +561,25 @@ interval:
 #    The MCP41100 is a +/-20% part. Put what you MEASURED into pot.resistance_ohm
 #    and pot.wiper_ohm, set pot.devices: 2, and copy the same two numbers into
 #    the PER_STEP and WIPER_OHM constants in the two lambdas above.
-# 4. Pull the board's power and measure across J2 again: about 200 kohm through
-#    the passive tracks, thanks to the PA0-to-PW0 straps. An open circuit here
-#    means the straps are wrong, and a dead board would be a sensor fault on the
-#    pump instead of a cold lie.
+# 4. Kill the board's power and measure across J2 again: about 195 kohm, which
+#    is both passive tracks end to end. The wiper switches open when VDD goes
+#    away, so what is left is PA0 to PB0 twice over - a resistance rather than
+#    the open circuit the pump would read as a sensor fault.
+#
+#    KILL MEANS KILL: pull the USB-C cable as well as the 5 V terminal. A module
+#    running on USB back-feeds the +5V rail through the ESD diodes on U3's
+#    inputs, so U1 and U2 come partly alive on a couple of volts and answer with
+#    something that is neither their commanded position nor their passive track.
+#    A reading well below 195 kohm with USB still plugged in means nothing at
+#    all except that the board was never off.
+#
+#    Too low with everything unplugged is a real finding: something is in
+#    parallel with the chain. Measure the two halves separately at the sockets -
+#    J2.1 to U1 pin 7 is U1's track, U1 pin 7 to U2 pin 7 is U2's - and if those
+#    two are right while the total is not, the leak is to ground, not a break.
+#    Reverse the meter leads: a resistive path reads the same both ways, a
+#    semiconductor or flux path does not. Then lift A1 out of its socket and
+#    repeat, since the module's own 5 V pin is the next thing on that rail.
 # 5. Feed a known resistor across J1 in place of the sensor and check the ADC
 #    chain: 20 kohm -> 1.650 V, 68 kohm -> 0.750 V, 200 kohm -> 0.300 V.
 # 6. Connect the pump with control.dry_run: true and offset 0. The pump's own
