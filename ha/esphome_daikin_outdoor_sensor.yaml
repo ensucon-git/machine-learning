@@ -6,8 +6,36 @@
 #
 #   Waveshare ESP32-C3-Zero-M      18 pins, 9 per row
 #   2 x MCP41100 in series         8-bit, 100 kohm each -> 0..200 kohm
-#   74HCT125                       3.3 V -> 5 V buffer on the four SPI lines
+#   74AHCT125N                     3.3 V -> 5 V buffer on the four SPI lines
 #   20 kohm 1% + 1 kohm + 100 nF   divider that reads the real outdoor sensor
+#
+#
+# REPLACING THE EXISTING NODE
+# ---------------------------------------------------------------------------
+# This board takes over from the single-MCP41100 node on a classic ESP32. It
+# keeps the same esphome name, so every entity id Home Assistant already has
+# survives the swap - number.varmepump_proxy_simulerad_utetemperatur and
+# sensor.varmepump_proxy_mcp41100_wiper_0_255 among them. Use the SAME
+# secrets.yaml: an unchanged api_encryption_key means Home Assistant reconnects
+# to the device it already knows instead of asking to adopt a new one.
+#
+# Three things change on the HA side, none of them breaking:
+#
+#   - switch.varmepump_proxy_emulated_outdoor_sensor_engaged is GONE. The old
+#     config had a relay on GPIO25; this board has none. Delete that entity in
+#     Home Assistant once the new firmware is running, or it sits there
+#     unavailable for ever.
+#   - Two entities appear: "Verklig utetemperatur" (the real outdoor sensor,
+#     which is what entities.outdoor_temp should eventually point at) and
+#     "Online" (the alarm that stands in for the stage-2 relay).
+#   - "Wiper target" now spans 0-510 instead of 0-255, because there are two
+#     devices. If you drive the wiper path from Home Assistant, the package's
+#     {% set pots = 1 %} and the end-stop automation's to: "255" both still
+#     assume one device - see docs/HARDWARE.md.
+#
+# FLASH THE FIRST TIME OVER USB-C, and pull J3 while you do it: some Zero
+# boards tie the 5V pin straight to USB, and feeding both at once puts two
+# supplies against each other. OTA works normally afterwards.
 #
 # Two ways to drive this node:
 #
@@ -147,15 +175,37 @@
 esphome:
   name: varmepump-proxy
   friendly_name: Varmepump proxy
+  on_boot:
+    # The MCP41100 resets ITS OWN wiper to mid-scale when it gets power - 128 on
+    # each device, so 256 of 510, about 100 kohm, which this pump reads as -7 C.
+    # Nothing would move it until Home Assistant wrote for the first time, and
+    # if the dead-man automation is off or HA is down that could be a long time
+    # to sit there heating.
+    #
+    # So take the pots away from mid-scale the moment SPI is up, and put them on
+    # the same safe position the watchdog uses. Priority -100 runs this after
+    # the bus and both devices are initialised.
+    priority: -100
+    then:
+      - lambda: |-
+          const int BOOT_WIPER = 172;          // ~0 C, same as FAILSAFE_WIPER
+          id(write_pots)->execute(BOOT_WIPER);
+          id(wiper_position) = BOOT_WIPER;
+          // last_command_ms stays 0 on purpose: nothing has commanded us yet,
+          // and the watchdog must not be fooled into thinking otherwise.
+          ESP_LOGW("hpmpc", "Boot: holding the safe position until commanded");
 
 esp32:
   board: esp32-c3-devkitm-1
   framework:
     type: esp-idf
 
-# GPIO20/21 carry UART0 and are deliberately left alone; the C3 logs over its
-# native USB serial/JTAG, so the console survives even with the header full.
 logger:
+  # The C3-Zero has native USB, so the console comes out of the USB-C socket and
+  # UART0 on GPIO20/21 stays free. Delete this line if your ESPHome version does
+  # not know the value - the only cost is that the boot log goes to UART0
+  # instead, where nothing is listening.
+  hardware_uart: USB_SERIAL_JTAG
 
 api:
   encryption:
@@ -280,7 +330,13 @@ number:
     id: target_temperature
     unit_of_measurement: "°C"
     device_class: temperature
-    min_value: -20            # two devices reach -20.3 C; below that they clamp
+    # Deliberately wider than the hardware reaches (-20.3 C with two devices).
+    # A template number REJECTS a value outside its range instead of clamping
+    # it, so a narrow band here would silently drop writes from Home Assistant
+    # rather than doing the nearest possible thing. The lambda below clamps to
+    # what the pots can actually deliver, and hpmpc's perceived_min_c is the
+    # limit that is supposed to do the thinking.
+    min_value: -25
     max_value: 30
     step: 0.1
     optimistic: true
