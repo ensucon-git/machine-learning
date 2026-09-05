@@ -573,13 +573,40 @@ interval:
 #    A reading well below 195 kohm with USB still plugged in means nothing at
 #    all except that the board was never off.
 #
-#    Too low with everything unplugged is a real finding: something is in
-#    parallel with the chain. Measure the two halves separately at the sockets -
-#    J2.1 to U1 pin 7 is U1's track, U1 pin 7 to U2 pin 7 is U2's - and if those
-#    two are right while the total is not, the leak is to ground, not a break.
-#    Reverse the meter leads: a resistive path reads the same both ways, a
-#    semiconductor or flux path does not. Then lift A1 out of its socket and
-#    repeat, since the module's own 5 V pin is the next thing on that rail.
+#    A low reading here is NOT a parallel leak, however much it looks like one.
+#    A leak would also have been in parallel during step 3, where wiper 510 read
+#    the full 195 kohm; 90 kohm of leakage would have made that read 61 kohm too.
+#    What appears only when the supply is gone is a junction: the meter's own
+#    test voltage drives POT_HI's ESD diode, up into the floating +5V rail, and
+#    down to ground through whatever sits on it - mostly the module's 5 V pin.
+#    The tell is that the reading CHANGES WITH THE METER'S RANGE, since each
+#    range applies a different test voltage. A real resistor reads the same on
+#    every range that can display it.
+#
+#    Pulling A1 out of its socket does NOT settle it. Tried here: 61.6 kohm with
+#    the module in, 41.6 kohm with it out - lower, not higher, so the module was
+#    never the drain. Do not spend an evening chasing that.
+#
+#    Do not chase any of it with an ohmmeter, in fact. An unpowered CMOS part is
+#    a mesh of junctions whose apparent resistance depends on the test voltage
+#    the meter happens to apply, and flux residue on an unwashed board conducts
+#    in the same range and drifts under DC bias. Wash the board first - 99%
+#    isopropanol, a brush, both sides, bone dry before measuring, because in
+#    service this chain is a dry circuit of a few tens of microamps and residue
+#    is a first-order error rather than cosmetics. Then measure it the way the
+#    pump does, with the meter on VOLTS, which is the range a cheap meter can
+#    actually be trusted on:
+#
+#      5 V ---[ R_ref, ~100 kohm ]--- J2.1 ... J2.2 --- supply ground
+#
+#    Read the voltage across J2 and solve R = V * R_ref / (5 - V). That is the
+#    pump's own circuit at the pump's own excitation, and it answers the only
+#    question that matters: what does a dead board present to the pump?
+#
+#    The definitive version of that test is the pump itself - connect it with
+#    the board unpowered and read its display. Nothing about this blocks
+#    commissioning either way: the powered behaviour is already proven by step
+#    3, and what is in doubt here is only how good the dead-board fallback is.
 # 5. Feed a known resistor across J1 in place of the sensor and check the ADC
 #    chain: 20 kohm -> 1.650 V, 68 kohm -> 0.750 V, 200 kohm -> 0.300 V.
 # 6. Connect the pump with control.dry_run: true and offset 0. The pump's own

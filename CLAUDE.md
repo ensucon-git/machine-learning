@@ -256,14 +256,30 @@ terminalvärderingen fixar, fast i utvärderingen.
   senaste värde i fyra timmar och går sedan till `FAILSAFE_WIPER` (~0 °C).
   Det här revs upp en gång: en tidigare version slutade skriva under
   `perceived_min_c`, vilket var precis fel.
-- **Provet "strömlöst kort" kräver att USB-C också dras.** En modul som lever på
-  USB backmatar +5V-rälen genom ESD-dioderna på U3:s ingångar, så U1/U2 vaknar
-  halvvägs på ett par volt och svarar med varken kommenderat läge eller passiv
-  bana. Ett lågt värde med USB i betyder ingenting alls. (Uppmätt 61,6 kΩ i
-  stället för 195 en gång, av just den anledningen.) Är det lågt med allt urdraget
-  är det på riktigt: mät de två halvorna var för sig vid hållarna, vänd
-  mätsladdarna — resistivt läser lika åt båda håll, halvledare gör det inte — och
-  lyft sedan A1 ur sin hylslist.
+- **Ett lågt värde i provet "strömlöst kort" är en diod, inte ett motstånd.**
+  Uppmätt 61,6 kΩ i stället för 195 en gång. Det kan inte vara en parallell
+  läcka — hade en sådan funnits hade *det spänningssatta* provet vid wiper 510
+  läst 195 ∥ läckan, alltså just 61,6 k, och det läste 195,0. En resistans som
+  bara finns när matningen är borta är ingen resistans. Mätarens testspänning
+  leder in i POT_HI:s ESD-diod, upp i den flytande +5V-rälen och vidare till jord
+  genom modulens 5 V-stift. Kvittot: **värdet ändras med multimeterns
+  mätområde**, eftersom varje område har sin egen testspänning — ett verkligt
+  motstånd läser lika på alla områden som räcker till. Dra USB-C också (en modul
+  på USB backmatar rälen genom U3:s ingångsdioder). **Att lyfta A1 löser det
+  inte** — prövat: 61,6 kΩ med modulen i, 41,6 kΩ med den ur, alltså lägre och
+  inte högre, så modulen var aldrig avloppet. Jaga det inte med ohmmeter alls:
+  en ospänningssatt CMOS-krets är ett nät av övergångar vars skenbara resistans
+  beror på mätarens testspänning. **Mät i stället som pumpen gör, med mätaren på
+  volt** — 5 V genom ett känt R_ref till J2.1, jord på J2.2, och R = V·R_ref/(5−V).
+  Definitiva versionen är pumpens egen display med kortet spänningslöst.
+  Ingenting av det blockerar idrifttagningen: det spänningssatta uppförandet är
+  redan bevisat, det som är oklart är bara hur bra reservläget är.
+- **Flussmedel spelar roll på det här kortet.** I drift är kedjan en torrkrets på
+  några tiotals mikroampere, så en läckbana på hundratals kΩ är ett förstahandsfel
+  och inte kosmetik. Tvätta med 99 % isopropanol och borste, båda sidor, och mät
+  först när det är helt torrt — blöt IPA leder själv. Har man ingen aning om
+  mätaren: mät ett känt motstånd (20 kΩ) på två områden. Skiljer de sig mer än
+  någon procent är det mätaren eller batteriet, inte kortet.
 - **Strömlöst kort ger ~200 kΩ, inte brott — tack vare bygeln PA0↔PW0.**
   Motståndsbanan i en MCP41100 är passiv, så med PA0 byglad till wipern ligger
   hela banan kvar när kretsen är spänningslös. Pumpen ser då ≈ −20 °C: fel, men
@@ -451,8 +467,14 @@ hpmpc run / hpmpc serve
 
 ## Var vi står
 
-Kortet är **konstruerat och dokumenterat, men inte byggt.** Designen är låst efter
-en genomgång som gav fem beslut värda att inte riva upp:
+Kortet är **byggt, lött och uppmätt.** Potentiometerkedjan är verifierad (se
+"Verifierat" ovan) och hela konfigurationen — `pot:`, `perceived_min_c`, ESPHome-
+filens två lambdor och HA-paketets wipermall — står på de uppmätta talen. Kvar
+innan pumpen kopplas in: tvätta bort flussmedlet, delarprovet mot kända motstånd
+över J1, och pumpens thermistor flyttad till kortet. Reservlägets faktiska värde
+(det strömlösa provet) är fortfarande obesvarat och avgörs bäst av pumpens display.
+
+Designen är låst efter en genomgång som gav fem beslut värda att inte riva upp:
 
 1. **Två MCP41100 i serie** direkt från start — en enda tar slut vid −7,4 °C.
 2. **5 V-matning till U1/U2/U3, tagen från skruvplinten**, eftersom pumpen
@@ -461,11 +483,6 @@ en genomgång som gav fem beslut värda att inte riva upp:
 4. **Bygeln PA0↔wiper** i stället för fast failsafe-motstånd på ett relä.
 5. **Reläväxlingen uppskjuten** till steg 2, med larm som ersättning och tre lösa
    trådbyglar (L1–L3) på kortet så tillägget inte rör något annat.
-
-Användaren har modul, potentiometrar, plintar, hållare, hylslister, 3× 100 nF,
-20 kΩ, 4,7 kΩ, 1 kΩ och ett 70 × 50 mm hålmatriskort. Kvar att köpa: 74HCT125 +
-14-polig hållare, en fjärde 100 nF, ett 4,7 kΩ till, två 10 kΩ och en tvåpolig
-5 V-adapter.
 
 Byggblad med schema, nätlista, zonplan och idrifttagningsordning finns som artefakt
 i den session där kortet togs fram; källan till samma innehåll är
@@ -478,16 +495,16 @@ idrifttagningslistan sist i ESPHome-filen). Kort: matningen med tomma hållare,
 bufferten ensam, potentiometrarna utan pumpen, det strömlösa provet över J2,
 delaren mot kända motstånd. Först därefter pumpen.
 
-**B. Koppla ihop ESP32:n med hpmpc.** Det är den öppna arbetsuppgiften när
-hårdvaran finns, och det som troligen behöver ses över:
-- `pot.devices: 2`, `pot.resistance_ohm: 97377`, `pot.wiper_ohm: 123` (uppmätta),
-  `heat_pump.perceived_min_c: -19.5` (uppmätt räckvidd, se ovan).
-- `entities.outdoor_temp` kan äntligen peka på nodens `Verklig utetemperatur` —
-  räkna med ett steg i träningsdatan mot den SMHI-härledda historiken.
-- `entities.pot_wiper` mot wiperavläsningen, och kontrollera vad `hpmpc check`
-  säger om ställdonskedjan.
-- De två ställena i `ha/packages/heatpump_mpc.yaml` som fortfarande antar en
-  krets: `{% set pots = 1 %}` och ändlägeslarmets `to: "255"`.
+**B. Koppla ihop ESP32:n med hpmpc — gjort.** `pot.devices: 2`,
+`resistance_ohm: 97377`, `wiper_ohm: 123`, `perceived_min_c: -19.5`, HA-paketets
+`pots = 2`, ändlägeslarmet på `510` och wipermallen på de uppmätta talen.
+`entities.pot_wiper` pekade redan rätt. Kvar i den tråden:
+- `entities.outdoor_temp` står **kvar tom med flit** tills pumpens termistor
+  sitter på kortets J1 — en ADC på en öppen ingång är ingen temperatur, och att
+  peka dit skulle förgifta träningsdatan i stället för att förbättra den. Räkna
+  med ett steg mot den SMHI-härledda historiken den dagen den byts.
+- `control.offset_min` lämnad på −6 med flit. Räckvidden tillåter mer nu, men
+  läs en vecka planer först (`docs/HARDWARE.md#sänk-inte-offsetgränserna-för-snabbt`).
 - `binary_sensor.varmepump_proxy_online` in i en HA-automation — helst en som
   stänger av värmen, inte bara notifierar.
 

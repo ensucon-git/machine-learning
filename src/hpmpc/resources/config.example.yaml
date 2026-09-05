@@ -38,6 +38,14 @@ entities:
   # SMHI automatically, no other setting changes. A sensor at the house is the
   # better signal when you have one: it measures the air this building actually
   # loses heat to, rather than a 2.5 km grid square.
+  #
+  # The proxy board has a channel for exactly that, and it publishes
+  # sensor.varmepump_proxy_verklig_utetemperatur. It stays empty here until the
+  # pump's own thermistor is actually moved onto the board's J1 - an ADC reading
+  # an open input is not a temperature, and pointing this at it would poison the
+  # training data rather than improve it. Expect a step against the SMHI-derived
+  # history on the day you do switch: it is a different measurement, not a
+  # better-calibrated version of the same one.
   outdoor_temp: ""
   price: ""                                       # only a fallback; see forecast.price_source
 
@@ -87,10 +95,13 @@ entities:
   # efficiency fit entirely, so its exact power never has to be known.
   ev_charging: binary_sensor.eh6nh5cd_charging
 
-  # What the ESP32 reports it is actually driving the potentiometer to, 0..255
-  # for an MCP41100. Without pump_outdoor_temp this is the only readback in the
-  # chain: it says the write arrived, and - more useful - it says when the
-  # hardware hit an end stop and clamped the value instead of applying it.
+  # What the ESP32 reports it is actually driving the potentiometer to. The
+  # entity id still says 0-255 because that is the name Home Assistant already
+  # has; with two devices in series the value spans 0-510, and 255 is the
+  # midpoint the wiper passes through every time the weather crosses about
+  # -7 C. Without pump_outdoor_temp this is the only readback in the chain: it
+  # says the write arrived, and - more useful - it says when the hardware hit an
+  # end stop and clamped the value instead of applying it.
   pot_wiper: sensor.varmepump_proxy_mcp41100_wiper_0_255
 
   # Outputs. Every one you configure is written every cycle - they are the same
@@ -196,12 +207,15 @@ heat_pump:
   # heating curve.
   #
   # IMPORTANT: these have to be inside what your hardware can actually reach.
-  # A single MCP41100 spans 0-100 kohm, which on the curve below bottoms out at
-  # about -7 C. Ask for colder than that and the pot sits at its end stop, the
-  # pump is shown -7 C on a -15 C day, and the house underheats with nothing in
-  # the logs to say why. 'hpmpc ntc-table' prints the reachable band and
+  # Ask for colder than the pot can deliver and it sits at its end stop, the
+  # pump is shown -19.5 C on a -25 C day, and the house underheats with nothing
+  # in the logs to say why. 'hpmpc ntc-table' prints the reachable band and
   # 'hpmpc check' compares it against these two numbers.
-  perceived_min_c: -7.0
+  #
+  # -19.5 is derived from the measured pot chain, not chosen: 195.0 kohm end to
+  # end is -19.83 C on the ntc: table. A single MCP41100 would have bottomed out
+  # at -7 C, which is what this said before the second device was fitted.
+  perceived_min_c: -19.5
   perceived_max_c: 25.0
 
   standby_power_w: 40
@@ -244,16 +258,31 @@ ntc:
 # Devices in series add range, not resolution. One MCP41100 reaches -7 C at
 # 0.10 K per step around freezing; two in series reach -20 C at the same step.
 # Range is the binding constraint here, not resolution.
-# What to buy for the second one: another MCP41100 - the same 100 kohm 8-bit
-# SPI digital potentiometer, not a plain 100 ohm resistor. Wire it in series
-# with the first (wiper and one end of each, so the two tracks add up), give it
-# its own chip-select pin, and set devices: 2 below. Nothing else changes.
+#
+# The numbers below are MEASURED on the board that is actually fitted, across
+# J2 with the pump disconnected, not the datasheet's nominal 100 kohm/100 ohm:
+#
+#   wiper   0     246 ohm    both wipers in series -> wiper_ohm 123 each
+#   wiper 128  48 700 ohm    check point, 0.08% from the model
+#   wiper 255  96 700 ohm    U1's track alone     -> 96 454 ohm
+#   wiper 383 146 300 ohm    check point, 0.18% from the model
+#   wiper 510 195 000 ohm    both tracks          -> U2 is 98 300 ohm
+#
+# resistance_ohm is per device, so it carries the mean of the two tracks.
+# 195.0 kohm at the end stop is -19.83 C on the ntc: table below, which is why
+# perceived_min_c is -19.5 and not the -20.3 that two nominal 100 kohm parts
+# would have reached. Both chips came out a little under their nominal value.
+#
+# Keep these in step with the two lambdas in ha/esphome_daikin_outdoor_sensor.yaml:
+# the node owns the temperature-to-wiper conversion, and 'hpmpc check' reads the
+# wiper back through THESE numbers, so a standing actuator error means the two
+# tables disagree rather than that the write failed to arrive.
 pot:
   model: mcp41100
-  resistance_ohm: 100000            # end to end, one device
+  resistance_ohm: 97377             # end to end, one device - measured
   steps: 256                        # tap positions, one device (8-bit)
-  devices: 1                        # how many are wired in series
-  wiper_ohm: 100                    # wiper resistance, present at every tap
+  devices: 2                        # how many are wired in series
+  wiper_ohm: 123                    # wiper resistance, present at every tap - measured
   series_ohm: 0                     # a fixed resistor in series, if you fit one
 
 control:
