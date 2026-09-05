@@ -583,16 +583,30 @@ interval:
 #    range applies a different test voltage. A real resistor reads the same on
 #    every range that can display it.
 #
-#    So: pull A1 out of its socket and measure again. If the chain comes back to
-#    195 kohm, the module was the drain. If it does not, the failsafe is not the
-#    195 kohm this design assumes, and the only test that settles it is what the
-#    pump's own display reads with the board unpowered - the pump excites at
-#    4.97 V, far above anything a multimeter applies.
+#    Pulling A1 out of its socket does NOT settle it. Tried here: 61.6 kohm with
+#    the module in, 41.6 kohm with it out - lower, not higher, so the module was
+#    never the drain. Do not spend an evening chasing that.
 #
-#    Clean the flux before believing any of these numbers. In service this chain
-#    is a dry circuit of a few tens of microamps, so a few hundred kohm of
-#    residue is a first-order error rather than cosmetics. 99% isopropanol, a
-#    brush, both sides, and measure only once it is bone dry.
+#    Do not chase any of it with an ohmmeter, in fact. An unpowered CMOS part is
+#    a mesh of junctions whose apparent resistance depends on the test voltage
+#    the meter happens to apply, and flux residue on an unwashed board conducts
+#    in the same range and drifts under DC bias. Wash the board first - 99%
+#    isopropanol, a brush, both sides, bone dry before measuring, because in
+#    service this chain is a dry circuit of a few tens of microamps and residue
+#    is a first-order error rather than cosmetics. Then measure it the way the
+#    pump does, with the meter on VOLTS, which is the range a cheap meter can
+#    actually be trusted on:
+#
+#      5 V ---[ R_ref, ~100 kohm ]--- J2.1 ... J2.2 --- supply ground
+#
+#    Read the voltage across J2 and solve R = V * R_ref / (5 - V). That is the
+#    pump's own circuit at the pump's own excitation, and it answers the only
+#    question that matters: what does a dead board present to the pump?
+#
+#    The definitive version of that test is the pump itself - connect it with
+#    the board unpowered and read its display. Nothing about this blocks
+#    commissioning either way: the powered behaviour is already proven by step
+#    3, and what is in doubt here is only how good the dead-board fallback is.
 # 5. Feed a known resistor across J1 in place of the sensor and check the ADC
 #    chain: 20 kohm -> 1.650 V, 68 kohm -> 0.750 V, 200 kohm -> 0.300 V.
 # 6. Connect the pump with control.dry_run: true and offset 0. The pump's own

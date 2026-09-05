@@ -265,10 +265,15 @@ terminalvärderingen fixar, fast i utvärderingen.
   genom modulens 5 V-stift. Kvittot: **värdet ändras med multimeterns
   mätområde**, eftersom varje område har sin egen testspänning — ett verkligt
   motstånd läser lika på alla områden som räcker till. Dra USB-C också (en modul
-  på USB backmatar rälen genom U3:s ingångsdioder), lyft A1 ur hylslisten och mät
-  om. Kvarstår det: **failsafe-värdet är då inte de 195 kΩ konstruktionen räknar
-  med**, och det enda prov som räknas är vad pumpens display säger med kortet
-  spänningslöst.
+  på USB backmatar rälen genom U3:s ingångsdioder). **Att lyfta A1 löser det
+  inte** — prövat: 61,6 kΩ med modulen i, 41,6 kΩ med den ur, alltså lägre och
+  inte högre, så modulen var aldrig avloppet. Jaga det inte med ohmmeter alls:
+  en ospänningssatt CMOS-krets är ett nät av övergångar vars skenbara resistans
+  beror på mätarens testspänning. **Mät i stället som pumpen gör, med mätaren på
+  volt** — 5 V genom ett känt R_ref till J2.1, jord på J2.2, och R = V·R_ref/(5−V).
+  Definitiva versionen är pumpens egen display med kortet spänningslöst.
+  Ingenting av det blockerar idrifttagningen: det spänningssatta uppförandet är
+  redan bevisat, det som är oklart är bara hur bra reservläget är.
 - **Flussmedel spelar roll på det här kortet.** I drift är kedjan en torrkrets på
   några tiotals mikroampere, så en läckbana på hundratals kΩ är ett förstahandsfel
   och inte kosmetik. Tvätta med 99 % isopropanol och borste, båda sidor, och mät
