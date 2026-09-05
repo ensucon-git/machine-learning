@@ -173,6 +173,13 @@ terminalvärderingen fixar, fast i utvärderingen.
   till 11,2 kW mot nominella 11.
 - Hemkomstplaneringen härleder framförhållningen: 20 h → startar direkt,
   30 h → väntar till t+16 h.
+- **Potentiometerkedjan är uppmätt på det byggda kortet** (2026-09): wiper 123 Ω
+  per krets, banorna 96,45 och 98,30 kΩ, 381,9 Ω per steg, 195,0 kΩ i ändläget
+  = **−19,83 °C**. Fem mätpunkter, två av dem kontroller som föll inom 0,2 % av
+  modellen — vilket samtidigt bevisar båda chip select, bufferten och SPI-vägen.
+  Siffrorna står i `docs/HARDWARE.md#mät-innan-du-litar-på-den` och i de två
+  lambdorna i ESPHome-filen. `perceived_min_c` ska vara **−19,5**, inte −20:
+  −20,3 är det nominella talet för 2 × 100 kΩ, inte det här kortet.
 
 **Antaget / ej verifierat:**
 - **Prestandakartans siffror är förankrade i publicerade mätpunkter för
@@ -183,9 +190,6 @@ terminalvärderingen fixar, fast i utvärderingen.
   blockerad av sessionens policy. Parsning, cachning, felhantering och
   reservvägar är testade mot mockade svar. `hpmpc providers` är första
   kommandot att köra på riktig maskin.
-- **`pot:`-siffrorna är MCP41100:ans typvärden** (100 kΩ ±20 %, 256 steg,
-  ~100 Ω wiper), inte uppmätta på den faktiska kretsen. Mät med multimeter vid
-  idrifttagning och skriv in `resistance_ohm`/`wiper_ohm`.
 - **NTC-tabellen är en typisk Daikin 20 kΩ-givare**, inte uppmätt på den
   faktiska givaren. `hpmpc calibrate-ntc` finns för att rätta det, och
   `entities.pump_outdoor_temp` för att verifiera det kontinuerligt — men den
@@ -222,7 +226,8 @@ terminalvärderingen fixar, fast i utvärderingen.
   `heat_pump.perceived_min_c: -7` i exempelkonfigurationen, därför varnar
   `hpmpc check`/`ntc-table` när den och `pot:` inte går ihop, och därför läses
   `entities.pot_wiper` tillbaka varje cykel. Fixen är en **andra MCP41100 i
-  serie** och `pot.devices: 2` → −20,3 °C vid samma steglängd. Seriekopplade
+  serie** och `pot.devices: 2` → −20,3 °C nominellt, uppmätt −19,8 på det
+  byggda kortet, vid samma steglängd. Seriekopplade
   kretsar ger räckvidd, inte upplösning.
 - **Pumpen exciterar givaringången med 4,97 V, uppmätt i tomgång.** Det är taket
   för vad potentiometerns terminaler kan nå, så **MCP-kretsarna måste matas med
@@ -251,6 +256,14 @@ terminalvärderingen fixar, fast i utvärderingen.
   senaste värde i fyra timmar och går sedan till `FAILSAFE_WIPER` (~0 °C).
   Det här revs upp en gång: en tidigare version slutade skriva under
   `perceived_min_c`, vilket var precis fel.
+- **Provet "strömlöst kort" kräver att USB-C också dras.** En modul som lever på
+  USB backmatar +5V-rälen genom ESD-dioderna på U3:s ingångar, så U1/U2 vaknar
+  halvvägs på ett par volt och svarar med varken kommenderat läge eller passiv
+  bana. Ett lågt värde med USB i betyder ingenting alls. (Uppmätt 61,6 kΩ i
+  stället för 195 en gång, av just den anledningen.) Är det lågt med allt urdraget
+  är det på riktigt: mät de två halvorna var för sig vid hållarna, vänd
+  mätsladdarna — resistivt läser lika åt båda håll, halvledare gör det inte — och
+  lyft sedan A1 ur sin hylslist.
 - **Strömlöst kort ger ~200 kΩ, inte brott — tack vare bygeln PA0↔PW0.**
   Motståndsbanan i en MCP41100 är passiv, så med PA0 byglad till wipern ligger
   hela banan kvar när kretsen är spänningslös. Pumpen ser då ≈ −20 °C: fel, men
@@ -467,8 +480,8 @@ delaren mot kända motstånd. Först därefter pumpen.
 
 **B. Koppla ihop ESP32:n med hpmpc.** Det är den öppna arbetsuppgiften när
 hårdvaran finns, och det som troligen behöver ses över:
-- `pot.devices: 2`, `pot.resistance_ohm`/`wiper_ohm` från multimetern,
-  `heat_pump.perceived_min_c: -20`.
+- `pot.devices: 2`, `pot.resistance_ohm: 97377`, `pot.wiper_ohm: 123` (uppmätta),
+  `heat_pump.perceived_min_c: -19.5` (uppmätt räckvidd, se ovan).
 - `entities.outdoor_temp` kan äntligen peka på nodens `Verklig utetemperatur` —
   räkna med ett steg i träningsdatan mot den SMHI-härledda historiken.
 - `entities.pot_wiper` mot wiperavläsningen, och kontrollera vad `hpmpc check`

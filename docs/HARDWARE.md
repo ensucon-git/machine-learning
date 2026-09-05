@@ -467,14 +467,42 @@ den andra.
 ### Mät innan du litar på den
 
 MCP41100 är en ±20 %-krets. Koppla bort pumpen, kommendera några wiperpositioner
-och mät med multimeter. Skriv in det du mätte:
+och mät med multimeter över J2.
+
+Så här mättes kortet i den här anläggningen:
+
+| wiper | U1 | U2 | uppmätt | modell |
+|---|---|---|---|---|
+| 0 | 0 | 0 | **0,246 kΩ** | bara de två wiperresistanserna |
+| 128 | 128 | 0 | **48,7 kΩ** | 48,66 kΩ |
+| 255 | 255 | 0 | **96,7 kΩ** | U1:s hela bana |
+| 383 | 255 | 128 | **146,3 kΩ** | 146,04 kΩ |
+| 510 | 255 | 255 | **195,0 kΩ** | båda banorna |
+
+Tre punkter räcker för att lösa ut geometrin — de andra två är kontrollen:
+
+- wiperresistans **123 Ω per krets** (246 Ω för paret)
+- U1:s bana **96,45 kΩ**, U2:s **98,30 kΩ**, alltså 97,4 kΩ i snitt
+- **381,9 Ω per steg** över hela kedjan
+
+De två kontrollpunkterna faller inom 0,08 % respektive 0,18 % av modellen. Det är
+bättre än multimetern, och det bevisar hela kedjan på en gång: båda chip select,
+bufferten, SPI-vägen och båda banorna. Stämmer den här tabellen är kortet klart —
+då, och först då, kopplas pumpen in.
+
+Skriv in det du mätte:
 
 ```bash
 docker compose exec hpmpc hpmpc set pot.devices 2
-docker compose exec hpmpc hpmpc set pot.resistance_ohm 98400    # per krets, uppmätt
-docker compose exec hpmpc hpmpc set pot.wiper_ohm 112           # uppmätt
-docker compose exec hpmpc hpmpc set heat_pump.perceived_min_c -20
+docker compose exec hpmpc hpmpc set pot.resistance_ohm 97377    # per krets, uppmätt
+docker compose exec hpmpc hpmpc set pot.wiper_ohm 123           # uppmätt
+docker compose exec hpmpc hpmpc set heat_pump.perceived_min_c -19.5
 ```
+
+Notera **−19,5, inte −20**. Nominellt (100 kΩ styck) når kedjan −20,3 °C, men de
+uppmätta 195,0 kΩ motsvarar **−19,83 °C** på Daikinkurvan. Kretsarna ligger båda
+strax under sitt nominella värde, och skillnaden är precis vad `perceived_min_c`
+finns till för att fånga.
 
 Kontrollera att räckvidden blev den du väntade dig:
 
@@ -483,13 +511,13 @@ docker compose exec hpmpc hpmpc ntc-table --low -20 --high 20
 ```
 
 ```
-Pot:       2 x mcp41100 in series, 511 positions, 392 ohm per step
-           reaches -20.3 to +30.0 degC
+Pot:       2 x mcp41100 in series, 511 positions, 382 ohm per step
+           reaches -19.8 to +30.0 degC
 
-  temp (C)         ohm   wiper     K per 392 ohm
-     -20.0      196648     501             0.031
-     -10.0      114003     290             0.056
-       0.0       67628     172             0.098
+  temp (C)         ohm   wiper     K per 382 ohm
+     -19.8      195000     510             0.040
+     -10.0      114003     298             0.055
+       0.0       67628     177             0.096
 ```
 
 Ingen `WARNING` om `perceived_min_c` betyder att inställningen och hårdvaran är
