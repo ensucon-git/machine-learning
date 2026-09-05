@@ -535,9 +535,13 @@ Missar du något av dem märks det inte förrän mitt i vintern.
 | `ha/packages/heatpump_mpc.yaml` | `{% set pots = 1 %}` i mallen `Utegivare wiper` |
 | samma fil | automationen `MPC potentiometer at end stop` triggar på `"255"` — med två kretsar är ändläget 510, och 255 passeras varje gång wipern går förbi mitten |
 
-Den medskickade ESPHome-filen står redan på två kretsar. De två i HA-paketet
-gör det inte, eftersom exempelkonfigurationen fortfarande levereras med
-`devices: 1`.
+Alla fyra står numera på två kretsar, och på de uppmätta 97 377 Ω / 123 Ω i
+stället för databladets 100 kΩ / 100 Ω. **Samma tabell finns alltså på tre
+ställen** — `pot:` i konfigurationen, de två lambdorna i ESPHome-filen och
+mallen `Utegivare wiper` i HA-paketet. Ändrar du geometrin på ett ställe måste
+de andra två följa med, annars börjar `hpmpc check` visa ett stående
+ställdonsfel som ser ut som ett hårdvarufel men bara är två tabeller som är
+oense.
 
 ### Låt hpmpc äga wiperkurvan
 

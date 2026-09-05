@@ -467,8 +467,14 @@ hpmpc run / hpmpc serve
 
 ## Var vi står
 
-Kortet är **konstruerat och dokumenterat, men inte byggt.** Designen är låst efter
-en genomgång som gav fem beslut värda att inte riva upp:
+Kortet är **byggt, lött och uppmätt.** Potentiometerkedjan är verifierad (se
+"Verifierat" ovan) och hela konfigurationen — `pot:`, `perceived_min_c`, ESPHome-
+filens två lambdor och HA-paketets wipermall — står på de uppmätta talen. Kvar
+innan pumpen kopplas in: tvätta bort flussmedlet, delarprovet mot kända motstånd
+över J1, och pumpens thermistor flyttad till kortet. Reservlägets faktiska värde
+(det strömlösa provet) är fortfarande obesvarat och avgörs bäst av pumpens display.
+
+Designen är låst efter en genomgång som gav fem beslut värda att inte riva upp:
 
 1. **Två MCP41100 i serie** direkt från start — en enda tar slut vid −7,4 °C.
 2. **5 V-matning till U1/U2/U3, tagen från skruvplinten**, eftersom pumpen
@@ -477,11 +483,6 @@ en genomgång som gav fem beslut värda att inte riva upp:
 4. **Bygeln PA0↔wiper** i stället för fast failsafe-motstånd på ett relä.
 5. **Reläväxlingen uppskjuten** till steg 2, med larm som ersättning och tre lösa
    trådbyglar (L1–L3) på kortet så tillägget inte rör något annat.
-
-Användaren har modul, potentiometrar, plintar, hållare, hylslister, 3× 100 nF,
-20 kΩ, 4,7 kΩ, 1 kΩ och ett 70 × 50 mm hålmatriskort. Kvar att köpa: 74HCT125 +
-14-polig hållare, en fjärde 100 nF, ett 4,7 kΩ till, två 10 kΩ och en tvåpolig
-5 V-adapter.
 
 Byggblad med schema, nätlista, zonplan och idrifttagningsordning finns som artefakt
 i den session där kortet togs fram; källan till samma innehåll är
@@ -494,16 +495,16 @@ idrifttagningslistan sist i ESPHome-filen). Kort: matningen med tomma hållare,
 bufferten ensam, potentiometrarna utan pumpen, det strömlösa provet över J2,
 delaren mot kända motstånd. Först därefter pumpen.
 
-**B. Koppla ihop ESP32:n med hpmpc.** Det är den öppna arbetsuppgiften när
-hårdvaran finns, och det som troligen behöver ses över:
-- `pot.devices: 2`, `pot.resistance_ohm: 97377`, `pot.wiper_ohm: 123` (uppmätta),
-  `heat_pump.perceived_min_c: -19.5` (uppmätt räckvidd, se ovan).
-- `entities.outdoor_temp` kan äntligen peka på nodens `Verklig utetemperatur` —
-  räkna med ett steg i träningsdatan mot den SMHI-härledda historiken.
-- `entities.pot_wiper` mot wiperavläsningen, och kontrollera vad `hpmpc check`
-  säger om ställdonskedjan.
-- De två ställena i `ha/packages/heatpump_mpc.yaml` som fortfarande antar en
-  krets: `{% set pots = 1 %}` och ändlägeslarmets `to: "255"`.
+**B. Koppla ihop ESP32:n med hpmpc — gjort.** `pot.devices: 2`,
+`resistance_ohm: 97377`, `wiper_ohm: 123`, `perceived_min_c: -19.5`, HA-paketets
+`pots = 2`, ändlägeslarmet på `510` och wipermallen på de uppmätta talen.
+`entities.pot_wiper` pekade redan rätt. Kvar i den tråden:
+- `entities.outdoor_temp` står **kvar tom med flit** tills pumpens termistor
+  sitter på kortets J1 — en ADC på en öppen ingång är ingen temperatur, och att
+  peka dit skulle förgifta träningsdatan i stället för att förbättra den. Räkna
+  med ett steg mot den SMHI-härledda historiken den dagen den byts.
+- `control.offset_min` lämnad på −6 med flit. Räckvidden tillåter mer nu, men
+  läs en vecka planer först (`docs/HARDWARE.md#sänk-inte-offsetgränserna-för-snabbt`).
 - `binary_sensor.varmepump_proxy_online` in i en HA-automation — helst en som
   stänger av värmen, inte bara notifierar.
 

@@ -275,8 +275,12 @@ template:
           {% if r is none %}
             {{ none }}
           {% else %}
-            {% set step = 100000 / 255 %}
-            {% set raw = ((r - 100 * pots) / step) | round(0) %}
+            {# Measured on the board, not the datasheet's nominal 100k/100 ohm.
+               Keep in step with pot: in config.yaml and the two lambdas in
+               ha/esphome_daikin_outdoor_sensor.yaml - three copies of the same
+               table, and they have to agree. #}
+            {% set step = 97377 / 255 %}
+            {% set raw = ((r - 123 * pots) / step) | round(0) %}
             {{ [[raw, 0] | max, 255 * pots] | min }}
           {% endif %}
 
