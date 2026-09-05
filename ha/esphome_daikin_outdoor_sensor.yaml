@@ -520,9 +520,24 @@ interval:
 #    MCP sockets, and between pin 14 and pin 7 of the U3 socket: 5 V, not 3.3.
 #    Wiring VDD to the wrong rail is the one mistake that can destroy both the
 #    chips and the pump's input.
-# 2. Fit U3 alone. Toggle CS1 and CS2 and measure U3 pins 8 and 11: they must
-#    swing 0 to 5 V, and rest at 5 V thanks to the pull-ups. 3.3 V out means you
-#    have an HC where an HCT belongs.
+# 2. Fit U3 alone and measure it AT REST. Do not try to toggle chip select: it
+#    is asserted only during a transfer, for about 16 us at 1 MHz, which no
+#    multimeter will ever see. The resting levels prove what matters anyway -
+#    that each channel passes its input through and lifts it to 5 V:
+#
+#      pin 9  (CS1 in)  3.3 V   ->  pin 8  (CS1 out)  5 V
+#      pin 12 (CS2 in)  3.3 V   ->  pin 11 (CS2 out)  5 V
+#      pin 2  (CLK in)  0 V     ->  pin 3  (CLK out)  0 V
+#
+#    Two high, one low, and the level shift visible on the chip-select pair.
+#    Pin 5/6 (SI) is not a useful check: MOSI holds the last bit of the last
+#    byte written, so it is legitimately either 0 or 5 V.
+#
+#    This does NOT distinguish an HCT from a plain HC, and nothing with a
+#    multimeter will: the output stage is push-pull either way, so it swings to
+#    VCC or to ground and never to something in between. HC would merely be
+#    UNDEFINED with a 3.3 V input, and at room temperature it would most likely
+#    read high and appear to work. Read the marking on the package instead.
 # 3. Fit the pots. Do NOT connect the pump yet. Command a few positions and
 #    measure across J2 with a multimeter:
 #       wiper   0 -> ~0.2 kohm      wiper 255 -> ~100 kohm
