@@ -20,7 +20,7 @@ bestämt, varför, och vilka fällor som redan är upptäckta.
 | Ort | Falkvägen, Norrköping (58.5877, 16.1924) |
 | Elområde | SE3, rörligt pris |
 | Elöverföring + energiskatt | **0,7084 kr/kWh exkl. moms** (= 0,8855 inkl.) |
-| Ställdon | **ESP32-C3-Zero-M** + **2× MCP41100** i serie (8 bitar, 100 kΩ styck, SPI) + **74HCT125** som nivåomvandlare, på pumpens utegivare. Bygget: `docs/HARDWARE.md#kortet` |
+| Ställdon | **ESP32-C3-Zero-M** + **2× MCP41100** i serie (8 bitar, 100 kΩ styck, SPI) + **74HCT125** som nivåomvandlare, på hydroboxens **KRCS01-1-ingång** — inte utedelens R1T. Bygget: `docs/HARDWARE.md#kortet` |
 | Effektmätning | Victron, **hela husets effekt per fas** — ingen mätare enbart på pumpen |
 | Elbilsladdare | 11 kW över alla tre faser, `binary_sensor.eh6nh5cd_charging` (`Charging` / `Not charging`) |
 | Körs på | NUC, Docker (Portainer), skilt från Home Assistant |
@@ -221,6 +221,8 @@ terminalvärderingen fixar, fast i utvärderingen.
   driftområdesgränser och om aggregatet får gå. Daikins innedel kan ta en extern
   utegivare (KRCS01-1) och via en field setting använda *den* för kurvan. Koden
   för den inställningen skiljer mellan generationer — slå upp i installatörsmanualen.
+  **Här är det KRCS01-1-ingången som emuleras** (bekräftat 2026-09), alltså rätt
+  givare: utedelens R1T är orörd och sköter fortfarande avfrostning och skydd.
 - **MCP41100:ans problem är räckvidden, inte upplösningen.** Det var fel i den
   här filen tidigare. 392 Ω per steg ger 0,10 K vid nollan och 0,29 K vid +20 —
   gott nog. Men 100 kΩ tar slut vid **−7,4 °C** på Daikinkurvan, och kallare än
@@ -543,7 +545,7 @@ delaren mot kända motstånd. Först därefter pumpen.
 
 **C. Sedan den ursprungliga listan:**
 1. `hpmpc providers` — stäm av marginalkostnaden mot elfakturan.
-2. Bestäm vilken givare som emuleras (helst innedelens externa, inte R1T).
+2. ~~Bestäm vilken givare som emuleras~~ — gjort: KRCS01-1-ingången.
 3. `hpmpc calibrate-ntc` mot pumpens display.
 4. `hpmpc curve` med de två kurvpunkterna från pumpens display.
 5. En vecka `hpmpc excite`.
