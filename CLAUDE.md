@@ -457,6 +457,21 @@ terminalvärderingen fixar, fast i utvärderingen.
   "pumpen får bara det satta värdet hela tiden". Slå på den i HA. Att den *måste*
   slås på manuellt är med flit: den är också nödstoppet, och ett nödstopp som
   återställer sig självt vid omstart vore inget nödstopp.
+- **Nodens `Simulerad utetemperatur` visar −25 när den är osatt.** Det är
+  `min_value`, och Home Assistant ritar ett reglage utan tillstånd i sitt
+  vänstra ändläge. Det ser ut som ett kommenderat värde men är ingenting — läs
+  `sensor.varmepump_proxy_mcp41100_wiper_0_255` i stället: står den på
+  `BOOT_WIPER` 172 har ingen skrivit till noden sedan den bootade. Skiljer på
+  "systemet kommenderar fel" och "systemet kommenderar inte alls".
+- **Kontrollern skriver ingenting alls utan `t_outdoor`.** `_write` returnerar
+  tidigt med `No outdoor temperature; skipping the write rather than inventing
+  one` i loggen — medvetet, eftersom varje utgång utom offseten är "ute + offset"
+  och en nolla vore ett påstående om att det är 0 °C ute till en pump som inte
+  har någon annan givare. Följden är att `input_number.varmepump_fiktiv_utetemp`
+  aldrig ändras, automationen aldrig triggas, och noden ligger kvar på
+  bootvärdet. Med tom `entities.outdoor_temp` hänger `t_outdoor` på SMHI eller
+  väderentiteten, alltså på just den vägen som aldrig anropats live — så
+  `hpmpc providers` och `docker compose logs hpmpc` är första två stegen.
 - **`git pull` uppdaterar inte containern.** Containern kör koden som bakades in
   i imagen; en pull rör bara källan på värden. Symptomet är förvirrande: ett
   `hpmpc set` svarar *"'heat_pump.perceived_min_c' is not changeable at runtime"*
