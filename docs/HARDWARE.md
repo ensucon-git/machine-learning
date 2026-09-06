@@ -305,6 +305,45 @@ nätet är uppe. Sätt gärna ESP:ns adapter på samma säkring som pumpen ocks�
 
 ## 1. Kalibrera NTC-tabellen
 
+### Svepet, punkt för punkt
+
+Kommendera `number.varmepump_proxy_wiper_target` och läs pumpens display. Talen
+nedan är räknade på den uppmätta potentiometergeometrin, så kolumnen "faktiskt
+ohm" är den halva av kalibreringsparet som redan är känd — displayen är den
+andra.
+
+| mål °C | wiper | faktiskt Ω | displayen visade |
+|---|---|---|---|
+| −19,5 | **502** | 191 945 | |
+| −15 | 390 | 149 176 | |
+| −10 | **298** | 114 043 | |
+| −5 | 229 | 87 694 | |
+| 0 | **176** | 67 455 | |
+| +5 | 137 | 52 562 | |
+| +10 | **107** | 41 106 | |
+| +15 | 84 | 32 323 | |
+| +20 | **66** | 25 449 | |
+| +25 | 52 | 20 103 | |
+
+De fem feta räcker om du har bråttom. Tio ger en tabell i stället för en
+tvåparametersanpassning, och `hpmpc calibrate-ntc` säger själv ifrån under fyra
+punkter.
+
+**Stäng av värmedriften på pumpen först.** KRCS01-1-ingången matar bara
+värmekurvan, så med värmen av händer ingenting när du kommenderar −19,5 °C —
+displayen läser ändå givaren. Utan det steget eldar pumpen för fullt i varje
+kall punkt, och svepet tar timmar i stället för minuter.
+
+Ta första punkten och **titta hur länge displayen rör sig** innan den står still.
+Pumpen filtrerar sin utegivare, och den tiden gäller sedan för alla punkter. Gissa
+inte — den skiljer mellan generationer.
+
+Fyra ställen bär NTC-kurvan och de måste vara överens: `ntc:` i konfigurationen,
+de två lambdorna i `ha/esphome_daikin_outdoor_sensor.yaml`, och `r25`/`beta` i
+mallen `Utegivare mAlresistans` i HA-paketet.
+
+
+
 ### Kalibrera mot pumpen, inte mot givaren
 
 Det naturliga är att mäta termistorn med multimeter. Gör inte det.
