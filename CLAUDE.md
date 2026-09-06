@@ -457,6 +457,19 @@ terminalvärderingen fixar, fast i utvärderingen.
   "pumpen får bara det satta värdet hela tiden". Slå på den i HA. Att den *måste*
   slås på manuellt är med flit: den är också nödstoppet, och ett nödstopp som
   återställer sig självt vid omstart vore inget nödstopp.
+- **`git pull` uppdaterar inte containern.** Containern kör koden som bakades in
+  i imagen; en pull rör bara källan på värden. Symptomet är förvirrande: ett
+  `hpmpc set` svarar *"'heat_pump.perceived_min_c' is not changeable at runtime"*
+  fast fältet står i `OVERRIDABLE` i repot — det står inte i imagens `OVERRIDABLE`.
+  Meddelandet handlar alltså inte om att systemet är igång, utan om att fältet
+  saknas i den kod som faktiskt kör. `hpmpc settings` listar vad imagen tror är
+  ändringsbart och avgör saken på en sekund. Fix: `docker compose up -d --build`.
+- **`ntc-table`:s "reaches" är räknad, inte inställd.** Den kommer ur `pot:` och
+  `ntc:` och läser aldrig `perceived_min_c`. Att ändra `perceived_min_c` kan
+  alltså inte flytta den siffran — det är den kontrollen jämförs *mot*. Två tal
+  som ser förvillande lika ut: med den gamla typiska Daikintabellen och den
+  uppmätta potentiometern blir räckvidden −19,83 → skrivs "−19.8", och den
+  ändras först när `ntc:`-tabellen byts (då till −20,4).
 - **Kalibrera mot pumpens display, inte mot givaren.** Ett par avlästa som
   "jag skickade R, pumpen säger T" innefattar kabelresistans, kontakt och
   pumpens egen linjärisering. En bänkmätning av termistorn missar allt det.
