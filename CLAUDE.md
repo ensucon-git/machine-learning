@@ -414,6 +414,16 @@ terminalvärderingen fixar, fast i utvärderingen.
   Wiper-vägen finns kvar utkommenterad i paketet. Följd: `hpmpc check` läser
   tillbaka wipern genom *hpmpc:s* `ntc:`/`pot:`, så ett stående ställdonsfel där
   betyder att de två tabellerna är oense — inte att något inte kommer fram.
+- **En öppen J1 är ingen temperatur, och noden får inte låtsas annat.** Utan
+  givare på J1 ligger delaren i botten, resistansen räknas till megaohm och
+  NTC-kurvan extrapolerar till något absurt men **ändligt** — ett tal som
+  Home Assistant tar på allvar, eftersom `sensor.utegivare_verklig` föredrar
+  nodens givare framför väderentiteten och varje skyddsnät i paketet läser den.
+  Ett kort på bänken utan givare skulle alltså kunna påstå −40 ute. Därför
+  filtrerar firmware bort allt utanför −45…+60 och publicerar då *ingenting*,
+  så mallen faller igenom som det var tänkt. Bandet är med flit vidare än
+  Norrköping någonsin blir: det är ett brott-i-kabeln-prov, inte ett
+  rimlighetsfilter på vädret.
 - **Kalibrera mot pumpens display, inte mot givaren.** Ett par avlästa som
   "jag skickade R, pumpen säger T" innefattar kabelresistans, kontakt och
   pumpens egen linjärisering. En bänkmätning av termistorn missar allt det.

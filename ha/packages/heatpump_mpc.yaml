@@ -196,7 +196,10 @@ template:
       # building actually loses heat to, rather than a weather provider's grid
       # point. It is safe to depend on because the list falls through - if the
       # node is offline the entity goes unavailable and the weather entity
-      # takes over. Drop that first line if your board has no sensor on J1.
+      # takes over. The same is true before the sensor is fitted: the node
+      # filters out anything from an open J1, so it publishes nothing rather
+      # than a number, and this list falls through on its own. Dropping the
+      # first line is therefore optional, not required.
       # ===================================================================
       - name: "Utegivare verklig"
         unique_id: hpmpc_real_outdoor
