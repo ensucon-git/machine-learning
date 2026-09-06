@@ -545,6 +545,14 @@ automation:
     trigger:
       - platform: state
         entity_id: input_number.varmepump_fiktiv_utetemp
+      # Switching MPC on has to push straight away. Without this the automation
+      # waits for the NEXT change of the fictitious temperature, so turning the
+      # system on appears to do nothing at all - the node keeps its boot value
+      # and the number entity sits unset, which Home Assistant renders as the
+      # slider's minimum.
+      - platform: state
+        entity_id: input_boolean.varmepump_mpc_aktiv
+        to: "on"
     condition:
       - condition: state
         entity_id: input_boolean.varmepump_mpc_aktiv
