@@ -441,6 +441,14 @@ terminalvärderingen fixar, fast i utvärderingen.
   så mallen faller igenom som det var tänkt. Bandet är med flit vidare än
   Norrköping någonsin blir: det är ett brott-i-kabeln-prov, inte ett
   rimlighetsfilter på vädret.
+- **`input_boolean.varmepump_mpc_aktiv` är av tills någon slår på den**, och då
+  gör hela kedjan ingenting. En `input_boolean` utan `initial:` startar av, och
+  automationen `MPC to sensor emulator` har den som villkor. hpmpc skriver då
+  troget till `input_number.varmepump_fiktiv_utetemp` varje cykel, men ingenting
+  förs vidare till noden — som ligger kvar på sitt bootvärde. Symptomet är exakt
+  "pumpen får bara det satta värdet hela tiden". Slå på den i HA. Att den *måste*
+  slås på manuellt är med flit: den är också nödstoppet, och ett nödstopp som
+  återställer sig självt vid omstart vore inget nödstopp.
 - **Kalibrera mot pumpens display, inte mot givaren.** Ett par avlästa som
   "jag skickade R, pumpen säger T" innefattar kabelresistans, kontakt och
   pumpens egen linjärisering. En bänkmätning av termistorn missar allt det.
