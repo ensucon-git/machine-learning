@@ -1065,14 +1065,18 @@ ett *rimligt motstånd*, aldrig på ingenting:
 | hpmpc tyst, HA uppe | riktig utetemperatur, offset 0 — pumpens egen kurva, omodifierad |
 | HA också tyst | senaste kommenderade värdet, i fyra timmar |
 | tyst längre än så | fast reservposition (`FAILSAFE_WIPER`, ungefär 0 °C) |
-| ESP32 strömlös | potentiometrarnas passiva motståndsbanor, ≈ 200 kΩ |
+| ESP32 strömlös | **givarfel på pumpen** — se nedan, det här lagret höll inte |
 
-Det sista lagret är det enda som överlever att ESP:n blir strömlös, och det kostar
-ingenting extra: **bygla PA0 till wipern på varje MCP41100**. Motståndsbanan i kretsen
-är passiv, så hela banan ligger kvar när kretsen är spänningslös, och pumpen ser ungefär
-200 kΩ i stället för ett brott — omkring −20 °C på Daikinkurvan. Fel, men en avläsning
-och inte ett givarfel. Verifiera det vid idrifttagningen: dra kortets matning och mät
-över pumpplinten; oändligt betyder att bygeln är fel dragen.
+Det sista lagret var tänkt att kosta ingenting extra: **bygla PA0 till wipern på varje
+MCP41100**. Motståndsbanan i kretsen är passiv, så hela banan ligger kvar när kretsen är
+spänningslös, och pumpen skulle se ungefär 195 kΩ i stället för ett brott — omkring
+−20 °C på Daikinkurvan. Fel, men en avläsning och inte ett givarfel.
+
+**Mätt mot pumpen håller det inte.** Med kortet strömlöst visar pumpen `--,--` och
+plinten mäter 0,68 V — ett dioddropp. POT_HI:s ESD-diod leder upp i +5V-rälen, och rälen
+flyter inte: den ligger på jord genom matningen. Pumpen klampas till ett par kΩ, utanför
+givarkurvan, alltså givarfel. Räkna med givarfel som reservläge tills reläväxlingen i
+`docs/HARDWARE.md` är byggd — och larma på att noden försvinner.
 
 Svagheten är höst och vår. På vintern är −20 °C ungefär vad man ändå velat; i
 mellansäsong betyder det att pumpen värmer för fullt tills någon märker det. Två

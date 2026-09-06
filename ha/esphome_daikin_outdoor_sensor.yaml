@@ -140,12 +140,21 @@
 #   4. Held too long        -> FAILSAFE_WIPER below, a fixed position chosen to
 #                              be cold enough to keep the house warm and mild
 #                              enough not to cook it in summer.
-#   5. ESP unpowered        -> the MCP41100 resistor tracks are passive, and
-#                              PA0 is strapped to PW0 on each device, so the
-#                              pump sees roughly 200 kohm - about -20 C. Wrong,
-#                              but a reading rather than a sensor fault. Verify
-#                              it with a multimeter at commissioning: pull the
-#                              board's power and measure across J2.
+#   5. ESP unpowered        -> INTENDED: the MCP41100 resistor tracks are
+#                              passive and PA0 is strapped to PW0, so the pump
+#                              would see about 195 kohm, roughly -20 C - wrong,
+#                              but a reading rather than a sensor fault.
+#                              MEASURED: it does not work. The pump displays
+#                              --,-- and J2 sits at 0.68 V, a diode drop.
+#                              POT_HI's ESD diode conducts into the +5V rail,
+#                              and that rail does not float - the supply holds
+#                              it at ground. The pump is clamped to a couple of
+#                              kohm, off the warm end of the curve, so it reads
+#                              a sensor fault. A series diode in the supply is
+#                              the wrong fix: VDD has to stay above the pump's
+#                              4.97 V and a diode spends exactly that margin.
+#                              Live with the sensor fault and alarm on the node
+#                              going offline, or build the stage-2 relay.
 #
 # Layer 5 is the weak one. In winter -20 C is roughly what you would have
 # wanted anyway; in the shoulder season it means the pump heats flat out until

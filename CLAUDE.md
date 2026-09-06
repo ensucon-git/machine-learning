@@ -280,15 +280,24 @@ terminalvärderingen fixar, fast i utvärderingen.
   först när det är helt torrt — blöt IPA leder själv. Har man ingen aning om
   mätaren: mät ett känt motstånd (20 kΩ) på två områden. Skiljer de sig mer än
   någon procent är det mätaren eller batteriet, inte kortet.
-- **Strömlöst kort ger ~200 kΩ, inte brott — tack vare bygeln PA0↔PW0.**
-  Motståndsbanan i en MCP41100 är passiv, så med PA0 byglad till wipern ligger
-  hela banan kvar när kretsen är spänningslös. Pumpen ser då ≈ −20 °C: fel, men
-  en avläsning. Det ersätter det fasta 68 kΩ-motstånd på ett reläs NC-kontakt
-  som stod här tidigare. **Verifiera bygeln vid idrifttagning** — dra matningen
-  och mät över J2; oändligt betyder att den är fel dragen. Svagheten är höst och
-  vår, då −20 °C betyder att pumpen värmer för fullt tills någon märker det;
-  larmet på `binary_sensor.varmepump_proxy_online` är ersättningen tills
-  reläväxlingen i steg 2 finns.
+- **Bygeln PA0↔PW0 räddar INTE ett strömlöst kort. Prövat mot pumpen, den föll.**
+  Tanken var: motståndsbanan i en MCP41100 är passiv, så med PA0 byglad till
+  wipern ligger hela banan kvar spänningslös och pumpen ser ≈ 195 kΩ ≈ −20 °C —
+  fel, men en avläsning i stället för givarfel. Så blir det inte. Med kortet
+  strömlöst och pumpen inkopplad visar pumpens display **`--,--`**, alltså
+  givarfel, och J2 mäter **0,68 V** — ett dioddropp, inte en resistans.
+  Mekanismen: POT_HI:s ESD-diod upp i +5V-rälen leder, och rälen *flyter inte* —
+  den ligger på jord genom matningen och kretsarnas VDD-stift. Pumpen klampas
+  därmed till 0,68 V, vilket vid dess pull-up motsvarar ett par kΩ, långt under
+  NTC-kurvans varma ände (15,98 kΩ vid +30 °C) — alltså utanför området.
+  Det förklarar också bänkmätningarna som skiftade med multimeterns mätområde:
+  samma diod, probad vid olika testströmmar.
+  **Följd:** ett dött kort ger pumpen givarfel, inte −20 °C. Det är på sätt och
+  vis ett snällare fel — pumpen larmar och slutar elda i stället för att värma
+  för fullt — men det är inte det som står i konstruktionen. En seriediod i
+  matningen är *fel* fix: den kostar spänning, och VDD måste vara ≥ 4,97 V.
+  Kvar står reläväxlingen i steg 2, eller att acceptera givarfel som reservläge
+  med `binary_sensor.varmepump_proxy_online` som larm.
 - **Reläväxlingen i steg 2 kräver tre växlande poler, inte två**, och guldkontakter.
   Poler: givarens tråd A (3V3 ↔ pumpens terminal A), givarens tråd B (mätnoden ↔
   GND), och pumpens terminal A (POT_HI ↔ bruten). Utan den första hamnar 3V3 på

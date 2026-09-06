@@ -249,10 +249,23 @@ Säkerhetstrappan i ESPHome-filen har fem lager. Lager 1–4 klarar sig utan ext
 hårdvara — de förutsätter att noden lever. Bara det femte, *ESP:n strömlös medan
 pumpen går*, behöver ett relä.
 
-Utan relä: potentiometrarnas motståndsbanor är passiva och PA0 är byglad till
-PW0 på varje krets, så pumpen ser omkring 200 kΩ ≈ −20 °C. Fel, men en avläsning
-och inte ett givarfel. **Verifiera det vid idrifttagningen** — dra kortets
-matning och mät över J2. Blir det oändligt är byglarna fel dragna.
+Utan relä var tanken: potentiometrarnas motståndsbanor är passiva och PA0 är
+byglad till PW0 på varje krets, så pumpen skulle se omkring 195 kΩ ≈ −20 °C —
+fel, men en avläsning och inte ett givarfel.
+
+**Så blir det inte. Prövat mot pumpen 2026-09, och det föll.** Med kortet
+strömlöst och pumpen inkopplad visar displayen `--,--` och J2 mäter **0,68 V**,
+ett dioddropp. POT_HI:s ESD-diod leder upp i +5V-rälen, och rälen flyter inte —
+den ligger på jord genom matningen. Pumpen klampas till 0,68 V, vilket vid dess
+pull-up motsvarar ett par kΩ, långt under NTC-kurvans varma ände. Utanför
+området, alltså givarfel.
+
+En seriediod i matningen är fel fix: VDD måste vara ≥ 4,97 V och en diod kostar
+just den marginalen. Kvar står **reläväxlingen nedan**, eller att acceptera
+givarfel som reservläge. Givarfel är faktiskt det snällare felet — pumpen larmar
+och slutar elda i stället för att värma för fullt en hel vårvecka — men det är
+inte vad konstruktionen lovade, och `binary_sensor.varmepump_proxy_online` är då
+det som måste larma.
 
 Tre poler växlar i steg 2, och alla tre behövs:
 
