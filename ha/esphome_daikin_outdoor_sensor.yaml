@@ -424,6 +424,22 @@ sensor:
       - calibrate_linear:
           - 0.0 -> 0.0
           - 20.0 -> 20.0
+      # An open or shorted J1 is not a temperature, and this sensor must not
+      # pretend otherwise. With nothing wired to J1 the divider sits at the
+      # bottom rail, the resistance computes to megohms, and the NTC curve
+      # extrapolates to something absurd but FINITE - a number Home Assistant
+      # would take at face value, because sensor.utegivare_verklig prefers this
+      # sensor over the weather entity and every safety net in the package
+      # reads that. A board on the bench with no sensor on it would then be
+      # telling the pump it is -40 outside.
+      #
+      # Returning {} publishes nothing, so the entity stays unknown and the
+      # template falls through to the weather entity exactly as intended. The
+      # band is deliberately wider than Norrkoping ever gets: this is a
+      # broken-wiring check, not a plausibility filter on the weather.
+      - lambda: |-
+          if (isnan(x) || x < -45.0f || x > 60.0f) return {};
+          return x;
 
   # ---- what we are driving the pot to ------------------------------------
   # Set entities.pot_wiper to this. Without the pump's own reading it is the
