@@ -190,6 +190,19 @@ terminalvärderingen fixar, fast i utvärderingen.
   behöver två, så kommendera en till i den varma änden (wiper 52 ≈ 20 103 Ω,
   förväntat +25 °C) — den änden får pumpen att sluta värma i stället för att
   börja.
+- **NTC-kurvan är uppmätt mot pumpens display** (2026-09, tio punkter från
+  wiper 502 till 52). Interpolationen återger varje punkt på **0,000 K**. De tre
+  yttersta värdena (−30, −25, +30) är extrapolerade: betaanpassningens *form*,
+  förankrad i den yttersta uppmätta punkten så skarven blir kontinuerlig.
+  En ren betamodell prövades och förkastades — värsta fel 0,50 K med U-formade
+  residualer, alltså precis vad en tvåparameters-Arrhenius gör mot en givare med
+  verklig Steinhart-Hart-krökning. Den typiska Daikintabellen den ersätter låg
+  0,92 K fel i den kalla änden. **Räckvidden blev −20,43 °C**, inte −19,83, så
+  `perceived_min_c` är nu **−20,0** med 0,4 K marginal mot den extrapolerade
+  änden. Kurvan finns på **fem** ställen: `ntc:`, de två lambdorna i ESPHome-
+  filen, nodens egen `calibration:` för J1-givaren, och `r25`/`beta` i mallen
+  `Utegivare mAlresistans` (den sista som betaanpassning, 0,5 K sämre — den är
+  inte i styrvägen).
 
 **Antaget / ej verifierat:**
 - **Prestandakartans siffror är förankrade i publicerade mätpunkter för
@@ -200,11 +213,6 @@ terminalvärderingen fixar, fast i utvärderingen.
   blockerad av sessionens policy. Parsning, cachning, felhantering och
   reservvägar är testade mot mockade svar. `hpmpc providers` är första
   kommandot att köra på riktig maskin.
-- **NTC-tabellen är en typisk Daikin 20 kΩ-givare**, inte uppmätt på den
-  faktiska givaren. `hpmpc calibrate-ntc` finns för att rätta det, och
-  `entities.pump_outdoor_temp` för att verifiera det kontinuerligt — men den
-  pumpen visar bara talet på displayen, så i praktiken är `entities.pot_wiper`
-  den enda återkopplingen och den når bara fram till ESP32:n.
 - **Docker-imagen är inte byggd** — ingen docker-daemon i utvecklingsmiljön. Den
   motsvarande wheel-installationen är verifierad, inklusive paketdata.
 - **Ingenting har körts mot en riktig Home Assistant.** HA-klienten är testad mot
@@ -558,7 +566,7 @@ delaren mot kända motstånd. Först därefter pumpen.
 **C. Sedan den ursprungliga listan:**
 1. `hpmpc providers` — stäm av marginalkostnaden mot elfakturan.
 2. ~~Bestäm vilken givare som emuleras~~ — gjort: KRCS01-1-ingången.
-3. `hpmpc calibrate-ntc` mot pumpens display.
+3. ~~`hpmpc calibrate-ntc` mot pumpens display~~ — gjort, tio punkter.
 4. `hpmpc curve` med de två kurvpunkterna från pumpens display.
 5. En vecka `hpmpc excite`.
 6. `hpmpc collect && hpmpc train && hpmpc power`.
