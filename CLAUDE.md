@@ -203,6 +203,17 @@ terminalvärderingen fixar, fast i utvärderingen.
   filen, nodens egen `calibration:` för J1-givaren, och `r25`/`beta` i mallen
   `Utegivare mAlresistans` (den sista som betaanpassning, 0,5 K sämre — den är
   inte i styrvägen).
+- **Hela styrkedjan går live** (2026-09): hpmpc → `input_number.varmepump_fiktiv_utetemp`
+  → automationen `MPC to sensor emulator` → `number.varmepump_proxy_simulerad_utetemperatur`
+  → noden → digipotarna → pumpen. Därmed faller två antaganden: **Docker-imagen är
+  byggd och kör** på NUC:en, och **HA-klienten är körd mot en riktig Home
+  Assistant** — skrivningarna landar. Kontrollern står i läget `collecting` med
+  `fallback_offset: 0.0`, alltså riktig utetemperatur och pumpens egen kurva
+  omodifierad, vilket är rätt läge tills en modell finns.
+  Sista felet i kedjan var att `MPC to sensor emulator` bara triggade på att den
+  fiktiva temperaturen *ändrades* — att slå på `varmepump_mpc_aktiv` gjorde
+  därför ingenting alls förrän nästa cykel. Den triggar nu även på brytaren.
+  (`hpmpc check` i sin helhet är fortfarande inte avrapporterad.)
 
 **Antaget / ej verifierat:**
 - **Prestandakartans siffror är förankrade i publicerade mätpunkter för
@@ -213,10 +224,6 @@ terminalvärderingen fixar, fast i utvärderingen.
   blockerad av sessionens policy. Parsning, cachning, felhantering och
   reservvägar är testade mot mockade svar. `hpmpc providers` är första
   kommandot att köra på riktig maskin.
-- **Docker-imagen är inte byggd** — ingen docker-daemon i utvecklingsmiljön. Den
-  motsvarande wheel-installationen är verifierad, inklusive paketdata.
-- **Ingenting har körts mot en riktig Home Assistant.** HA-klienten är testad mot
-  en fake som härmar REST-API:ets format.
 - **Delarens siffror är räknade, inte uppmätta.** 20 kΩ mot en Daikin 20 kΩ-kurva
   ger 0,18–1,83 V över −30…+30 °C. Kontrollera med kända motstånd över J1 vid
   idrifttagning: 20 kΩ → 1,650 V, 68 kΩ → 0,750 V, 200 kΩ → 0,300 V.
@@ -457,6 +464,13 @@ terminalvärderingen fixar, fast i utvärderingen.
   "pumpen får bara det satta värdet hela tiden". Slå på den i HA. Att den *måste*
   slås på manuellt är med flit: den är också nödstoppet, och ett nödstopp som
   återställer sig självt vid omstart vore inget nödstopp.
+- **"Perceived" och "fictitious" ÄR samma tal, och ska vara det.** Mallen
+  `Heat pump perceived outdoor temperature` är bokstavligen
+  `{{ states('input_number.varmepump_fiktiv_utetemp') }}`. Att de följs åt är
+  alltså ingen bekräftelse på något. `Utegivare verklig` skiljer sig däremot
+  legitimt: med tom `entities.outdoor_temp` räknar hpmpc på SMHI:s rutpunkt medan
+  den sensorn är termistorn på huset. Två olika mätningar, inte ett fel — de
+  konvergerar den dag `entities.outdoor_temp` pekar på noden.
 - **Nodens `Simulerad utetemperatur` visar −25 när den är osatt.** Det är
   `min_value`, och Home Assistant ritar ett reglage utan tillstånd i sitt
   vänstra ändläge. Det ser ut som ett kommenderat värde men är ingenting — läs
@@ -538,12 +552,14 @@ hpmpc run / hpmpc serve
 
 ## Var vi står
 
-Kortet är **byggt, lött och uppmätt.** Potentiometerkedjan är verifierad (se
-"Verifierat" ovan) och hela konfigurationen — `pot:`, `perceived_min_c`, ESPHome-
-filens två lambdor och HA-paketets wipermall — står på de uppmätta talen. Kvar
-innan pumpen kopplas in: tvätta bort flussmedlet, delarprovet mot kända motstånd
-över J1, och pumpens thermistor flyttad till kortet. Reservlägets faktiska värde
-(det strömlösa provet) är fortfarande obesvarat och avgörs bäst av pumpens display.
+**Systemet är i drift.** Kortet byggt, potentiometern uppmätt, NTC-kurvan
+kalibrerad mot pumpens display, och hela kedjan hpmpc → HA → ESP32 → pumpen
+går igenom. Kontrollern samlar historik i läget `collecting` med offset 0 —
+pumpen kör sin egen kurva omodifierad tills en modell finns.
+
+Kvar innan den styr på riktigt: `hpmpc providers` (aldrig körd live),
+`hpmpc curve` med pumpens två kurvpunkter, en vecka `hpmpc excite`, sedan
+`collect && train && power`, och några dygn `dry_run: true`.
 
 Designen är låst efter en genomgång som gav fem beslut värda att inte riva upp:
 
