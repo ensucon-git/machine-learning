@@ -180,6 +180,16 @@ terminalvärderingen fixar, fast i utvärderingen.
   Siffrorna står i `docs/HARDWARE.md#mät-innan-du-litar-på-den` och i de två
   lambdorna i ESPHome-filen. `perceived_min_c` ska vara **−19,5**, inte −20:
   −20,3 är det nominella talet för 2 × 100 kΩ, inte det här kortet.
+- **Hela ställdonskedjan är verifierad mot pumpen** (2026-09). Kortet byggt,
+  firmware flashad och körd, givaren på J1, pumpen på J2: när ESP32:n får ström
+  bootar noden till `BOOT_WIPER = 172` = 65 928 Ω, och **pumpens display visar
+  0,0 °C**. Vår tabell säger +0,56 °C för det motståndet, alltså −0,56 K
+  avvikelse. Det bevisar ESP32 → 74AHCT125 → 2× MCP41100 → pumpens givaringång →
+  pumpens egen linjärisering, hela vägen. Det är också den **första riktiga
+  kalibreringspunkten**: 65 928 Ω ↔ 0,0 °C på displayen. `hpmpc calibrate-ntc`
+  behöver två, så kommendera en till i den varma änden (wiper 52 ≈ 20 103 Ω,
+  förväntat +25 °C) — den änden får pumpen att sluta värma i stället för att
+  börja.
 
 **Antaget / ej verifierat:**
 - **Prestandakartans siffror är förankrade i publicerade mätpunkter för
@@ -199,13 +209,6 @@ terminalvärderingen fixar, fast i utvärderingen.
   motsvarande wheel-installationen är verifierad, inklusive paketdata.
 - **Ingenting har körts mot en riktig Home Assistant.** HA-klienten är testad mot
   en fake som härmar REST-API:ets format.
-- **Proxykortet är konstruerat men inte byggt, och firmware aldrig kompilerad.**
-  `ha/esphome_daikin_outdoor_sensor.yaml` är omskriven för ESP32-C3-Zero-M men har
-  varken flashats eller ens körts genom `esphome compile` — utvecklingsmiljön har
-  ingen ESPHome-installation. Räkna med att någon nyckel kan heta annorlunda i
-  just din version; `attenuation: 12db` hette `11db` före ESPHome 2023.12.
-  Stiftvalet och rälarna är däremot härledda ur Waveshares pinout och uppmätta
-  4,97 V, inte gissade.
 - **Delarens siffror är räknade, inte uppmätta.** 20 kΩ mot en Daikin 20 kΩ-kurva
   ger 0,18–1,83 V över −30…+30 °C. Kontrollera med kända motstånd över J1 vid
   idrifttagning: 20 kΩ → 1,650 V, 68 kΩ → 0,750 V, 200 kΩ → 0,300 V.
