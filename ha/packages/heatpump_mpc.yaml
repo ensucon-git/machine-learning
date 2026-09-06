@@ -209,6 +209,7 @@ template:
           {% set candidates = [
                states('sensor.varmepump_proxy_verklig_utetemperatur'),
                states('sensor.ute_temperatur'),
+               state_attr('weather.smhi_home', 'temperature'),
                state_attr('weather.forecast_home', 'temperature'),
                state_attr('weather.hemma', 'temperature') ] %}
           {% set found = candidates | reject('in', [none, 'unknown', 'unavailable']) | list %}
