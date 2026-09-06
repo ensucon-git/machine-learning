@@ -249,8 +249,12 @@ template:
           {% if t is none %}
             {{ none }}
           {% else %}
-            {% set r25 = 20000 %}
-            {% set beta = 3950 %}
+            {# Beta fit to the same measurements the ntc: table holds. Good to
+               0.5 K, where the table is exact - acceptable only because this
+               template is NOT in the control path: the node owns the
+               conversion. If you switch to automation B) below, fix this. #}
+            {% set r25 = 20383 %}
+            {% set beta = 3774 %}
             {{ (r25 * (2.718281828459045 ** (beta * (1/(t + 273.15) - 1/298.15)))) | round(0) }}
           {% endif %}
 

@@ -355,9 +355,12 @@ number:
           // Temperature -> resistance -> wiper, with the same table the
           // readback sensor uses. Keep both identical to the ntc: section of
           // config.yaml.
-          static const float T[] = {-30,-25,-20,-15,-10,-5,0,5,10,15,20,25,30};
-          static const float R[] = {347667,260639,196648,149283,114003,87562,
-                                    67628,52514,40991,32159,25354,20084,15984};
+          // Measured against the pump's display, 2026-09. Keep identical to the
+          // ntc: table in config.yaml - three copies of one curve.
+          static const float T[] = {-30,-25,-20.2,-15.9,-10.2,-5.7,-0.4,
+                                    4.4,9.5,14.5,19.7,24.9,30};
+          static const float R[] = {350215,256161,191945,149176,114043,87694,
+                                    67455,52562,41106,32323,25449,20103,16246};
           const int N = 13;
           float t = x;
           if (t <= T[0]) t = T[0];
@@ -421,10 +424,10 @@ sensor:
     id: real_outdoor
     device_class: temperature
     accuracy_decimals: 1
-    calibration:                  # same three points as the ntc: table above
-      - 196648Ohm -> -20°C
-      - 67628Ohm -> 0°C
-      - 20084Ohm -> 25°C
+    calibration:                  # three of the measured points, not typicals
+      - 191945Ohm -> -20.2°C
+      - 67455Ohm -> -0.4°C
+      - 20103Ohm -> 24.9°C
     filters:
       # The C3's ADC carries a percent or two of per-chip offset and gain. That
       # is the dominant error here and it is not self-correcting, because this
@@ -477,9 +480,12 @@ sensor:
       // Inverse of the NTC table, so Home Assistant shows what the pump believes
       // rather than a raw wiper position nobody can read at a glance. Keep these
       // arrays identical to the ntc section of config.yaml.
-      static const float T[] = {-30,-25,-20,-15,-10,-5,0,5,10,15,20,25,30};
-      static const float R[] = {347667,260639,196648,149283,114003,87562,
-                                67628,52514,40991,32159,25354,20084,15984};
+      // Measured against the pump's display, 2026-09. Keep identical to the
+      // ntc: table in config.yaml - three copies of one curve.
+      static const float T[] = {-30,-25,-20.2,-15.9,-10.2,-5.7,-0.4,
+                                4.4,9.5,14.5,19.7,24.9,30};
+      static const float R[] = {350215,256161,191945,149176,114043,87694,
+                                67455,52562,41106,32323,25449,20103,16246};
       const int N = 13;
       if (id(wiper_position) < 0) return {};
       // Measured, not nominal - see the note in the number above.

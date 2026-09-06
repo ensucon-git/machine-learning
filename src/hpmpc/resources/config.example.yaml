@@ -212,10 +212,12 @@ heat_pump:
   # in the logs to say why. 'hpmpc ntc-table' prints the reachable band and
   # 'hpmpc check' compares it against these two numbers.
   #
-  # -19.5 is derived from the measured pot chain, not chosen: 195.0 kohm end to
-  # end is -19.83 C on the ntc: table. A single MCP41100 would have bottomed out
-  # at -7 C, which is what this said before the second device was fitted.
-  perceived_min_c: -19.5
+  # -20.0 is derived, not chosen: 195.0 kohm end to end is -20.43 C on the
+  # calibrated ntc: table below, and the last 0.4 K is left as margin because
+  # that end of the table is extrapolated rather than measured. It read -19.5
+  # before the calibration, on the typical-Daikin table, and -7 before the
+  # second MCP41100 was fitted.
+  perceived_min_c: -20.0
   perceived_max_c: 25.0
 
   standby_power_w: 40
@@ -225,8 +227,9 @@ heat_pump:
   cop_max: 8.0
   defrost_penalty: 0.12
 
-# The digital resistor. These values describe a TYPICAL Daikin 20 kohm outdoor
-# thermistor. They are not measured on yours, so treat them as a starting point.
+# The digital resistor. These values are MEASURED on this installation against
+# the pump's display - see the note on the table itself. What follows is why it
+# was worth doing, and what a wrong table would have cost:
 #
 # What a wrong table actually costs, which is less than it looks:
 #   - A smooth bias is largely absorbed. 'hpmpc train' fits the heating curve by
@@ -244,10 +247,25 @@ heat_pump:
 # curve. 'hpmpc check' prints a ready-made --point for the current resistance.
 ntc:
   model: table
-  table_temp_c: [-30, -25, -20, -15, -10, -5, 0, 5, 10, 15, 20, 25, 30]
-  table_ohm:    [347667, 260639, 196648, 149283, 114003, 87562, 67628, 52514, 40991, 32159, 25354, 20084, 15984]
-  r25: 20000                        # used only when model: beta
-  beta: 3950
+  # MEASURED against the pump's own display, 2026-09. Ten wiper positions
+  # commanded, ten readings taken off the display, so each pair includes the
+  # wiring, the connector and the pump's own linearisation - which a bench
+  # measurement of the thermistor would miss entirely.
+  #
+  # The eleven inner points ARE the measurements: interpolation reproduces every
+  # one of them to 0.000 K. The three outer values (-30, -25 and +30) are
+  # extrapolated, using a beta fit to the same data for the SHAPE but anchored on
+  # the outermost measured point so the splice stays continuous.
+  #
+  # A plain beta model was tried and rejected: worst error 0.50 K, with the
+  # residuals U-shaped (positive at both ends, negative in the middle), which is
+  # what a two-parameter Arrhenius looks like when the sensor has real
+  # Steinhart-Hart curvature. The typical-Daikin table it replaces was 0.92 K out
+  # at the cold end.
+  table_temp_c: [-30, -25, -20.2, -15.9, -10.2, -5.7, -0.4, 4.4, 9.5, 14.5, 19.7, 24.9, 30]
+  table_ohm:    [350215, 256161, 191945, 149176, 114043, 87694, 67455, 52562, 41106, 32323, 25449, 20103, 16246]
+  r25: 20383                        # used only when model: beta - the fit above
+  beta: 3774
   resistance_min: 0
   resistance_max: 500000
 
