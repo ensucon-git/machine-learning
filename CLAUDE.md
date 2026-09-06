@@ -531,10 +531,14 @@ delaren mot kända motstånd. Först därefter pumpen.
 `resistance_ohm: 97377`, `wiper_ohm: 123`, `perceived_min_c: -19.5`, HA-paketets
 `pots = 2`, ändlägeslarmet på `510` och wipermallen på de uppmätta talen.
 `entities.pot_wiper` pekade redan rätt. Kvar i den tråden:
-- `entities.outdoor_temp` står **kvar tom med flit** tills pumpens termistor
-  sitter på kortets J1 — en ADC på en öppen ingång är ingen temperatur, och att
-  peka dit skulle förgifta träningsdatan i stället för att förbättra den. Räkna
-  med ett steg mot den SMHI-härledda historiken den dagen den byts.
+- `entities.outdoor_temp` — givaren sitter på J1 sedan 2026-09, så den kan fyllas
+  i med `sensor.varmepump_proxy_verklig_utetemperatur`. **Gör det tidigt, inte
+  sent.** Bytet ger ett steg i träningsdatan mot den SMHI-härledda historiken,
+  och just nu är arkivet i princip tomt — byter man nu blir hela datasetet
+  homogent från dag ett, byter man om en månad ligger diskontinuiteten mitt i
+  det anpassningen ska läsa. Kontrollera först att nodens värde ser rimligt ut
+  mot SMHI ett dygn; det ersätter delarprovet mot kända motstånd som aldrig
+  gjordes.
 - `control.offset_min` lämnad på −6 med flit. Räckvidden tillåter mer nu, men
   läs en vecka planer först (`docs/HARDWARE.md#sänk-inte-offsetgränserna-för-snabbt`).
 - `binary_sensor.varmepump_proxy_online` — **gjort**, automationerna
