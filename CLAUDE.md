@@ -296,8 +296,11 @@ terminalvärderingen fixar, fast i utvärderingen.
   vis ett snällare fel — pumpen larmar och slutar elda i stället för att värma
   för fullt — men det är inte det som står i konstruktionen. En seriediod i
   matningen är *fel* fix: den kostar spänning, och VDD måste vara ≥ 4,97 V.
-  Kvar står reläväxlingen i steg 2, eller att acceptera givarfel som reservläge
-  med `binary_sensor.varmepump_proxy_online` som larm.
+  **Valt 2026-09: acceptera givarfel som reservläge**, med
+  `binary_sensor.varmepump_proxy_online` som hela skyddsnätet. Larmet måste då
+  gå åt rätt håll — faran är att pumpen *slutar* värma, inte att den värmer för
+  mycket, så ingenting ska stänga av värmen; det har pumpen redan gjort. Ett
+  dött kort i januari är tyst i alla kanaler utom pumpens egen display.
 - **Reläväxlingen i steg 2 kräver tre växlande poler, inte två**, och guldkontakter.
   Poler: givarens tråd A (3V3 ↔ pumpens terminal A), givarens tråd B (mätnoden ↔
   GND), och pumpens terminal A (POT_HI ↔ bruten). Utan den första hamnar 3V3 på
@@ -501,7 +504,12 @@ Designen är låst efter en genomgång som gav fem beslut värda att inte riva u
 3. **74HCT125** som följd av det — C3:ans 3,3 V når inte 0,7 × VDD.
 4. **Bygeln PA0↔wiper** i stället för fast failsafe-motstånd på ett relä.
 5. **Reläväxlingen uppskjuten** till steg 2, med larm som ersättning och tre lösa
-   trådbyglar (L1–L3) på kortet så tillägget inte rör något annat.
+   trådbyglar (L1–L3) på kortet så tillägget inte rör något annat. **Beslut
+   2026-09: den byggs tills vidare inte alls.** Efter att bygeln PA0↔PW0 visat
+   sig inte hålla (se fällorna) är valet medvetet att acceptera givarfel som
+   reservläge — pumpen larmar och slutar elda i stället för att värma för fullt,
+   vilket är det snällare felet. Priset är att `binary_sensor.varmepump_proxy_online`
+   nu är hela skyddsnätet, inte en bekvämlighet.
 
 Byggblad med schema, nätlista, zonplan och idrifttagningsordning finns som artefakt
 i den session där kortet togs fram; källan till samma innehåll är
@@ -524,8 +532,11 @@ delaren mot kända motstånd. Först därefter pumpen.
   med ett steg mot den SMHI-härledda historiken den dagen den byts.
 - `control.offset_min` lämnad på −6 med flit. Räckvidden tillåter mer nu, men
   läs en vecka planer först (`docs/HARDWARE.md#sänk-inte-offsetgränserna-för-snabbt`).
-- `binary_sensor.varmepump_proxy_online` in i en HA-automation — helst en som
-  stänger av värmen, inte bara notifierar.
+- `binary_sensor.varmepump_proxy_online` — **gjort**, automationerna
+  `MPC proxy node offline` / `... back` finns i paketet. Notera att larmet går åt
+  *andra* hållet än den ursprungliga planen: ett dött kort ger givarfel, alltså
+  ingen värme alls, inte för mycket. Ingenting ska stänga av värmen — pumpen har
+  redan gjort det. Peka `notify.notify` mot något som faktiskt når dig.
 
 **C. Sedan den ursprungliga listan:**
 1. `hpmpc providers` — stäm av marginalkostnaden mot elfakturan.

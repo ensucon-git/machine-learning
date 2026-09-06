@@ -627,3 +627,76 @@ automation:
             resistive backup heat over the next 36 hours. That runs at COP 1. Check
             heat_pump.curve_slope, control.offset_min and whether the weather has
             simply gone past what the compressor can cover.
+
+  # ---- The proxy node went away ----------------------------------------
+  # This is the load-bearing alarm, and it alarms in the opposite direction
+  # from what you would expect.
+  #
+  # The design intended a dead board to present about 195 kohm through the
+  # potentiometers' passive tracks - roughly -20 C, wrong but a reading. It
+  # does not: measured against the pump, an unpowered board clamps its sensor
+  # input at a diode drop, which the pump reads as a shorted sensor and
+  # displays as --,--. See docs/HARDWARE.md.
+  #
+  # So the failure mode is NOT "the pump heats flat out". It is "the pump
+  # refuses to heat at all, and says so only on its own display". Nothing here
+  # should switch heating off - the pump has already done that. What is needed
+  # is for a person to find out, in January, before the house cools down.
+  #
+  # That makes this the whole safety net now that the stage-2 relay is
+  # deliberately not being built. Point the notify service at something that
+  # actually reaches you.
+  - alias: "MPC proxy node offline"
+    id: hpmpc_proxy_offline
+    mode: single
+    trigger:
+      - platform: state
+        entity_id: binary_sensor.varmepump_proxy_online
+        to: "off"
+        for: "00:10:00"
+      - platform: state
+        entity_id: binary_sensor.varmepump_proxy_online
+        to: "unavailable"
+        for: "00:10:00"
+      # Re-raise while it stays away: one notification an hour ago is easy to
+      # miss, and this is the failure nobody else will report.
+      - platform: time_pattern
+        hours: "/1"
+    condition:
+      - condition: not
+        conditions:
+          - condition: state
+            entity_id: binary_sensor.varmepump_proxy_online
+            state: "on"
+    action:
+      - service: persistent_notification.create
+        data:
+          notification_id: hpmpc_proxy_offline
+          title: "Heat pump: outdoor sensor emulator is gone"
+          message: >
+            The proxy node has not reported for at least ten minutes. The pump has no
+            other outdoor sensor, so it is now reading a sensor fault and has stopped
+            heating - check its display for --,--. The house will cool at its own pace
+            until the node is back. Check the node's 5 V supply first, then its Wi-Fi.
+      # continue_on_error so a missing notify service cannot swallow the
+      # persistent notification above. Replace notify.notify with your own.
+      - service: notify.notify
+        continue_on_error: true
+        data:
+          title: "Heat pump has stopped heating"
+          message: >
+            The outdoor sensor emulator is offline and the pump is reading a sensor
+            fault. It will not heat until this is fixed.
+
+  - alias: "MPC proxy node back"
+    id: hpmpc_proxy_back
+    mode: single
+    trigger:
+      - platform: state
+        entity_id: binary_sensor.varmepump_proxy_online
+        to: "on"
+        for: "00:02:00"
+    action:
+      - service: persistent_notification.dismiss
+        data:
+          notification_id: hpmpc_proxy_offline
