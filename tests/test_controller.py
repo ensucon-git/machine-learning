@@ -520,3 +520,22 @@ def test_excitation_works_without_an_outdoor_sensor_entity(cfg, fake_ha):
     assert report["readings"]["t_outdoor"] == pytest.approx(-5.0)
     assert dict(fake_ha.written)["number.fake_temp"] == pytest.approx(-5.0 + report["offset"])
     assert "t_outdoor" in report["archive"]["recorded"]
+
+
+def test_dry_run_warns_when_the_emulator_is_the_pumps_only_sensor(controller, cfg, fake_ha):
+    """Dry run stops the writes, and the writes are what keep the node alive.
+
+    Safe where the pump has its own sensor; here it means the ESP32 holds for a
+    few hours and then drives its failsafe position, which is a fixed mild
+    outdoor temperature - so the pump heats while the log says 'dry run'.
+    """
+    report = controller.step(now=fake_ha.now, apply=False)
+    assert fake_ha.written == []
+    assert any("failsafe" in note for note in report["notes"])
+
+
+def test_dry_run_is_quiet_when_the_pump_has_its_own_sensor(controller, cfg, fake_ha):
+    cfg.entities.fake_temperature_output = ""      # only the kelvin number, a dashboard value
+    cfg.validate()
+    report = controller.step(now=fake_ha.now, apply=False)
+    assert not any("failsafe" in note for note in report["notes"])

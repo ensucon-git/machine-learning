@@ -88,7 +88,33 @@ class ControllerService:
             if apply is not False:
                 self.last_report = report
                 self.cycles += 1
+                self._log_cycle(report)
             return report
+
+    def _log_cycle(self, report: dict[str, Any]) -> None:
+        """One line per cycle saying which mode the controller is in.
+
+        'hpmpc run' prints this to stdout; the service had no equivalent, so
+        'docker compose logs' showed the writes but never what decided them -
+        optimiser, collecting mode, a sensor fallback, or the out-of-season
+        standby. Standby is the one that needs it most: it looks exactly like
+        silence otherwise, and "is it broken or is it summer?" is not a
+        question anyone should have to answer by reading the source.
+        """
+        readings = report.get("readings", {})
+        mpc = report.get("mpc") or {}
+        parts = [f"mode {report.get('mode', '?')}", f"offset {report.get('offset', 0.0):+.2f} K"]
+        for label, key, unit in (("indoor", "t_indoor", "C"), ("outdoor", "t_outdoor", "C")):
+            value = readings.get(key)
+            if value is not None:
+                parts.append(f"{label} {float(value):.1f} {unit}")
+        if mpc.get("horizon_cost_sek") is not None:
+            parts.append(f"horizon {mpc['horizon_cost_sek']} SEK")
+        if not report.get("applied"):
+            parts.append("NOT written")
+        log.info("Cycle %d: %s", self.cycles, ", ".join(parts))
+        for problem in report.get("problems", []):
+            log.warning("  problem: %s", problem)
 
     def model_age_days(self) -> float | None:
         try:

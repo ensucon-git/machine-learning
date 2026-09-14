@@ -1002,6 +1002,22 @@ class Controller:
         report["outputs"] = outputs
         if not apply:
             report["notes"].append("dry run - nothing written to Home Assistant")
+            # "Compute everything, write nothing" is safe where the pump has its
+            # own sensor. Here it is not: the emulator IS the sensor, and it is
+            # fed by writes. Stop writing and Home Assistant stops pushing, the
+            # node holds for four hours and then drives FAILSAFE_WIPER - a fixed
+            # position around 0 C, which in October means the pump heats the
+            # house flat out while the log says "dry run". Clamp offset_min and
+            # offset_max toward zero instead: the cycle keeps writing, so the
+            # node stays fed, and the controller simply has no authority.
+            if any(self.cfg.entities.outputs()[k] for k in ("fake_temperature", "resistance", "wiper")):
+                warning = (
+                    "dry run with the sensor emulator as the pump's only sensor: nothing is being "
+                    "written, so the node falls back to its failsafe position within hours. Clamp "
+                    "control.offset_min/offset_max toward 0 instead of running dry for long."
+                )
+                report["notes"].append(warning)
+                log.warning("%s", warning)
             return
         if not outputs:
             report["notes"].append("no output entity configured - nothing written")

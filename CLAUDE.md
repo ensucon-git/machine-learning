@@ -512,6 +512,26 @@ terminalvärderingen fixar, fast i utvärderingen.
   bootvärdet. Med tom `entities.outdoor_temp` hänger `t_outdoor` på SMHI eller
   väderentiteten, alltså på just den vägen som aldrig anropats live — så
   `hpmpc providers` och `docker compose logs hpmpc` är första två stegen.
+- **`dry_run: true` i flera dygn är farligt just här.** `_write` returnerar
+  innan den skriver något alls, automationen `MPC to sensor emulator` triggar
+  bara på *ändring* av `input_number.varmepump_fiktiv_utetemp`, och noden håller
+  sitt värde i fyra timmar innan den går till `FAILSAFE_WIPER` ≈ 0 °C. Med
+  kurvan 0,645/19,19 blir det 32 °C framledning — pumpen eldar medan loggen
+  säger "dry run". Samma mekanism som gör att containern inte får stoppas över
+  sommaren. **Provkör med `control.offset_min/offset_max` klampade mot 0
+  i stället**: cyklerna skriver vidare, noden hålls matad, och regulatorn har
+  ingen befogenhet. `_write` varnar numera när `dry_run` är på samtidigt som
+  någon av utgångarna fake_temperature/resistance/wiper är konfigurerad.
+  `hpmpc plan` är fortfarande helt ofarligt — den är en separat process som
+  räknar en gång och skriver aldrig.
+- **`hpmpc serve` loggade inte läget.** `_print_cycle` körs bara i `hpmpc run`,
+  och containern kör `serve` — så `docker compose logs` visade skrivraden från
+  `_write` men aldrig om beslutet kom från optimeraren, `collecting`, en
+  givarreserv eller `standby`. Ordet "collecting" fanns bara i startvarningen.
+  `ControllerService._log_cycle` skriver nu en rad per cykel med läge, offset
+  och de två temperaturerna. `standby` behövde det mest: utan raden ser läget
+  exakt ut som tystnad, och "är det trasigt eller är det sommar?" ska inte
+  besvaras genom att läsa källkoden.
 - **`git pull` uppdaterar inte containern.** Containern kör koden som bakades in
   i imagen; en pull rör bara källan på värden. Symptomet är förvirrande: ett
   `hpmpc set` svarar *"'heat_pump.perceived_min_c' is not changeable at runtime"*
@@ -593,7 +613,7 @@ pumpen kör sin egen kurva omodifierad tills en modell finns.
 
 Kvar innan den styr på riktigt: `hpmpc providers` (aldrig körd live),
 `hpmpc curve` med pumpens två kurvpunkter, en vecka `hpmpc excite`, sedan
-`collect && train && power`, och några dygn `dry_run: true`.
+`collect && train && power`, och några dygn med klampad offset.
 
 Designen är låst efter en genomgång som gav fem beslut värda att inte riva upp:
 
@@ -651,7 +671,9 @@ delaren mot kända motstånd. Först därefter pumpen.
    på, styrcontainern **stoppad** (annars skriver två processer till samma entitet
    var 15:e minut), och att det är kallt nog att pumpen faktiskt värmer.
 6. `hpmpc collect && hpmpc train && hpmpc power`.
-7. Några dygn med `dry_run: true`, läs planerna.
+7. Några dygn med `control.offset_min/offset_max` klampade mot 0 — **inte**
+   `dry_run`, se fällorna — och läs planerna med `hpmpc plan`. Klampa *före*
+   `train`: modellen adopteras inom en cykel och styr skarpt direkt.
 8. Skarpt.
 
 Säsongsväxlingen kräver ingenting av användaren: stäng av pumpen, slå på den

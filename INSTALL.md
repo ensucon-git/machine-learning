@@ -316,8 +316,23 @@ emulatorn.
 Automationen `MPC potentiometer at end stop` i HA-paketet larmar om wipern
 står kvar i ett ändläge i en halvtimme.
 
-Sätt `dry_run: true` i konfigurationen och låt den gå ett par dygn. Läs
-planerna med `hpmpc plan`. Först därefter `hpmpc set control.dry_run 0`.
+**Provkör med klampad offset, inte med `dry_run`.** `dry_run` beräknar allt och
+skriver ingenting — vilket är säkert på en pump som har en egen givare, men inte
+här: emulatorn *är* givaren, och den hålls vid liv av skrivningarna. Uteblir de
+slutar automationen i HA pusha, noden håller sitt värde i fyra timmar och går
+sedan till `FAILSAFE_WIPER` (~0 °C). I oktober betyder det att pumpen eldar för
+fullt medan loggen säger "dry run".
+
+Ta ifrån regulatorn befogenheten i stället, så fortsätter cyklerna skriva:
+
+```bash
+hpmpc set control.offset_min -0.5
+hpmpc set control.offset_max 0.5
+```
+
+Läs planerna med `hpmpc plan` ett par dygn, vidga sedan stegvis (−2/+3, sedan
+fullt). Regulatorn varnar i loggen om du kör `dry_run` med emulatorn som enda
+givare.
 
 ---
 
