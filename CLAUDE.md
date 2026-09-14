@@ -175,7 +175,7 @@ terminalvärderingen fixar, fast i utvärderingen.
 
 ## Verifierat kontra antaget
 
-**Verifierat** (364 tester, syntetiskt hus med känd sanning):
+**Verifierat** (374 tester, syntetiskt hus med känd sanning):
 - Identifieringen återfinner värmekurva (lutning 0,3495 mot 0,35, R² 0,997) och
   husparametrar (UA +3 %, Ci +4 %, `k_wind` +3 %, plattans tidskonstant inom 8 %).
   `hpmpc train` skriver ut vad den lärt sig om sol och vind som area och
@@ -236,17 +236,17 @@ terminalvärderingen fixar, fast i utvärderingen.
   Sista felet i kedjan var att `MPC to sensor emulator` bara triggade på att den
   fiktiva temperaturen *ändrades* — att slå på `varmepump_mpc_aktiv` gjorde
   därför ingenting alls förrän nästa cykel. Den triggar nu även på brytaren.
-  (`hpmpc check` i sin helhet är fortfarande inte avrapporterad.)
+- **`hpmpc providers`, `hpmpc check` och `collecting`-läget är körda live**
+  (2026-09). Därmed faller det sista antagandet om utgående trafik: SMHI och
+  elprisetjustnu svarar från NUC:en. Alla entiteter svarar, `hpmpc plan` säger
+  `[collecting]`, och cykelräknaren går. Kvar i drift innan den styr: en vecka
+  `hpmpc excite` när det blivit stadigt kallt, sedan `collect`/`train`/`power`.
 
 **Antaget / ej verifierat:**
 - **Prestandakartans siffror är förankrade i publicerade mätpunkter för
   maskinklassen, inte hämtade ur Daikins databook** — den gick inte att nå från
   utvecklingsmiljön. Formen är rimlig, nivån kalibreras mot elmätaren. Byt
   tabellen när databooken finns.
-- **SMHI och elprisetjustnu har aldrig anropats live** — utgående trafik dit var
-  blockerad av sessionens policy. Parsning, cachning, felhantering och
-  reservvägar är testade mot mockade svar. `hpmpc providers` är första
-  kommandot att köra på riktig maskin.
 - **Delarens siffror är räknade, inte uppmätta.** 20 kΩ mot en Daikin 20 kΩ-kurva
   ger 0,18–1,83 V över −30…+30 °C. Kontrollera med kända motstånd över J1 vid
   idrifttagning: 20 kΩ → 1,650 V, 68 kΩ → 0,750 V, 200 kΩ → 0,300 V.
@@ -510,8 +510,9 @@ terminalvärderingen fixar, fast i utvärderingen.
   har någon annan givare. Följden är att `input_number.varmepump_fiktiv_utetemp`
   aldrig ändras, automationen aldrig triggas, och noden ligger kvar på
   bootvärdet. Med tom `entities.outdoor_temp` hänger `t_outdoor` på SMHI eller
-  väderentiteten, alltså på just den vägen som aldrig anropats live — så
-  `hpmpc providers` och `docker compose logs hpmpc` är första två stegen.
+  väderentiteten. Numera pekar `entities.outdoor_temp` på noden, så vägen är
+  kort — men `hpmpc providers` och `docker compose logs hpmpc` är fortfarande
+  de två första stegen när ingenting skrivs.
 - **`dry_run: true` i flera dygn är farligt just här.** `_write` returnerar
   innan den skriver något alls, automationen `MPC to sensor emulator` triggar
   bara på *ändring* av `input_number.varmepump_fiktiv_utetemp`, och noden håller
@@ -611,9 +612,17 @@ kalibrerad mot pumpens display, och hela kedjan hpmpc → HA → ESP32 → pumpe
 går igenom. Kontrollern samlar historik i läget `collecting` med offset 0 —
 pumpen kör sin egen kurva omodifierad tills en modell finns.
 
-Kvar innan den styr på riktigt: `hpmpc providers` (aldrig körd live),
-`hpmpc curve` med pumpens två kurvpunkter, en vecka `hpmpc excite`, sedan
-`collect && train && power`, och några dygn med klampad offset.
+`hpmpc providers`, `hpmpc check` och `hpmpc curve` är avklarade och körda live.
+**Kvar: excitationsveckan.** Den väntar på att det ska bli stadigt kallt — över
+`heat_stop_temp` gör offseten ingenting, så en vecka i mellansäsong vore
+bortkastad. Därefter `collect && train && power` och några dygn med klampad
+offset. Detaljerad ordning under "Nästa steg".
+
+**Deployment:** repot har numera en `main`, och NUC:en (`/opt/hpmpc`) står på
+den. Det fanns ingen default branch alls innan — bara `claude/*` — så en
+`git pull` hämtade tyst fel kod. `main` är den branch som körs; pusha dit när
+något ska ut i drift. Containern kör koden som bakats in i imagen, så
+`git pull` ensamt ändrar ingenting: `docker compose up -d --build`.
 
 Designen är låst efter en genomgång som gav fem beslut värda att inte riva upp:
 
@@ -659,26 +668,47 @@ delaren mot kända motstånd. Först därefter pumpen.
   ingen värme alls, inte för mycket. Ingenting ska stänga av värmen — pumpen har
   redan gjort det. Peka `notify.notify` mot något som faktiskt når dig.
 
-**C. Sedan den ursprungliga listan:**
-1. `hpmpc providers` — stäm av marginalkostnaden mot elfakturan.
+**C. Idrifttagningen — allt utom excitationsveckan är gjort.**
+
+1. ~~`hpmpc providers`~~ — gjort, svarar live.
 2. ~~Bestäm vilken givare som emuleras~~ — gjort: KRCS01-1-ingången.
 3. ~~`hpmpc calibrate-ntc` mot pumpens display~~ — gjort, tio punkter.
-4. ~~`hpmpc curve` med de två kurvpunkterna från pumpens display~~ — gjort:
-   −20:45 och 11:25, insatt tillsammans med `supply_max: 45`.
-5. En vecka `hpmpc excite`. Kräver ingen historik — den läser inget dataset och
-   ingen modell — men den ska ligga **före** `collect`/`train` och inom det
-   fönster `collect --days` läser. Tre villkor: `input_boolean.varmepump_mpc_aktiv`
-   på, styrcontainern **stoppad** (annars skriver två processer till samma entitet
-   var 15:e minut), och att det är kallt nog att pumpen faktiskt värmer.
-6. `hpmpc collect && hpmpc train && hpmpc power`.
-7. Några dygn med `control.offset_min/offset_max` klampade mot 0 — **inte**
-   `dry_run`, se fällorna — och läs planerna med `hpmpc plan`. Klampa *före*
-   `train`: modellen adopteras inom en cykel och styr skarpt direkt.
-8. Skarpt.
+4. ~~`hpmpc curve`~~ — gjort: −20:45 och 11:25, insatt med `supply_max: 45`.
+5. ~~Verifiera `collecting` live~~ — gjort: entiteter svarar, `plan` säger
+   `[collecting]`, cyklerna räknar.
 
-Säsongsväxlingen kräver ingenting av användaren: stäng av pumpen, slå på den
-igen. Regulatorn går i `standby` när ingen offset kan producera värme, arkivet
-fortsätter fyllas, och träningen filtrerar bort sommaren själv.
+**Kvar, i den här ordningen:**
+
+6. **Vänta tills det är stadigt kallt.** `hpmpc plan` ska säga `[collecting]`
+   över hela dygnet, inte `[standby]`. Med `heat_stop_temp: 18` betyder det
+   ungefär dygnsmedel under ~12 °C. Hellre vänta två veckor än att excitera en
+   vecka där pumpen står still halva tiden.
+7. **En vecka `hpmpc excite`.** Kräver ingen historik — den läser inget dataset
+   och ingen modell — men ska ligga **före** `collect`/`train` och inom det
+   fönster `collect --days` läser. Tre villkor: `varmepump_mpc_aktiv` på,
+   styrcontainern **stoppad** (`docker compose stop hpmpc`; annars skriver två
+   processer till samma entitet var 15:e minut), och att pumpen faktiskt värmer.
+   ```bash
+   docker compose run -d --name hpmpc-excite hpmpc excite --hold-hours 6
+   ```
+   Kontrollera mitt i veckan att `input_number.varmepump_offset` verkligen
+   hoppar var sjätte timme.
+8. **Klampa offseten innan träningen:** `control.offset_min -0.5`,
+   `offset_max 0.5`. Modellen adopteras inom en cykel efter `train` och styr
+   skarpt direkt — klampningen är det som gör provkörningen ofarlig.
+9. **`hpmpc collect --days 45 && hpmpc train && hpmpc power`**, som *en*
+   `sh -c` inne i containern. Tre tal att läsa: `offset_excitation.std` väl över
+   0,5 (annars var veckan förgäves), `validation RMSE` under 0,3 °C, laddaren
+   nära 11 kW.
+10. **Några dygn med klampad offset**, läs `hpmpc plan`. Inte `dry_run` — se
+    fällorna.
+11. **Vidga stegvis:** `offset_max 3`, `offset_min -2`, sedan `-6`.
+
+Säsongsväxlingen kräver sedan ingenting: stäng av **pumpen**, låt containern
+gå. Regulatorn går i `standby` när ingen offset kan producera värme, arkivet
+fortsätter fyllas, och träningen filtrerar bort sommaren själv. Att stoppa
+containern i stället är fel — noden faller till failsafe ≈ 0 °C efter fyra
+timmar och pumpen får order om att värma.
 
 ## Möjliga vidareutvecklingar
 
