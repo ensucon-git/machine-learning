@@ -533,6 +533,22 @@ terminalvärderingen fixar, fast i utvärderingen.
   och de två temperaturerna. `standby` behövde det mest: utan raden ser läget
   exakt ut som tystnad, och "är det trasigt eller är det sommar?" ska inte
   besvaras genom att läsa källkoden.
+- **HA-hjälparna vinner över `config.yaml`.** `refresh_settings` bygger
+  konfigurationen i ordningen fil → lägesprofil → mappade hjälpentiteter, så ett
+  `hpmpc set control.offset_min -0.5` skrivs tyst över av
+  `input_number.offset_min` vid nästa cykel. Verifierat: filen sa −0,5, HA sa
+  −6,0, effektivt blev −6,0. Undantaget är `MODE_OWNED` medan ett icke-default
+  läge är aktivt. Det gäller allt i `runtime_overrides:` — börvärde, komfortband,
+  offsetgränser, effekttak, **och `control.dry_run`** via
+  `input_boolean.hpmpc_dry_run`. `hpmpc settings` sista kolumn säger vilka fält
+  det gäller; står det en entitet där är filens värde inte det som körs.
+  (`hpmpc settings` visar dessutom filens värde, inte det effektiva.)
+- **`MPC offset sanity check` släcker `varmepump_mpc_aktiv` och tänder den
+  aldrig igen.** Automationen i paketet slår av MPC om offseten passerar +25
+  eller −10, nollställer offseten och låter resistorn drivas vidare med
+  sanningen. Det är rätt policy, men den *låser* — systemet ser ut att sluta
+  reagera tills någon slår på brytaren för hand. Semesterläget behöver
+  legitimt ~20 K, så höj gränsen om det ska användas.
 - **`git pull` uppdaterar inte containern.** Containern kör koden som bakades in
   i imagen; en pull rör bara källan på värden. Symptomet är förvirrande: ett
   `hpmpc set` svarar *"'heat_pump.perceived_min_c' is not changeable at runtime"*
@@ -693,16 +709,19 @@ delaren mot kända motstånd. Först därefter pumpen.
    ```
    Kontrollera mitt i veckan att `input_number.varmepump_offset` verkligen
    hoppar var sjätte timme.
-8. **Klampa offseten innan träningen:** `control.offset_min -0.5`,
-   `offset_max 0.5`. Modellen adopteras inom en cykel efter `train` och styr
-   skarpt direkt — klampningen är det som gör provkörningen ofarlig.
+8. **Klampa offseten innan träningen** till −0,5 / +0,5. Modellen adopteras
+   inom en cykel efter `train` och styr skarpt direkt — klampningen är det som
+   gör provkörningen ofarlig. **Gör det i Home Assistant** (`input_number.offset_min`
+   / `offset_max`), inte med `hpmpc set`: hjälparna är mappade i
+   `runtime_overrides` och vinner över filen varje cykel. `hpmpc settings` visar
+   vilka fält som ägs av HA.
 9. **`hpmpc collect --days 45 && hpmpc train && hpmpc power`**, som *en*
    `sh -c` inne i containern. Tre tal att läsa: `offset_excitation.std` väl över
    0,5 (annars var veckan förgäves), `validation RMSE` under 0,3 °C, laddaren
    nära 11 kW.
 10. **Några dygn med klampad offset**, läs `hpmpc plan`. Inte `dry_run` — se
     fällorna.
-11. **Vidga stegvis:** `offset_max 3`, `offset_min -2`, sedan `-6`.
+11. **Vidga stegvis**, på samma ställe: +3, sedan −2, sedan −6.
 
 Säsongsväxlingen kräver sedan ingenting: stäng av **pumpen**, låt containern
 gå. Regulatorn går i `standby` när ingen offset kan producera värme, arkivet

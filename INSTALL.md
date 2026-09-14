@@ -326,6 +326,14 @@ fullt medan loggen säger "dry run".
 Ta ifrån regulatorn befogenheten i stället, så fortsätter cyklerna skriva:
 
 ```bash
+hpmpc settings | grep offset_    # var styrs de ifrån?
+```
+
+Står det en entitet i sista kolumnen ägs fältet av Home Assistant och `hpmpc set`
+skrivs över vid nästa cykel — dra reglagen `input_number.offset_min` och
+`input_number.offset_max` till −0,5 respektive 0,5 i stället. Är kolumnen tom:
+
+```bash
 hpmpc set control.offset_min -0.5
 hpmpc set control.offset_max 0.5
 ```
