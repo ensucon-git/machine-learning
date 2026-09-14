@@ -878,6 +878,28 @@ gott. Kör det gärna igen efter en säsong.
 
 `hpmpc collect` varnar automatiskt när excitationen är för svag.
 
+Excitationen behöver ingen historik — den läser inget dataset och ingen modell.
+Kör den alltså **före** `collect` och `train`, inte efter, och se till att veckan
+hamnar inom det fönster `collect --days` läser. Stoppa styrcontainern under tiden,
+annars skriver två processer till samma entitet var femtonde minut.
+
+Det enda excitationen kräver är att pumpen faktiskt värmer: över
+`heat_pump.heat_stop_temp` gör offseten ingenting.
+
+### Säsongerna sköter sig själva
+
+Det finns inget sommarläge att slå på. Över värmestoppet kan inget offset
+producera värme, och då:
+
+- går regulatorn i `standby` och håller `fallback_offset` — sanningen till
+  pumpens givare — i stället för att optimera mellan identiska framtider;
+- fortsätter arkiveringen som vanligt, eftersom hål i historiken inte går att
+  fylla i efterhand;
+- hoppar anpassningen över de fönstren (`training.min_heating_fraction`), så att
+  ett dataset som spänner över ett år ändå bara lär sig av eldningssäsongen.
+
+Första kalla natten återgår allt av sig självt.
+
 ---
 
 ## Träning och vad siffrorna betyder

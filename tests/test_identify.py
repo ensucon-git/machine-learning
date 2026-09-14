@@ -176,3 +176,33 @@ def test_wind_and_sun_are_recovered_from_data(synthetic):
     assert weather["wind_pct_per_m_s"] == pytest.approx(100 * params.k_wind, abs=0.1)
     assert weather["solar_aperture_m2"] == pytest.approx(params.A_sol, abs=0.01)
     assert weather["ua_at_5_m_s"] > metrics["heat_loss_w_per_k"]
+
+
+# ------------------------------------------------- the heating season
+
+def test_windows_where_the_pump_cannot_heat_are_skipped(synthetic):
+    cfg, frame, _ = synthetic
+    summer = frame.copy()
+    # Above heat_stop_temp for every hour, even with the coldest excitation
+    # offset in the data applied on top.
+    summer["t_outdoor"] = summer["t_outdoor"] + 45.0
+
+    with pytest.raises(ValueError, match="could heat"):
+        make_windows(cfg=cfg, frame=summer)
+
+    # And the escape hatch still fits on it, for anyone who wants that.
+    assert len(make_windows(cfg=cfg, frame=summer, min_heating_fraction=0.0)) > 0
+
+
+def test_a_mixed_year_keeps_the_heating_half_and_drops_the_rest(synthetic):
+    cfg, frame, _ = synthetic
+    mixed = frame.copy()
+    half = len(mixed) // 2
+    mixed.iloc[:half, mixed.columns.get_loc("t_outdoor")] += 45.0
+
+    kept = len(make_windows(cfg=cfg, frame=mixed))
+    everything = len(make_windows(cfg=cfg, frame=mixed, min_heating_fraction=0.0))
+    assert 0 < kept < everything
+    # The winter half survives essentially intact; only the windows that reach
+    # into the warm stretch are lost.
+    assert kept > 0.4 * everything

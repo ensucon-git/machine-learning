@@ -350,6 +350,31 @@ Därefter sköter sig omträningen själv: `training.retrain_days: 30` gör att
 tjänsten tränar om när modellen blivit en månad gammal, vid `retrain_hour`
 lokal tid. Sätt till 0 om du hellre gör det för hand.
 
+### Sommaren sköter sig själv
+
+Det finns ingenting att stänga av när du stänger av värmepumpen för säsongen,
+och ingenting att slå på igen till hösten.
+
+Över `heat_pump.heat_stop_temp` (17 °C) gör pumpen ingen värme, och då gör
+offseten ingenting. Tre saker följer av det, alla automatiska:
+
+- **Regulatorn går i `standby`** när inte ens det mest negativa tillåtna
+  offsetet kan få pumpen under värmestoppet någonstans i horisonten. Den håller
+  `fallback_offset` — alltså sanningen till pumpens givare — och löser ingen
+  optimering. Första kalla natten lägger horisonten under värmestoppet igen och
+  MPC:n återupptar av sig själv, på nästa cykel.
+- **Arkiveringen fortsätter.** Den kostar några MB om året, hålen går inte att
+  fylla i efterhand, och utan utegivare är arkivet det enda stället din
+  utetemperatur finns. Pausa den inte.
+- **Träningen hoppar över sommaren.** Fönster där pumpen inte kunde värma
+  filtreras bort (`training.min_heating_fraction`), så anpassningen läser bara
+  eldningssäsongen även om datasetet spänner över ett helt år. Blir det inga
+  fönster kvar vägrar `hpmpc train` med besked, och den automatiska omträningen
+  behåller den modell du har i stället för att byta ut en vintermodell mot en
+  sommarmodell.
+
+Det enda du behöver göra är alltså att stänga av pumpen, och slå på den igen.
+
 ---
 
 ## 5. Drift

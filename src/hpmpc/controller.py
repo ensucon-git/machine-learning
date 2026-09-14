@@ -715,21 +715,19 @@ class Controller:
         if recorded:
             report.setdefault("archive", {})["recorded"] = recorded
 
-    def step(self, now: datetime | None = None, apply: bool | None = None) -> dict[str, Any]:
-        now = now or datetime.now(timezone.utc)
-        apply = (not self.cfg.control.dry_run) if apply is None else apply
-        report: dict[str, Any] = {"timestamp": now.isoformat(), "applied": False, "notes": []}
-        self.archive_cycle(report, now)
+    def _sense(self, now: datetime, report: dict[str, Any]) -> tuple[dict[str, Any], pd.DataFrame | None]:
+        """Read the sensors, resolve the outdoor temperature, archive the result.
 
-        setting_notes = self.refresh_settings()
-        if setting_notes:
-            report["settings"] = setting_notes
-
+        Shared by the control loop and the excitation experiment. The forecast
+        comes first: without an outdoor sensor it is also where the current
+        outdoor temperature comes from, and the offset means nothing until we
+        know what it is being added to. Excitation needs exactly the same
+        resolution - it writes "outdoor + offset" like any other cycle, and the
+        week it runs is the week the fit cares about most, so the weather has to
+        reach the archive too.
+        """
         readings = self.read_sensors()
 
-        # The forecast comes first: without an outdoor sensor it is also where
-        # the current outdoor temperature comes from, and the offset means
-        # nothing until we know what it is being added to.
         forecast: pd.DataFrame | None = None
         sources: dict[str, Any] = {}
         try:
@@ -747,6 +745,20 @@ class Controller:
 
         report["readings"] = {k: v for k, v in readings.items() if v is not None}
         self._archive_resolved(now, readings, forecast, report)
+        return readings, forecast
+
+    def step(self, now: datetime | None = None, apply: bool | None = None) -> dict[str, Any]:
+        now = now or datetime.now(timezone.utc)
+        apply = (not self.cfg.control.dry_run) if apply is None else apply
+        report: dict[str, Any] = {"timestamp": now.isoformat(), "applied": False, "notes": []}
+        self.archive_cycle(report, now)
+
+        setting_notes = self.refresh_settings()
+        if setting_notes:
+            report["settings"] = setting_notes
+
+        readings, forecast = self._sense(now, report)
+        outdoor = readings.get("t_outdoor")
 
         # Colder outside than the actuator can present? Keep commanding anyway -
         # the emulator is the pump's only sensor now - but say what it is costing.
@@ -795,6 +807,9 @@ class Controller:
             if actuator.get("warning"):
                 report["notes"].append(actuator["warning"])
                 log.warning("%s", actuator["warning"])
+
+        if self._heating_impossible(forecast) and self._safety_override(readings)[0] is None:
+            return self._standby(now, readings, report, apply)
 
         bias = self._residual_bias(forecast)
         exog = Exogenous(
@@ -864,8 +879,7 @@ class Controller:
         }
         # Excitation week is exactly the data the fit needs most; archive it.
         self.archive_cycle(report, now)
-        readings = self.read_sensors()
-        report["readings"] = {k: v for k, v in readings.items() if v is not None}
+        readings, _forecast = self._sense(now, report)
         problems = self.check_readings(readings)
         if problems:
             report["problems"] = problems
@@ -904,6 +918,47 @@ class Controller:
         except Exception as exc:  # pragma: no cover - never let it break control
             log.warning("Residual model failed (%s); continuing with physics only", exc)
             return np.zeros(len(forecast))
+
+    def _heating_impossible(self, forecast: pd.DataFrame | None) -> bool:
+        """True when no offset the limits allow can make the pump produce heat.
+
+        Above ``heat_stop_temp`` the pump makes nothing, so every candidate
+        schedule costs exactly the same and the optimiser is choosing between
+        identical futures. The test is deliberately on the coldest hour of the
+        horizon with the most negative offset available - including what the
+        potentiometer can physically present - because a mild autumn day where
+        a -5 K offset would still start the pump is a day worth optimising.
+        """
+        if forecast is None or "t_outdoor" not in forecast or not len(forecast):
+            return False
+        coldest = float(np.nanmin(forecast["t_outdoor"].to_numpy(dtype=float)))
+        if not np.isfinite(coldest):
+            return False
+        reach = min(self.cfg.control.offset_min, 0.0)
+        coldest_perceived = max(coldest + reach, self.cfg.heat_pump.perceived_min_c)
+        return coldest_perceived >= self.cfg.heat_pump.heat_stop_temp
+
+    def _standby(self, now: datetime, readings: dict[str, Any],
+                 report: dict[str, Any], apply: bool) -> dict[str, Any]:
+        """Summer: hold the neutral offset, keep archiving, decide nothing.
+
+        Holding ``fallback_offset`` shows the pump the truth, so the day it is
+        switched back on it starts from its own curve with no stale bias left
+        in the emulator. Getting here takes no setting, and leaving again takes
+        none either - the first cold night puts the horizon back below the heat
+        stop and the optimiser resumes on the next cycle.
+        """
+        offset, notes = self._limit(self.cfg.control.fallback_offset, readings.get("t_outdoor"))
+        report["mode"] = "standby"
+        report["offset"] = offset
+        report["notes"].extend(notes)
+        report["notes"].append(
+            f"above the pump's heat stop ({self.cfg.heat_pump.heat_stop_temp:.0f} C) for the whole "
+            f"horizon - no offset can make heat, holding {self.cfg.control.fallback_offset:+.1f} K"
+        )
+        self._write(offset, readings.get("t_outdoor"), report, apply)
+        self._persist(now, report)
+        return report
 
     def _collect_only(self, now: datetime, readings: dict[str, Any],
                       report: dict[str, Any], apply: bool) -> dict[str, Any]:

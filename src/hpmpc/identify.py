@@ -83,6 +83,7 @@ def make_windows(
     stride_hours: float | None = None,
     max_windows: int | None = None,
     use_measured_supply: bool | None = None,
+    min_heating_fraction: float | None = None,
 ) -> WindowSet:
     """Slice the history into fixed-length simulation windows.
 
@@ -109,6 +110,8 @@ def make_windows(
     cols_out, cols_wind, cols_sun, cols_price = [], [], [], []
     cols_offset, cols_target, cols_supply = [], [], []
     ti0, tf0 = [], []
+    min_heating = tr.min_heating_fraction if min_heating_fraction is None else min_heating_fraction
+    skipped_no_heat = 0
 
     for seg in segments(frame, tr.resample_minutes):
         if len(seg) < span:
@@ -118,6 +121,10 @@ def make_windows(
             seg["offset"] = 0.0
         seg["offset"] = seg["offset"].fillna(0.0)
         filt = _filtered_outdoor_for_segment(seg, cfg, dt_hours)
+        # The offset is part of the perceived temperature, so an excitation
+        # block that drags the pump below its heat-stop point counts as heating
+        # even on a mild day - which is exactly the window worth keeping.
+        heat_ok = hp.heating_enabled(filt, cfg.heat_pump)
 
         arr_out = seg["t_outdoor"].to_numpy(dtype=float)
         arr_wind = seg.get("wind", pd.Series(0.0, index=seg.index)).fillna(0.0).to_numpy(dtype=float)
@@ -133,6 +140,11 @@ def make_windows(
             sl = slice(start, start + span)
             if not np.isfinite(arr_ti[sl]).all() or not np.isfinite(arr_out[sl]).all():
                 continue
+            # Only the scored part matters; the burn-in exists to settle the
+            # slab estimate, not to be predicted.
+            if min_heating > 0.0 and float(np.mean(heat_ok[sl][burn:])) < min_heating:
+                skipped_no_heat += 1
+                continue
             cols_out.append(arr_out[sl])
             cols_wind.append(arr_wind[sl])
             cols_sun.append(arr_sun[sl])
@@ -145,6 +157,13 @@ def make_windows(
             tf0.append(filt[start])
 
     if not cols_out:
+        if skipped_no_heat:
+            raise ValueError(
+                f"No training windows where the pump could heat ({skipped_no_heat} skipped): this "
+                f"history is all above heat_stop_temp={cfg.heat_pump.heat_stop_temp:.0f} C, so the "
+                "offset did nothing and there is no gain to learn. Train on data from the heating "
+                "season, or set training.min_heating_fraction: 0 to fit on it anyway."
+            )
         raise ValueError(
             "Not enough contiguous history to build training windows - "
             f"need at least {span * dt_hours:.0f} h without gaps"
@@ -165,9 +184,16 @@ def make_windows(
     )
 
     if max_windows and len(ws) > max_windows:
-        # Keep an evenly spread subsample so all seasons/weather stay represented.
+        # Keep an evenly spread subsample so the whole range of weather that
+        # survived the heating filter stays represented.
         idx = np.linspace(0, len(ws) - 1, max_windows).round().astype(int)
         ws = ws.subset(np.unique(idx))
+    if skipped_no_heat:
+        log.info(
+            "Skipped %d windows where the pump could not heat (below %.0f%% of the scored hours) - "
+            "the offset has no effect there",
+            skipped_no_heat, 100.0 * min_heating,
+        )
     log.info("Built %d training windows (%d steps each, %d scored)", len(ws), span, span - burn)
     return ws
 

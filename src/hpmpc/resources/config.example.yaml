@@ -456,6 +456,21 @@ training:
   long_window_hours: 48             # long windows pin the slab, i.e. the storage capacity
   max_windows: 900
   validation_fraction: 0.25
+
+  # Skip training windows where the pump spent less than this share of the
+  # scored hours able to heat at all.
+  #
+  # Above heat_pump.heat_stop_temp the pump makes no heat, so the offset - the
+  # only input the controller has - does nothing. Summer is months of such
+  # hours: free-floating indoor temperature, open windows, hot water as the
+  # only load. They teach the fit nothing about the gain the whole scheme
+  # depends on, and past max_windows they crowd out the winter windows, since
+  # the subsample is spread evenly across the history.
+  #
+  # This is what lets the archive run all year with nothing to switch on and
+  # off by hand. 0 fits on everything.
+  min_heating_fraction: 0.5
+
   regularisation: 0.05
   restarts: 3
   use_residual_model: true

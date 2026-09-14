@@ -483,6 +483,20 @@ class TrainingConfig:
     restarts: int = 3
     max_windows: int = 900
     validation_fraction: float = 0.25
+    min_heating_fraction: float = 0.5
+    """Skip training windows where the pump spends less than this share of the
+    scored hours able to heat at all.
+
+    Above ``heat_pump.heat_stop_temp`` the pump makes no heat, so the offset -
+    the one input the controller has - does nothing. Those hours carry no
+    information about the gain the whole scheme depends on, and summer brings
+    months of them: free-floating indoor temperature, open windows, hot water
+    as the only load. Fitting on them trades winter accuracy for a season the
+    controller never acts in, and past ``max_windows`` they crowd the winter
+    windows out, because the subsample is spread evenly over the history.
+
+    Dropping them means the archive can run all year with nothing to switch on
+    and off by hand. 0 disables the filter and fits on everything."""
     retrain_days: int = 30
     """Retrain automatically when the model is older than this, if the
     controller is running as a service. 0 disables it. The house changes with

@@ -460,3 +460,63 @@ def test_the_untrained_message_names_the_two_commands(cfg):
     assert "hpmpc train" in str(excinfo.value)
     # The tolerant loader turns the same situation into a state.
     assert load_model_if_trained(cfg)[1] is None
+
+
+# --------------------------------------------------------------- seasons
+
+def _warm(fake_ha, degrees: float) -> None:
+    """Put the whole forecast, and the sensor, well into the summer."""
+    fake_ha.set("sensor.outdoor", degrees)
+    hourly = fake_ha.weather_forecast("weather.home")
+    for row in hourly:
+        row["temperature"] = degrees
+    fake_ha.weather_forecast = lambda entity_id, forecast_type="hourly": hourly
+
+
+def test_no_offset_can_heat_means_standby_not_a_decision(controller, cfg, fake_ha):
+    # 25 C out with offset_min -8 leaves the pump at 17 C perceived at best,
+    # which is its heat stop: every schedule produces exactly no heat.
+    _warm(fake_ha, 25.0)
+    report = controller.step(now=fake_ha.now)
+    assert report["mode"] == "standby"
+    assert report["offset"] == pytest.approx(cfg.control.fallback_offset)
+    assert "mpc" not in report
+    # Standby still writes: the emulator is the pump's only sensor, so it has
+    # to keep seeing the truth rather than a frozen value.
+    assert dict(fake_ha.written)["number.fake_temp"] == pytest.approx(25.0)
+
+
+def test_a_mild_day_the_offset_can_still_heat_is_optimised(controller, cfg, fake_ha):
+    # 20 C out, but -8 K of offset shows the pump 12 C - below its heat stop,
+    # so there is a real decision to make and standby would be wrong.
+    _warm(fake_ha, 20.0)
+    assert controller.step(now=fake_ha.now)["mode"] == "mpc"
+
+
+def test_standby_ends_by_itself_when_it_turns_cold(controller, fake_ha):
+    _warm(fake_ha, 25.0)
+    assert controller.step(now=fake_ha.now)["mode"] == "standby"
+    _warm(fake_ha, 5.0)
+    assert controller.step(now=fake_ha.now)["mode"] == "mpc"
+
+
+def test_excitation_works_without_an_outdoor_sensor_entity(cfg, fake_ha):
+    """The deployed setup: no sensor, the weather entity carries the number.
+
+    Excitation used to read the sensors only, so with entities.outdoor_temp
+    empty it paused itself, wrote nothing for the whole week, and archived no
+    weather - losing exactly the week the fit needs most.
+    """
+    cfg.entities.outdoor_temp = ""
+    cfg.validate()
+    fake_ha.drop("sensor.outdoor")
+    fake_ha.set("weather.home", "cloudy",
+                attributes={"temperature": -5.0, "wind_speed": 3.0, "humidity": 80.0})
+
+    report = Controller(cfg, ThermalParams(), fake_ha).excite_step(now=fake_ha.now, apply=True)
+
+    assert report["mode"] == "excitation"
+    assert "problems" not in report
+    assert report["readings"]["t_outdoor"] == pytest.approx(-5.0)
+    assert dict(fake_ha.written)["number.fake_temp"] == pytest.approx(-5.0 + report["offset"])
+    assert "t_outdoor" in report["archive"]["recorded"]

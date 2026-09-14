@@ -133,6 +133,13 @@ class ControllerService:
                 "validation_rmse_c": report.get("thermal", {}).get("validation", {}).get("rmse_c"),
             }
             log.info("Retrained: validation RMSE %s C", self.last_training["validation_rmse_c"])
+        except ValueError as exc:
+            # Out of season this is the normal answer, not a fault: identification
+            # refuses a dataset with no hours the pump could heat in. Keeping the
+            # model fitted on the last heating season is exactly right, and it
+            # means the summer needs nothing switched off by hand.
+            log.warning("Not retraining (%s); staying on the model we have", exc)
+            self.last_training = {"at": datetime.now(timezone.utc).isoformat(), "skipped": str(exc)}
         except Exception as exc:  # pragma: no cover - never take control down for this
             log.error("Automatic retraining failed (%s); continuing on the previous model", exc)
             self.last_training = {"at": datetime.now(timezone.utc).isoformat(), "error": str(exc)}

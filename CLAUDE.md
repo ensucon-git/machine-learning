@@ -106,6 +106,20 @@ har ingen annan givare än den vi driver, och historiken anpassningen behöver
 samlas in av samma slinga. `adopt_model` växlar över utan omstart så fort
 `hpmpc train` körts.
 
+**Säsongen hanteras av fysiken, inte av en inställning.** Över
+`heat_pump.heat_stop_temp` gör pumpen ingen värme, alltså gör offseten
+ingenting. Tre följder, alla automatiska: regulatorn går i `standby` och håller
+`fallback_offset` när inte ens `offset_min` kan få horisontens kallaste timme
+under värmestoppet; arkiveringen fortsätter (hål går inte att fylla i efterhand,
+och utan utegivare är arkivet enda stället `t_outdoor` finns); och
+`make_windows` hoppar över fönster där pumpen inte kunde värma
+(`training.min_heating_fraction: 0.5` av de *poängsatta* stegen, inte
+inbränningen). Alternativet — att pausa `collect` över sommaren — sågs över och
+valdes bort: det ger permanenta hål i den enda historiken, och löser fel problem.
+Det är träningen som ska filtrera, inte insamlingen. Testet på standby är
+medvetet på horisontens *kallaste* timme med det mest negativa tillåtna offsetet:
+en mild höstdag där −8 K skulle starta pumpen är en dag värd att optimera.
+
 **Historiken kopieras ur recordern varje styrcykel** (`archive.py`). Recordern är
 ett rullande fönster som rensas av ett annat system; identifieringen vill ha sex
 veckor. Att kräva `purge_keep_days: 45` gör modellen beroende av en inställning
@@ -499,6 +513,14 @@ terminalvärderingen fixar, fast i utvärderingen.
   som ser förvillande lika ut: med den gamla typiska Daikintabellen och den
   uppmätta potentiometern blir räckvidden −19,83 → skrivs "−19.8", och den
   ändras först när `ntc:`-tabellen byts (då till −20,4).
+- **`excite_step` måste lösa ut utetemperaturen precis som `step`.** Den läste
+  förr bara `read_sensors()`, så med tom `entities.outdoor_temp` — exempel-
+  konfigurationens normalfall — blev `t_outdoor` None, `check_readings` sa
+  *"t_outdoor is unavailable"*, excitationen pausade sig själv till
+  `fallback_offset`, `_write` returnerade tidigt och skrev **ingenting**, och
+  `_archive_resolved` kallades aldrig. En hel excitationsvecka gav alltså noll
+  excitation *och* ett hål i arkivet i precis den vecka anpassningen behöver
+  mest. Båda vägarna delar nu `_sense()`.
 - **Kalibrera mot pumpens display, inte mot givaren.** Ett par avlästa som
   "jag skickade R, pumpen säger T" innefattar kabelresistans, kontakt och
   pumpens egen linjärisering. En bänkmätning av termistorn missar allt det.
@@ -612,10 +634,18 @@ delaren mot kända motstånd. Först därefter pumpen.
 2. ~~Bestäm vilken givare som emuleras~~ — gjort: KRCS01-1-ingången.
 3. ~~`hpmpc calibrate-ntc` mot pumpens display~~ — gjort, tio punkter.
 4. `hpmpc curve` med de två kurvpunkterna från pumpens display.
-5. En vecka `hpmpc excite`.
+5. En vecka `hpmpc excite`. Kräver ingen historik — den läser inget dataset och
+   ingen modell — men den ska ligga **före** `collect`/`train` och inom det
+   fönster `collect --days` läser. Tre villkor: `input_boolean.varmepump_mpc_aktiv`
+   på, styrcontainern **stoppad** (annars skriver två processer till samma entitet
+   var 15:e minut), och att det är kallt nog att pumpen faktiskt värmer.
 6. `hpmpc collect && hpmpc train && hpmpc power`.
 7. Några dygn med `dry_run: true`, läs planerna.
 8. Skarpt.
+
+Säsongsväxlingen kräver ingenting av användaren: stäng av pumpen, slå på den
+igen. Regulatorn går i `standby` när ingen offset kan producera värme, arkivet
+fortsätter fyllas, och träningen filtrerar bort sommaren själv.
 
 ## Möjliga vidareutvecklingar
 

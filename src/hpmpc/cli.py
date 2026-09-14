@@ -1047,6 +1047,11 @@ def _print_plan(report: dict[str, Any]) -> None:
             # and it lasts weeks. Do not describe it as something going wrong.
             print(f"\nCollecting history - no model yet, holding "
                   f"{report.get('offset', 0.0):+.2f} K  [collecting]")
+        elif report.get("mode") == "standby":
+            # Nor is this: it is summer. There is no plan because no offset
+            # would change anything, not because anything failed.
+            print(f"\nOut of season - the pump cannot heat anywhere in the horizon, holding "
+                  f"{report.get('offset', 0.0):+.2f} K  [standby]")
         else:
             print(
                 f"\nNo plan this cycle - the controller fell back to "
