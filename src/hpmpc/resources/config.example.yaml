@@ -39,14 +39,16 @@ entities:
   # better signal when you have one: it measures the air this building actually
   # loses heat to, rather than a 2.5 km grid square.
   #
-  # The proxy board has a channel for exactly that, and it publishes
-  # sensor.varmepump_proxy_verklig_utetemperatur. It stays empty here until the
-  # pump's own thermistor is actually moved onto the board's J1 - an ADC reading
-  # an open input is not a temperature, and pointing this at it would poison the
-  # training data rather than improve it. Expect a step against the SMHI-derived
-  # history on the day you do switch: it is a different measurement, not a
-  # better-calibrated version of the same one.
-  outdoor_temp: ""
+  # The proxy board has a channel for exactly that, and this is it. The pump's
+  # own thermistor moved onto the board's J1 in 2026-09, so the reading is a
+  # real measurement of the air at the house rather than a 2.5 km grid square,
+  # and it wins over entities.weather below.
+  #
+  # Empty it again if the thermistor ever comes off J1: an ADC reading an open
+  # input is not a temperature, and it would poison the training data rather
+  # than improve it. The node guards against that too - it publishes nothing
+  # outside -45..+60 C, so the templates fall through to the weather entity.
+  outdoor_temp: sensor.varmepump_proxy_verklig_utetemperatur
   price: ""                                       # only a fallback; see forecast.price_source
 
   wind_speed: ""                                  # m/s - from SMHI when empty
@@ -188,15 +190,24 @@ heat_pump:
   efficiency_scale: 1.0             # refitted from your power sensor by 'hpmpc train'
   capacity_scale: 1.0
 
-  # Daikin sets the weather-dependent curve as two endpoints. This example is
-  # "40 C leaving water at -15 C outdoor, 25 C at +15 C outdoor", a typical
-  # floor-heating curve. Convert your own with:
-  #   hpmpc curve --point=-15:40 --point=15:25
-  curve_slope: 0.50
-  curve_offset: 22.5
+  # Daikin sets the weather-dependent curve as two endpoints. These are this
+  # plant's own, read off the pump's display (2026-09): 45 C leaving water at
+  # -20 C outdoor, 25 C at +11 C. Convert your own with:
+  #   hpmpc curve --point=-20:45 --point=11:25
+  # Negative temperatures need the equals form - '--point -20:45' is parsed as
+  # a flag, not a value.
+  curve_slope: 0.645
+  curve_offset: 19.19
   curve_ref: 20.0
   supply_min: 22.0
-  supply_max: 40.0                  # floor heating: never let it plan above this
+
+  # Set this to the pump's OWN ceiling, not to what the floor loop is designed
+  # for. The curve above asks for 45 C at -20 C outdoor; capping the model at
+  # 40 while the pump keeps climbing would make the model under-predict the
+  # heat delivered in exactly the coldest hours, where being wrong costs most.
+  # 45 C is high for a slab, and this house reaches it roughly never - it is
+  # there because the coldest days need the whole building heated at once.
+  supply_max: 45.0
   loop_delta_t: 5.0
   outdoor_filter_hours: 3.0         # the pump's own outdoor averaging; refitted during training
   heat_stop_temp: 18.0              # space heating off above this filtered outdoor temperature

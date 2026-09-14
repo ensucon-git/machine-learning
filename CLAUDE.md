@@ -24,7 +24,7 @@ bestämt, varför, och vilka fällor som redan är upptäckta.
 | Effektmätning | Victron, **hela husets effekt per fas** — ingen mätare enbart på pumpen |
 | Elbilsladdare | 11 kW över alla tre faser, `binary_sensor.eh6nh5cd_charging` (`Charging` / `Not charging`) |
 | Körs på | NUC, Docker (Portainer), skilt från Home Assistant |
-| Utegivare | **ingen** — utetemperaturen hämtas via `weather.smhi_home` i Home Assistant (direkt-SMHI gav 404 hos användaren). `entities.outdoor_temp` finns kvar för att koppla in en givare senare |
+| Utegivare | Pumpens egen termistor sitter på kortets **J1** sedan 2026-09 och publiceras som `sensor.varmepump_proxy_verklig_utetemperatur`. Den står i `entities.outdoor_temp` och vinner över `weather.smhi_home`, som fortfarande bär prognosen (direkt-SMHI gav 404 hos användaren) |
 
 Entiteterna, som de faktiskt heter:
 
@@ -217,6 +217,15 @@ terminalvärderingen fixar, fast i utvärderingen.
   filen, nodens egen `calibration:` för J1-givaren, och `r25`/`beta` i mallen
   `Utegivare mAlresistans` (den sista som betaanpassning, 0,5 K sämre — den är
   inte i styrvägen).
+- **Värmekurvan är avläst på pumpens display** (2026-09): 45 °C framledning vid
+  −20 °C ute, 25 °C vid +11 °C. Ger `curve_slope: 0.645`, `curve_offset: 19.19`
+  vid `curve_ref: 20`. **`supply_max` höjdes därför till 45** — den ska följa
+  pumpens eget tak, inte golvslingans dimensionering: med modellen klippt på 40
+  medan pumpen fortsätter uppåt underskattas levererad värme i precis de
+  kallaste timmarna. 45 °C är högt för en platta, men huset är stort och pumpen
+  når dit i praktiken aldrig; den finns för de absolut kallaste dygnen.
+  Anpassningen kan ändå inte förbättra kurvan här: `fit_heating_curve` kräver
+  `entities.supply_temp`, som är tom.
 - **Hela styrkedjan går live** (2026-09): hpmpc → `input_number.varmepump_fiktiv_utetemp`
   → automationen `MPC to sensor emulator` → `number.varmepump_proxy_simulerad_utetemperatur`
   → noden → digipotarna → pumpen. Därmed faller två antaganden: **Docker-imagen är
@@ -428,14 +437,17 @@ terminalvärderingen fixar, fast i utvärderingen.
 - **Arkivet och recordern kan inte hamna i konflikt.** Raderas arkivet fyller det
   sig från det recordern har kvar; kortas recorderns retention behåller arkivet
   det redan kopierat. `training.archive: false` går direkt mot recordern som förut.
-- **Utetemperaturen kommer från `weather.smhi_home` via Home Assistant**, inte
-  direkt-SMHI, eftersom `entities.outdoor_temp` är tom här. Direktvägen gav 404
-  hos användaren (se ovan); väderentitetens *attribut* (`temperature`,
-  `wind_speed`, `humidity`) läses och används på samma sätt en riktig givare
-  skulle vara — dess *tillstånd* är bara ett väderomdöme (`cloudy`) och bär
-  ingen siffra. En givare vid huset är bättre om den tillkommer — den mäter
-  luften byggnaden faktiskt förlorar värme till — och vinner automatiskt så
-  fort entiteten fylls i.
+- **Utetemperaturen kommer nu från givaren på J1**
+  (`entities.outdoor_temp: sensor.varmepump_proxy_verklig_utetemperatur`, satt
+  2026-09). Den vinner över väderentiteten i `resolve_outdoor`, eftersom den
+  mäter luften byggnaden faktiskt förlorar värme till i stället för en 2,5 km
+  rutpunkt. `weather.smhi_home` bär fortfarande *prognosen* och är reservväg
+  för nu-värdet: dess *attribut* (`temperature`, `wind_speed`, `humidity`) läses
+  som en givare skulle, medan dess *tillstånd* bara är ett väderomdöme
+  (`cloudy`) utan siffra. Direkt-SMHI gav 404 hos användaren, se ovan.
+  **Räkna med ett steg i historiken** vid bytesdatumet: arkivet före det bär
+  SMHI-härledd temperatur, efter det termistorn. Två olika mätningar, inte en
+  bättre kalibrering av samma.
 - **Automatisk omträning finns bara i `hpmpc serve`, inte i `hpmpc run`.**
   `maybe_retrain()` (i `api.py`) kör var `training.retrain_days` (30 som
   standard) vid `retrain_hour` (natten), bygger dataset ur arkivet och byter
@@ -482,9 +494,9 @@ terminalvärderingen fixar, fast i utvärderingen.
   `Heat pump perceived outdoor temperature` är bokstavligen
   `{{ states('input_number.varmepump_fiktiv_utetemp') }}`. Att de följs åt är
   alltså ingen bekräftelse på något. `Utegivare verklig` skiljer sig däremot
-  legitimt: med tom `entities.outdoor_temp` räknar hpmpc på SMHI:s rutpunkt medan
-  den sensorn är termistorn på huset. Två olika mätningar, inte ett fel — de
-  konvergerar den dag `entities.outdoor_temp` pekar på noden.
+  legitimt så länge de kommer från olika mätningar. Sedan
+  `entities.outdoor_temp` pekar på noden (2026-09) läser båda termistorn och ska
+  följas åt; gör de inte det är det ett verkligt fel, inte två källor.
 - **Nodens `Simulerad utetemperatur` visar −25 när den är osatt.** Det är
   `min_value`, och Home Assistant ritar ett reglage utan tillstånd i sitt
   vänstra ändläge. Det ser ut som ett kommenderat värde men är ingenting — läs
@@ -613,14 +625,12 @@ delaren mot kända motstånd. Först därefter pumpen.
 `resistance_ohm: 97377`, `wiper_ohm: 123`, `perceived_min_c: -19.5`, HA-paketets
 `pots = 2`, ändlägeslarmet på `510` och wipermallen på de uppmätta talen.
 `entities.pot_wiper` pekade redan rätt. Kvar i den tråden:
-- `entities.outdoor_temp` — givaren sitter på J1 sedan 2026-09, så den kan fyllas
-  i med `sensor.varmepump_proxy_verklig_utetemperatur`. **Gör det tidigt, inte
-  sent.** Bytet ger ett steg i träningsdatan mot den SMHI-härledda historiken,
-  och just nu är arkivet i princip tomt — byter man nu blir hela datasetet
-  homogent från dag ett, byter man om en månad ligger diskontinuiteten mitt i
-  det anpassningen ska läsa. Kontrollera först att nodens värde ser rimligt ut
-  mot SMHI ett dygn; det ersätter delarprovet mot kända motstånd som aldrig
-  gjordes.
+- `entities.outdoor_temp` — **gjort**, pekar på
+  `sensor.varmepump_proxy_verklig_utetemperatur`. Gjort tidigt med flit: arkivet
+  var i princip tomt, så hela datasetet blir homogent från dag ett i stället för
+  att bära en diskontinuitet mitt i. Kvar att göra i efterhand: jämför nodens
+  värde mot SMHI ett dygn — det ersätter delarprovet mot kända motstånd som
+  aldrig gjordes.
 - `control.offset_min` lämnad på −6 med flit. Räckvidden tillåter mer nu, men
   läs en vecka planer först (`docs/HARDWARE.md#sänk-inte-offsetgränserna-för-snabbt`).
 - `binary_sensor.varmepump_proxy_online` — **gjort**, automationerna
@@ -633,7 +643,8 @@ delaren mot kända motstånd. Först därefter pumpen.
 1. `hpmpc providers` — stäm av marginalkostnaden mot elfakturan.
 2. ~~Bestäm vilken givare som emuleras~~ — gjort: KRCS01-1-ingången.
 3. ~~`hpmpc calibrate-ntc` mot pumpens display~~ — gjort, tio punkter.
-4. `hpmpc curve` med de två kurvpunkterna från pumpens display.
+4. ~~`hpmpc curve` med de två kurvpunkterna från pumpens display~~ — gjort:
+   −20:45 och 11:25, insatt tillsammans med `supply_max: 45`.
 5. En vecka `hpmpc excite`. Kräver ingen historik — den läser inget dataset och
    ingen modell — men den ska ligga **före** `collect`/`train` och inom det
    fönster `collect --days` läser. Tre villkor: `input_boolean.varmepump_mpc_aktiv`
