@@ -386,6 +386,24 @@ class ControlConfig:
     Leave at 0 when the price entity already includes VAT."""
     dry_run: bool = False
     max_data_age_minutes: float = 45.0
+    """How old the outdoor reading may be before the controller falls back.
+
+    Short on purpose: the outdoor temperature is literally what the pump is
+    told, and the sensor on the board's J1 reports every minute."""
+    max_indoor_age_minutes: float = 1440.0
+    """How long the indoor reading may go without a sign of life.
+
+    Deliberately long. Indoor temperature over a concrete slab is the slowest
+    signal in the system, and a sensor that reports on change with a 0.1-0.5 C
+    threshold can legitimately stay silent for hours in a house that is simply
+    holding steady - which is what a well-controlled house does. Treating that
+    as a fault disables control precisely when it is working best.
+
+    It is a backstop, not the dead-sensor detection. A Zigbee or ESPHome device
+    that actually goes away is marked unavailable by its own integration and
+    caught at once; and a sensor that heartbeats is judged on last_reported,
+    which stays fresh however steady the value. This only has to catch an
+    integration with neither, frozen on its last value."""
     actuator_error_warn_c: float = 1.5
     """Warn when what the pump believes differs from what was commanded by more
     than this, averaged over many cycles. This is the only closed-loop check on

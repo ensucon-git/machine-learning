@@ -681,7 +681,12 @@ def cmd_check(args: argparse.Namespace) -> int:
             ok = False
             continue
         age = state.age()
-        age_txt = f"{age.total_seconds() / 60:.0f} min ago" if age else "unknown age"
+        # Say which clock the age came from. "last changed" on a steady sensor
+        # is not a fault, and "last reported" is the one that proves the
+        # device is still talking - the difference is exactly what decides
+        # whether an hours-old indoor reading should worry anyone.
+        age_txt = (f"{age.total_seconds() / 60:.0f} min since {state.age_source}"
+                   if age else "unknown age")
         print(f"  ok       {name:16} {entity_id} = {state.state} ({age_txt})")
 
     configured = {k: v for k, v in cfg.entities.outputs().items() if v}

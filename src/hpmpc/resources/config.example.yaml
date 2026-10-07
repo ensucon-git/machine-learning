@@ -361,7 +361,20 @@ control:
 
   observer_gain: 1.0
   fallback_offset: 0.0              # used whenever sensors are missing or implausible
+  # Two staleness limits, because the two readings fail differently.
+  #
+  # Outdoor is what the pump is told and changes constantly; the sensor on J1
+  # reports every minute, so an hour of silence there is a real fault.
+  #
+  # Indoor over a concrete slab can sit on one number for a day in a house that
+  # is doing exactly what it should. Home Assistant does not move last_updated
+  # when a sensor repeats a value, so judged on that a steady house looks dead.
+  # Age is taken from last_reported where Home Assistant sends it (2024.3+),
+  # which moves on every report, changed or not - and a device that actually
+  # goes away is marked unavailable by its own integration and caught at once.
+  # The indoor limit is only the backstop for an integration with neither.
   max_data_age_minutes: 45
+  max_indoor_age_minutes: 1440
   warm_start_hours: 24
   dry_run: false                    # true = compute everything, write nothing
 

@@ -175,7 +175,7 @@ terminalvärderingen fixar, fast i utvärderingen.
 
 ## Verifierat kontra antaget
 
-**Verifierat** (374 tester, syntetiskt hus med känd sanning):
+**Verifierat** (384 tester, syntetiskt hus med känd sanning):
 - Identifieringen återfinner värmekurva (lutning 0,3495 mot 0,35, R² 0,997) och
   husparametrar (UA +3 %, Ci +4 %, `k_wind` +3 %, plattans tidskonstant inom 8 %).
   `hpmpc train` skriver ut vad den lärt sig om sol och vind som area och
@@ -549,6 +549,22 @@ terminalvärderingen fixar, fast i utvärderingen.
   sanningen. Det är rätt policy, men den *låser* — systemet ser ut att sluta
   reagera tills någon slår på brytaren för hand. Semesterläget behöver
   legitimt ~20 K, så höj gränsen om det ska användas.
+- **En stabil innetemperatur är inte en död givare.** Upptäckt live under första
+  excitationsförsöket 2026-10: `sensor.hall_temperature_2` stod på samma värde i
+  fyra timmar, och varje cykel sa `t_indoor is stale (225 min > 45 min)` →
+  excitationen pausade sig själv till offset 0. Home Assistant flyttar inte
+  `last_updated` när en givare upprepar ett värde, så en platta som håller
+  temperaturen — alltså ett hus som fungerar — såg död ut. Tre ändringar:
+  åldern tas från **`last_reported`** när HA skickar den (2024.3+; flyttas vid
+  varje rapport, ändrad eller ej), innetemperaturen har en **egen gräns**
+  `max_indoor_age_minutes: 1440` medan utetemperaturen behåller 45 min, och
+  `hpmpc check` skriver vilken klocka åldern kommer från. Den riktiga
+  dödgivardetekteringen är integrationens egen: en Zigbee- eller ESPHome-enhet
+  som försvinner blir `unavailable` → `None` → reservläge direkt. Tidsgränsen
+  är bara reservskyddet för en integration utan vare sig hjärtslag eller
+  tillgänglighetsspårning. **Varför det inte syntes förut:** `check_readings`
+  nås aldrig i `collecting` — `step()` går till `_collect_only` innan dess —
+  så felet var osynligt tills excite, som kör kontrollen utan modell.
 - **`git pull` uppdaterar inte containern.** Containern kör koden som bakades in
   i imagen; en pull rör bara källan på värden. Symptomet är förvirrande: ett
   `hpmpc set` svarar *"'heat_pump.perceived_min_c' is not changeable at runtime"*

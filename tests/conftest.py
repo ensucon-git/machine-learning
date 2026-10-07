@@ -77,12 +77,17 @@ class FakeHomeAssistant:
 
     # -- helpers ---------------------------------------------------------
     def set(self, entity_id: str, value: Any, attributes: dict[str, Any] | None = None,
-            age_minutes: float = 1.0) -> None:
+            age_minutes: float = 1.0, reported_minutes: float | None = None) -> None:
+        """``age_minutes`` is since the value last changed; ``reported_minutes``,
+        when given, is since the integration last reported it - the heartbeat
+        that keeps a steady sensor visibly alive."""
         self._states[entity_id] = EntityState(
             entity_id=entity_id,
             state=str(value),
             attributes=attributes or {},
             last_updated=self.now - timedelta(minutes=age_minutes),
+            last_reported=(None if reported_minutes is None
+                           else self.now - timedelta(minutes=reported_minutes)),
         )
 
     def drop(self, entity_id: str) -> None:

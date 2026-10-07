@@ -65,11 +65,22 @@ def test_missing_indoor_sensor_falls_back(controller, cfg, fake_ha):
     assert any("unavailable" in p for p in report["problems"])
 
 
-def test_stale_data_falls_back(controller, cfg, fake_ha):
-    fake_ha.set("sensor.indoor", 21.0, age_minutes=cfg.control.max_data_age_minutes + 10)
+def test_stale_outdoor_data_falls_back(controller, cfg, fake_ha):
+    fake_ha.set("sensor.outdoor", -5.0, age_minutes=cfg.control.max_data_age_minutes + 10)
     report = controller.step(now=fake_ha.now)
     assert report["mode"] == "fallback"
-    assert any("stale" in p for p in report["problems"])
+    assert any("t_outdoor is stale" in p for p in report["problems"])
+
+
+def test_indoor_data_silent_beyond_its_own_limit_falls_back(controller, cfg, fake_ha):
+    # This used to fire at the outdoor limit, so an indoor sensor repeating one
+    # value for an hour - a house holding steady - sent the controller to its
+    # fallback. Indoor has its own, much longer, limit now; past it, the
+    # fallback still applies.
+    fake_ha.set("sensor.indoor", 21.0, age_minutes=cfg.control.max_indoor_age_minutes + 10)
+    report = controller.step(now=fake_ha.now)
+    assert report["mode"] == "fallback"
+    assert any("t_indoor is stale" in p for p in report["problems"])
 
 
 def test_implausible_reading_falls_back(controller, fake_ha):
@@ -550,10 +561,10 @@ def test_a_paused_excitation_says_which_reading_is_at_fault(controller, cfg, fak
     it pauses itself, the reason has to be on screen next to the note, not only
     in the report dict.
     """
-    fake_ha.set("sensor.indoor", 21.0, age_minutes=cfg.control.max_data_age_minutes + 10)
+    fake_ha.set("sensor.outdoor", -5.0, age_minutes=cfg.control.max_data_age_minutes + 10)
     report = controller.excite_step(now=fake_ha.now, apply=False)
     assert len(report["problems"]) == 1
-    assert report["problems"][0].startswith("t_indoor is stale")
+    assert report["problems"][0].startswith("t_outdoor is stale")
     assert "> 45 min" in report["problems"][0]
     assert any("excitation paused" in note for note in report["notes"])
 
@@ -564,3 +575,47 @@ def test_the_staleness_limit_is_changeable_at_runtime(cfg):
     updated, notes = apply_settings(cfg, {"control.max_data_age_minutes": 120.0})
     assert updated.control.max_data_age_minutes == 120.0
     assert notes
+
+
+
+# ------------------------------------------- a steady house is not a dead sensor
+
+def test_a_steady_indoor_reading_that_still_reports_is_fresh(controller, fake_ha):
+    """The case from the field: 21.4 C for four hours, sensor fine.
+
+    Home Assistant leaves last_updated alone when a sensor repeats its value,
+    so judged on that the reading was 225 minutes old and the excitation
+    paused itself every cycle. last_reported moves on every report.
+    """
+    fake_ha.set("sensor.indoor", 21.4, age_minutes=225, reported_minutes=2)
+    assert controller.check_readings(controller.read_sensors()) == []
+
+
+def test_a_steady_indoor_reading_without_a_heartbeat_is_still_trusted(controller, fake_ha):
+    # Some integrations only ever report on change. A slab house holding one
+    # number for hours is then indistinguishable from silence - and is far more
+    # likely than a device that died without its integration noticing.
+    fake_ha.set("sensor.indoor", 21.4, age_minutes=225)
+    assert controller.check_readings(controller.read_sensors()) == []
+
+
+def test_an_indoor_reading_silent_for_more_than_a_day_is_stale(controller, cfg, fake_ha):
+    fake_ha.set("sensor.indoor", 21.4, age_minutes=cfg.control.max_indoor_age_minutes + 60)
+    problems = controller.check_readings(controller.read_sensors())
+    assert len(problems) == 1 and problems[0].startswith("t_indoor is stale")
+
+
+def test_the_outdoor_reading_keeps_its_short_limit(controller, cfg, fake_ha):
+    # It is what the pump is told, and it changes all the time - an hour of
+    # silence there is genuinely suspicious.
+    fake_ha.set("sensor.outdoor", -5.0, age_minutes=cfg.control.max_data_age_minutes + 15)
+    problems = controller.check_readings(controller.read_sensors())
+    assert len(problems) == 1 and problems[0].startswith("t_outdoor is stale")
+
+
+def test_a_steady_indoor_reading_lets_the_excitation_run(controller, cfg, fake_ha):
+    cfg.control.max_change_per_cycle = 99.0
+    fake_ha.set("sensor.indoor", 21.4, age_minutes=225)
+    report = controller.excite_step(now=fake_ha.now, apply=True)
+    assert "problems" not in report
+    assert not any("paused" in note for note in report["notes"])

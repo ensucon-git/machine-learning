@@ -298,9 +298,18 @@ class Controller:
         return None, "unavailable"
 
     def check_readings(self, readings: dict[str, Any]) -> list[str]:
+        # Separate limits, because the two signals fail differently. The
+        # outdoor value is what the pump is told and changes all the time, so
+        # silence there is suspicious within the hour. The indoor value over a
+        # slab can sit on one number for a day in a house that is doing exactly
+        # what it should; a dead indoor device is caught by its integration
+        # going unavailable, long before any age limit would notice.
+        control = self.cfg.control
         problems: list[str] = []
-        max_age = self.cfg.control.max_data_age_minutes
-        for name, bounds in (("t_indoor", SANE_INDOOR), ("t_outdoor", SANE_OUTDOOR)):
+        for name, bounds, max_age in (
+            ("t_indoor", SANE_INDOOR, control.max_indoor_age_minutes),
+            ("t_outdoor", SANE_OUTDOOR, control.max_data_age_minutes),
+        ):
             v = readings.get(name)
             if v is None:
                 problems.append(f"{name} is unavailable")
