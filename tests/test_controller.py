@@ -518,7 +518,9 @@ def test_excitation_works_without_an_outdoor_sensor_entity(cfg, fake_ha):
     assert report["mode"] == "excitation"
     assert "problems" not in report
     assert report["readings"]["t_outdoor"] == pytest.approx(-5.0)
-    assert dict(fake_ha.written)["number.fake_temp"] == pytest.approx(-5.0 + report["offset"])
+    # The written value is rounded for the entity; the offset itself is not.
+    assert dict(fake_ha.written)["number.fake_temp"] == pytest.approx(
+        -5.0 + report["offset"], abs=0.01)
     assert "t_outdoor" in report["archive"]["recorded"]
 
 
@@ -539,3 +541,26 @@ def test_dry_run_is_quiet_when_the_pump_has_its_own_sensor(controller, cfg, fake
     cfg.validate()
     report = controller.step(now=fake_ha.now, apply=False)
     assert not any("failsafe" in note for note in report["notes"])
+
+
+def test_a_paused_excitation_says_which_reading_is_at_fault(controller, cfg, fake_ha):
+    """'sensor problem - excitation paused' on its own is not actionable.
+
+    The excitation runs for a week in the foreground of someone's terminal; if
+    it pauses itself, the reason has to be on screen next to the note, not only
+    in the report dict.
+    """
+    fake_ha.set("sensor.indoor", 21.0, age_minutes=cfg.control.max_data_age_minutes + 10)
+    report = controller.excite_step(now=fake_ha.now, apply=False)
+    assert len(report["problems"]) == 1
+    assert report["problems"][0].startswith("t_indoor is stale")
+    assert "> 45 min" in report["problems"][0]
+    assert any("excitation paused" in note for note in report["notes"])
+
+
+def test_the_staleness_limit_is_changeable_at_runtime(cfg):
+    from hpmpc.settings import apply as apply_settings
+
+    updated, notes = apply_settings(cfg, {"control.max_data_age_minutes": 120.0})
+    assert updated.control.max_data_age_minutes == 120.0
+    assert notes

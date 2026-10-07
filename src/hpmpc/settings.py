@@ -47,6 +47,12 @@ OVERRIDABLE: dict[str, tuple[float, float]] = {
     "control.weight_backup_heater": (0.0, 100.0),
     "control.max_electric_power_kw": (0.0, 100.0),
     "control.dry_run": (0.0, 1.0),
+    # A sensor that only reports on change looks stale when the house is simply
+    # holding still: Home Assistant does not touch last_updated for a repeated
+    # value, so a steady indoor temperature ages past the limit and the
+    # controller falls back for no reason. That is discovered at commissioning,
+    # with the pump running, so it should not require editing the file.
+    "control.max_data_age_minutes": (5.0, 360.0),
     "heat_pump.curve_slope": (0.0, 2.0),
     "heat_pump.curve_offset": (0.0, 60.0),
     "heat_pump.curve_ref": (0.0, 40.0),

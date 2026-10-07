@@ -1124,6 +1124,11 @@ def _print_cycle(report: dict[str, Any]) -> None:
         f" -> {rendered}"
         f" {'(written)' if report.get('applied') else '(not written)'}{extra}"
     )
+    # Problems before notes: "sensor problem - excitation paused" is a note, and
+    # without the problem beside it the operator is told that something is wrong
+    # and not what, for a week at a time.
+    for problem in report.get("problems", []):
+        print(f"          PROBLEM: {problem}")
     for note in report.get("notes", []):
         print(f"          note: {note}")
     archive = report.get("archive") or {}
