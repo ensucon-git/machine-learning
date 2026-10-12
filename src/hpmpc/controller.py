@@ -905,6 +905,15 @@ class Controller:
         report["notes"].extend(notes)
         report["offset"] = offset
         self._write(offset, readings.get("t_outdoor"), report, apply)
+        if report.get("applied") and not report.get("problems"):
+            # Only cycles that really excited the house: a paused cycle wrote
+            # the fallback, and that is not the experiment.
+            try:
+                from .excitation import record
+
+                record(self.cfg, now)
+            except OSError as exc:
+                log.warning("Could not record the excitation run: %s", exc)
         self._persist(now, report)
         return report
 

@@ -273,6 +273,12 @@ def dataset_from_archive(cfg: Config, archive: Archive | None = None,
     """Build a training dataset out of the archive instead of the recorder."""
     archive = archive or open_archive(cfg)
     frame = archive.load(days if days is not None else cfg.training.history_days)
+    if cfg.training.keep_excitation and not frame.empty:
+        # The experiment is the only history where the offset moved for no
+        # reason the fit could confuse with weather; it must not age out.
+        from .excitation import with_excitation
+
+        frame = with_excitation(cfg, frame, archive.load())
     if frame.empty:
         raise ValueError(
             f"The archive at {archive.directory} is empty - run 'hpmpc collect' while the "

@@ -515,6 +515,14 @@ class TrainingConfig:
 
     Dropping them means the archive can run all year with nothing to switch on
     and off by hand. 0 disables the filter and fits on everything."""
+    keep_excitation: bool = True
+    """Always train on the recorded excitation runs, however old.
+
+    Retraining reads the newest ``history_days``, so without this the
+    excitation week drops out six weeks after it ran, and later fits learn the
+    offset gain only from what the optimiser chose - correlated with price and
+    weather. Runs are recorded by 'hpmpc excite' (see hpmpc.excitation) and kept
+    for as long as the archive still holds their rows."""
     retrain_days: int = 30
     """Retrain automatically when the model is older than this, if the
     controller is running as a service. 0 disables it. The house changes with

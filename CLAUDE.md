@@ -120,6 +120,21 @@ Det är träningen som ska filtrera, inte insamlingen. Testet på standby är
 medvetet på horisontens *kallaste* timme med det mest negativa tillåtna offsetet:
 en mild höstdag där −8 K skulle starta pumpen är en dag värd att optimera.
 
+**Excitationsveckan åldras aldrig ur träningen** (`excitation.py`,
+`training.keep_excitation`). Omträningen läser de senaste `history_days`, så
+utan detta faller veckan ur fönstret sex veckor efter att den kördes, och varje
+senare anpassning lär sig offsetförstärkningen enbart av offset som optimeraren
+själv valt — korrelerat med pris och väder. Att köra om excite var 45:e dygn
+mitt i vintern är inget rimligt krav. `hpmpc excite` skriver därför sina
+körningar till `data/excitation_runs.json` (bara cykler som faktiskt exciterade,
+inte pausade), och `dataset_from_archive` tar alltid med deras rader så länge
+arkivet har dem. Excitation som kördes innan filen fanns **backfylls en gång ur
+arkivet** — men bara så länge ingen modell finns: före första `train` håller
+regulatorn offset 0, så icke-noll offset kan bara vara experimentet; efteråt
+flyttar optimeraren också offseten och filen är enda auktoriteten. `hpmpc
+archive` listar körningarna. Obs: `hpmpc train --days N` klipper på radantal
+bakifrån och tappar en gammal körning — använd `collect --days` i stället.
+
 **Historiken kopieras ur recordern varje styrcykel** (`archive.py`). Recordern är
 ett rullande fönster som rensas av ett annat system; identifieringen vill ha sex
 veckor. Att kräva `purge_keep_days: 45` gör modellen beroende av en inställning
@@ -175,7 +190,7 @@ terminalvärderingen fixar, fast i utvärderingen.
 
 ## Verifierat kontra antaget
 
-**Verifierat** (384 tester, syntetiskt hus med känd sanning):
+**Verifierat** (392 tester, syntetiskt hus med känd sanning):
 - Identifieringen återfinner värmekurva (lutning 0,3495 mot 0,35, R² 0,997) och
   husparametrar (UA +3 %, Ci +4 %, `k_wind` +3 %, plattans tidskonstant inom 8 %).
   `hpmpc train` skriver ut vad den lärt sig om sol och vind som area och

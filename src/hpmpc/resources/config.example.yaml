@@ -474,6 +474,13 @@ training:
   archive: true
   archive_keep_days: 400
 
+  # Always train on the recorded excitation week(s), however old. Retraining
+  # reads the newest history_days, so without this the experiment ages out six
+  # weeks after it ran, and later fits learn the offset gain only from what the
+  # optimiser chose - correlated with price and weather. 'hpmpc excite' records
+  # its runs; 'hpmpc archive' lists them.
+  keep_excitation: true
+
   window_hours: 12                  # short windows pin the fast air dynamics
   window_stride_hours: 3
   burn_in_hours: 24                 # simulated but not scored; lets the slab estimate settle

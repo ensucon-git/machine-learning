@@ -272,6 +272,21 @@ def cmd_archive(args: argparse.Namespace) -> int:
         for gap in gaps:
             print(f"    {gap['hours']:>6.1f} h after {gap['after']}")
 
+    from .excitation import describe as describe_excitation, runs_for
+
+    runs = describe_excitation(cfg)
+    if not runs and not cfg.model_path.exists():
+        # Before the first model the backfill is still safe: look now, so the
+        # operator sees the week counted before training rather than after.
+        runs_for(cfg, archive.load())
+        runs = describe_excitation(cfg)
+    if runs:
+        print("  excitation runs kept for training regardless of age:")
+        for run in runs:
+            print(f"    {run['start'][:16]}  ->  {run['end'][:16]}   {run['days']} d")
+    else:
+        print("  no excitation run recorded - 'hpmpc excite' for a week in the heating season")
+
     need = cfg.training.history_days
     if info["span_days"] < need:
         print()
