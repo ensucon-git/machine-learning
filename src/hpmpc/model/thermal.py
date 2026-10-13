@@ -10,7 +10,7 @@ Two capacities:
 
 Continuous-time equations (W, Wh/K, hours)::
 
-    Ci dTi/dt = Him (Tm - Ti) + Hie_eff (Te - Ti) + f_sol Qs + Qint
+    Ci dTi/dt = Him (Tm - Ti) + Hie_eff (Te - Ti) + f_sol Qs + Qint + k_stove S
     Cm dTm/dt = Him (Ti - Tm) + Hme (Te - Tm) + Qfloor + (1 - f_sol) Qs
     Qfloor    = clip(Hfloor (Tw - Tm), 0, Qmax)   (0 when the pump is blocked)
     Hie_eff   = Hie (1 + k_wind * v_wind)
@@ -47,6 +47,11 @@ PARAM_BOUNDS: dict[str, tuple[float, float]] = {
     "f_sol_i": (0.05, 0.95),
     "Q_int": (0.0, 2500.0),
     "Hfloor": (50.0, 6000.0),
+    # Watts per kelvin of stove-sensor excess. The upper bound allows about
+    # 12 kW at the 4 K excess a good fire produces, which is more than any
+    # domestic stove delivers into the room - wide enough not to bind, narrow
+    # enough that a runaway fit is visibly at the limit.
+    "k_stove": (0.0, 3000.0),
 }
 
 
@@ -65,6 +70,9 @@ class ThermalParams:
     f_sol_i: float = 0.55
     Q_int: float = 350.0
     Hfloor: float = 1400.0
+    k_stove: float = 0.0
+    """Zero by default, so a house with no stove sensor configured behaves
+    exactly as before: the term is multiplied by an all-zero input anyway."""
 
     @classmethod
     def names(cls) -> list[str]:
@@ -126,6 +134,17 @@ class Exogenous:
     """Learned correction to dTi/dt [K/h] from the residual model. It depends
     only on exogenous signals (time of day, sun, wind, outdoor temperature), so
     it can be precomputed once per solve and added as a known input."""
+    stove: np.ndarray = 0.0
+    """Wood stove intensity [K], as the excess of a sensor near the stove over
+    the house's own indoor temperature, with a deadband already subtracted.
+    Zero when nothing is burning.
+
+    It is a proxy for power, not a measurement of it: a hot fire lifts the
+    sensor further than a dying one, and ``k_stove`` turns that into watts. The
+    optimiser always plans with this at zero, because nobody can forecast when
+    a fire will be lit - which makes the plan conservative rather than wrong,
+    since an unexpected fire only ever means the house needed less pump heat
+    than planned, and the next cycle sees it in the indoor temperature."""
 
     def __post_init__(self) -> None:
         self.t_outdoor = np.atleast_2d(np.asarray(self.t_outdoor, dtype=float))
@@ -135,6 +154,7 @@ class Exogenous:
         self.price = _as_series(self.price, n)
         self.humidity = _as_series(self.humidity, n, fill_nan=False)
         self.indoor_bias = _as_series(self.indoor_bias, n)
+        self.stove = _as_series(self.stove, n)
 
     def __len__(self) -> int:
         """Number of time steps in the horizon."""
@@ -217,6 +237,7 @@ def simulate(
     wind = np.repeat(np.maximum(exog.wind, 0.0), sub, axis=1)
     qs = np.repeat(exog.solar_ghi, sub, axis=1) * params.A_sol
     bias = np.repeat(exog.indoor_bias, sub, axis=1)
+    stove = np.repeat(exog.stove, sub, axis=1)
     u_sub = np.repeat(u, sub, axis=1)                                # (1|B, K*S)
 
     # The pump's filtered outdoor temperature depends only on known inputs, so
@@ -270,6 +291,7 @@ def simulate(
                 + hie_eff[:, j] * (te_j - ti)
                 + params.f_sol_i * qs[:, j]
                 + params.Q_int
+                + params.k_stove * stove[:, j]
             ) * inv_ci + bias[:, j]
             d_tm = (
                 params.Him * (ti - tm)

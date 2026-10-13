@@ -5,6 +5,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+from hpmpc.dataset import add_derived
 from hpmpc.identify import fit_cop, fit_heating_curve, fit_thermal, make_windows, predict
 from hpmpc.model.thermal import ThermalParams
 from hpmpc.residual import build_features, fit_residual, one_step_residuals
@@ -176,3 +177,89 @@ def test_wind_and_sun_are_recovered_from_data(synthetic):
     assert weather["wind_pct_per_m_s"] == pytest.approx(100 * params.k_wind, abs=0.1)
     assert weather["solar_aperture_m2"] == pytest.approx(params.A_sol, abs=0.01)
     assert weather["ua_at_5_m_s"] > metrics["heat_loss_w_per_k"]
+
+
+# ---------------------------------------------------------------------------
+# The wood stove: an uncontrolled heat input that identification must not be
+# allowed to blame on the house.
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(scope="module")
+def stoked():
+    """A house with a stove fired twice a day, and the truth behind it."""
+    from hpmpc.config import Config
+    from hpmpc.simulator import true_params
+
+    cfg = Config()
+    cfg.entities.indoor_temp = "sensor.indoor"
+    cfg.entities.outdoor_temp = "sensor.outdoor"
+    cfg.entities.price = "sensor.price"
+    cfg.entities.stove_temp = "sensor.stove"
+    cfg.training.max_windows = 120
+    cfg.training.restarts = 1
+    cfg.training.long_window_hours = 36.0
+    # No deadband, so the derived input is exactly what the true house burned
+    # and the test measures identification rather than threshold arithmetic.
+    cfg.training.stove_deadband_k = 0.0
+    cfg.validate()
+
+    truth = true_params()
+    truth.k_stove = 800.0        # 4 kW at the 5 K peak of a fire
+    frame, _ = make_demo_dataset(cfg, days=14, seed=11, params=truth, stove_per_day=2.0)
+    # The real pipeline derives 'stove' from the sensor in add_derived; the
+    # simulator stops at the raw sensor, so do what build_dataset would.
+    frame = add_derived(frame, cfg)
+    return cfg, frame, truth
+
+
+def test_the_synthetic_stove_actually_burns(stoked):
+    _, frame, _ = stoked
+    assert "stove" in frame or "stove_temp" in frame
+    excess = frame["stove_temp"] - frame["t_indoor"]
+    assert excess.max() > 3.0           # fires are visible
+    assert (excess > 1.0).mean() < 0.5  # and are not the whole dataset
+
+
+def test_the_stove_gain_is_recovered(stoked):
+    cfg, frame, truth = stoked
+    fitted, _ = fit_thermal(frame, cfg, initial=perturbed(truth))
+    assert fitted.k_stove == pytest.approx(truth.k_stove, rel=0.45)
+
+
+def test_ignoring_the_stove_biases_the_house(stoked):
+    """The point of the whole feature.
+
+    Fitting the same data with the stove hidden forces the optimiser to blame
+    the warmth on the building, and it does: the envelope, the sun or the slab
+    moves. Seeing the stove puts them back.
+    """
+    cfg, frame, truth = stoked
+
+    seen, _ = fit_thermal(frame, cfg, initial=perturbed(truth))
+    # Hiding the column is exactly what an unconfigured entities.stove_temp
+    # produces: make_windows then feeds the model an all-zero stove.
+    hidden, _ = fit_thermal(frame.drop(columns=["stove", "stove_temp"], errors="ignore"),
+                            cfg, initial=perturbed(truth))
+
+    def err(p):
+        """Worst relative error across the parameters a fire can masquerade as."""
+        return max(
+            abs(p.Hie - truth.Hie) / truth.Hie,
+            abs(p.A_sol - truth.A_sol) / max(truth.A_sol, 1e-6),
+            abs(p.Cm - truth.Cm) / truth.Cm,
+        )
+
+    assert err(seen) < err(hidden), (
+        f"stove-aware fit should be closer to the truth: {err(seen):.3f} vs {err(hidden):.3f}"
+    )
+
+    # And it predicts better, which is what the controller actually consumes.
+    # No absolute parameter tolerance here: this fixture is 14 days with one
+    # restart, and the sub-percent recoveries quoted elsewhere come from much
+    # longer runs. The comparison is the claim; the magnitude is not.
+    ws = make_windows(cfg=cfg, frame=frame)
+    rmse = {
+        name: float(np.sqrt(np.mean((predict(p, cfg, ws) - ws.target)[ws.eval_mask] ** 2)))
+        for name, p in (("seen", seen), ("hidden", hidden))
+    }
+    assert rmse["seen"] < rmse["hidden"], rmse

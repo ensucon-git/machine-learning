@@ -71,6 +71,34 @@ def excitation_offsets(
     return np.repeat(values, hold)[: len(index)]
 
 
+def stove_firings(
+    index: pd.DatetimeIndex,
+    rng: np.random.Generator,
+    per_day: float = 1.0,
+    hours: float = 4.0,
+    peak_k: float = 5.0,
+) -> np.ndarray:
+    """Excess of a stove sensor over the house [K], as a believable fire shape.
+
+    A fire is not a step: it climbs for half an hour, burns, and decays over a
+    couple of hours as the stove gives its stored heat back. ``peak_k`` is how
+    far above the room the sensor gets at the height of it.
+    """
+    dt = (index[1] - index[0]).total_seconds() / 3600.0
+    out = np.zeros(len(index))
+    days = max((index[-1] - index[0]).total_seconds() / 86400.0, 1e-9)
+    for _ in range(int(round(per_day * days))):
+        start = rng.integers(0, max(len(index) - 1, 1))
+        span = max(int(round(hours / dt)), 2)
+        t = np.arange(span) * dt
+        # Rise over ~30 min, then an exponential tail: int exp(-t/tau) matches
+        # how a soapstone-ish stove actually releases what it stored.
+        shape = np.minimum(t / 0.5, 1.0) * np.exp(-np.maximum(t - 0.5, 0.0) / (hours / 2.0))
+        end = min(start + span, len(out))
+        out[start:end] = np.maximum(out[start:end], peak_k * shape[: end - start])
+    return out
+
+
 def simulate_house(
     cfg: Config,
     params: ThermalParams,
@@ -79,8 +107,14 @@ def simulate_house(
     offsets: np.ndarray,
     noise: bool = True,
     seed: int = 0,
+    stove: np.ndarray | None = None,
 ) -> pd.DataFrame:
-    """Run the true model and return a dataset in the on-disk schema."""
+    """Run the true model and return a dataset in the on-disk schema.
+
+    ``stove`` is the sensor excess in kelvin, already past any deadband; the
+    true house turns it into watts through ``params.k_stove``. Passing it is
+    how a test can ask what an unmodelled fire does to identification.
+    """
     rng = np.random.default_rng(seed)
     index = weather.index
     dt = (index[1] - index[0]).total_seconds() / 3600.0
@@ -91,6 +125,7 @@ def simulate_house(
         weather["wind"].to_numpy(dtype=float)[None, :],
         solar[None, :],
         price.to_numpy(dtype=float)[None, :],
+        stove=np.zeros(len(index)) if stove is None else np.asarray(stove, dtype=float),
     )
     t0 = float(weather["t_outdoor"].iloc[0])
     result = simulate(
@@ -114,6 +149,11 @@ def simulate_house(
     frame["price"] = price.to_numpy()
     frame["offset"] = np.asarray(offsets, dtype=float)
     frame["t_mass_true"] = result["t_mass"][0]
+    if stove is not None:
+        # What a sensor near the stove would have read: the house plus the
+        # excess, so the dataset has to re-derive the excess exactly as it
+        # would from a real sensor.
+        frame["stove_temp"] = frame["t_indoor"] + np.asarray(stove, dtype=float)
 
     if noise:
         frame["t_indoor"] += rng.normal(0.0, 0.04, len(frame))
@@ -224,6 +264,7 @@ def make_demo_dataset(
     excite: bool = True,
     start: str = "2026-01-05 00:00",
     whole_house_power: bool = False,
+    stove_per_day: float = 0.0,
 ) -> tuple[pd.DataFrame, ThermalParams]:
     rng = np.random.default_rng(seed)
     params = params or true_params()
@@ -232,7 +273,8 @@ def make_demo_dataset(
     weather = synthetic_weather(index, rng)
     price = synthetic_prices(index, rng, cfg.site.timezone)
     offsets = excitation_offsets(index, rng) if excite else np.zeros(len(index))
-    frame = simulate_house(cfg, params, weather, price, offsets, seed=seed)
+    stove = stove_firings(index, rng, per_day=stove_per_day) if stove_per_day else None
+    frame = simulate_house(cfg, params, weather, price, offsets, seed=seed, stove=stove)
     if whole_house_power:
         frame = add_house_electricity(frame, cfg, rng, ev_kw=cfg.power.ev_nominal_kw)
         frame = frame.drop(columns=["power"])   # no dedicated meter in this scenario
@@ -250,4 +292,5 @@ def perturbed(params: ThermalParams, factor: float = 1.6) -> ThermalParams:
         A_sol=params.A_sol / factor,
         Q_int=params.Q_int * factor,
         Hfloor=params.Hfloor / factor,
+        k_stove=params.k_stove / factor,
     )

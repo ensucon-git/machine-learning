@@ -33,6 +33,7 @@ Entiteterna, som de faktiskt heter:
 | innetemperatur (mitt i huset) | `sensor.hall_temperature_2` |
 | husets effekt per fas | `sensor.gx_device_consumption_power_l1` / `_l2` / `_l3` |
 | laddstatus | `binary_sensor.eh6nh5cd_charging` |
+| braskamin (takgivare) | `sensor.hall_temperature_3` — `entities.stove_temp` |
 | ESP32:ns ingång (grader) | `number.varmepump_proxy_simulerad_utetemperatur` — noden äger NTC-tabellen |
 | wiperavläsning från ESP32 | `sensor.varmepump_proxy_mcp41100_wiper_0_255` |
 | utgångar | `input_number.varmepump_offset`, `input_number.varmepump_fiktiv_utetemp` |
@@ -153,6 +154,38 @@ lösning.
 **COP och kapacitet förberäknas utanför tillståndsloopen** (`OperatingPoint`).
 De beror bara på kända insignaler. Tiofaldig skillnad i lösningstid.
 
+**Braskaminen modelleras som en tidsvarierande intern last, inte som utesluten
+data.** Uteslutning var förstahandsvalet — samma mönster som elbilsladdaren — men
+användaren eldar upp till två gånger om dagen under de kallaste veckorna, och det
+är exakt de fönstren som pinnar UA och plattan vid den driftpunkt som betyder
+något. Att kasta dem vore dyrare än att bära en approximation.
+
+Signalen är **takgivarens överskott över husets innetemperatur**, inte en binär
+"brinner". En binär säger ingenting om hur hårt; överskottet gör det — en
+rejäl brasa lyfter givaren längre än glöd — så en enda anpassad förstärkning
+`k_stove` (W per kelvin överskott) täcker hela spannet i stället för ett medel
+som är fel i båda ändarna. Termen sitter på luftnoden bredvid `Q_int`, som är
+samma sak fast konstant.
+
+`training.stove_deadband_k` finns för att skiktningen i ett rum växer något när
+värmen går — utan dödband skulle kamintermen kunna suga upp en del av pumpens
+egen signal, precis det fel baslastmodellen hålls klockstyrd för att undvika.
+Under dödbandet är insignalen exakt noll och kan inte absorbera någonting.
+
+**Optimeraren planerar alltid med kaminen på noll.** Ingen kan prognosticera när
+någon tänder. Det är konservativt, inte fel: en oväntad brasa betyder bara att
+huset behövde mindre pumpvärme än planerat, och nästa cykel ser det i
+innetemperaturen.
+
+**Gränsen i dag: anpassningen ser kaminen, observatören gör det inte.**
+`controller.py` bygger sin `Exogenous` utan kaminvärde, så termen är inert i
+styrslingan — exakt som före ändringen, ingenting regredierar. Men observatören
+är en Luenberger som adopterar uppmätt innetemperatur och knuffar *slabestimatet*
+med prediktionsfelet, så under en brasa drar den slutsatsen att plattan är
+varmare än den är och pumpen underhettar några timmar efter att elden dött.
+Självläkande, men nästa steg är att mata in samma signal där — med eget test,
+för det ändrar styrbeteende och ska inte smygas in.
+
 **Backtestets besparing räknas netto efter värme som lämnas i plattan.** Annars
 belönas den körning som råkar sluta med kall platta — samma fel som
 terminalvärderingen fixar, fast i utvärderingen.
@@ -214,6 +247,15 @@ terminalvärderingen fixar, fast i utvärderingen.
   fiktiva temperaturen *ändrades* — att slå på `varmepump_mpc_aktiv` gjorde
   därför ingenting alls förrän nästa cykel. Den triggar nu även på brytaren.
   (`hpmpc check` i sin helhet är fortfarande inte avrapporterad.)
+
+- **Kamintermen är mätt mot syntetiskt hus med känd sanning** (14 dygn, två
+  brasor per dygn, `k_stove` 800 W/K = 4 kW vid brasans topp). Döljs kaminen för
+  anpassningen måste värmen skyllas på något, och den gör det: **solarean blåses
+  upp från 6 till 16 m² (+189 % fel mot +58 %)** och luftkapacitansen mer än
+  fördubblas (+127 % mot +25 %). Prediktions-RMSE **0,465 °C dold mot 0,102 °C
+  sedd — 78 % lägre**. `Hie` blev marginellt sämre (19 % mot 16 %); allt annat
+  klart bättre. Testerna ligger i `tests/test_identify.py` och jämför de två
+  anpassningarna mot varandra, inte mot en påhittad absolut tolerans.
 
 **Antaget / ej verifierat:**
 - **Prestandakartans siffror är förankrade i publicerade mätpunkter för
@@ -517,6 +559,11 @@ terminalvärderingen fixar, fast i utvärderingen.
   fastnat värde.
 - Tester kör mot syntetisk data med känd sanning. Nya funktioner ska ha ett test
   som visar att de gör vad de påstår, inte bara att de kör.
+
+Beroendena kan installeras i utvecklingsmiljön (`pip install numpy scipy pandas
+scikit-learn httpx fastapi pytest`) — men de hamnar under **python3.13** medan
+`python3` kan peka på 3.11. Kör sviten med `/usr/bin/python3 -m pytest`, annars
+ser det ut som att numpy saknas. Hela sviten tar ~150 s här.
 
 ```bash
 pytest -q                                       # hela sviten, ~80 s
