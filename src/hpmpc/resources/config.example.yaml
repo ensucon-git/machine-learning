@@ -480,11 +480,20 @@ training:
   burn_in_hours: 24                 # simulated but not scored; lets the slab estimate settle
 
   # How far entities.stove_temp has to sit above the indoor temperature before
-  # any of it counts as a fire. A sensor high in a room reads above the house
-  # even with nothing burning, and that stratification grows a little when the
-  # heating runs - so without a deadband the stove term could absorb part of
-  # the heat pump's own signal. Below it the input is exactly zero and can
-  # absorb nothing at all. Raise it if k_stove comes out implausibly large.
+  # any of it counts as a fire. Below it the input is exactly zero and can
+  # absorb nothing at all.
+  #
+  # DO NOT GUESS THIS. If both sensors are in the same room it is stratification
+  # and a few tenths will do. If they are in different parts of a house - a
+  # ceiling corner by the stove, the control sensor in the middle - the baseline
+  # between them is a standing offset that also breathes with the season and the
+  # sun on that corner, and everything left under the threshold gets multiplied
+  # by k_stove and blamed on a fire nobody lit.
+  #
+  #   hpmpc stove --days 7
+  #
+  # reads the archive and suggests a value from the actual distribution. Point
+  # it at a stretch when nothing was burning; an excitation week is ideal.
   stove_deadband_k: 2.0
   long_window_hours: 48             # long windows pin the slab, i.e. the storage capacity
   max_windows: 900
