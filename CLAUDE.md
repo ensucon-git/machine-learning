@@ -17,6 +17,8 @@ bestämt, varför, och vilka fällor som redan är upptäckta.
 |---|---|
 | Värmepump | Daikin Altherma LT: **ERLQ016CAW1** utedel + **EHVH16S26CB9W** hydrobox (260 l, 9 kW elpatron) |
 | Distribution | Golvvärme i betongplatta |
+| Huset | **350 m², två plan** |
+| Braskamin | liten, i ett **hörn** av huset. Takgivare `sensor.hall_temperature_3` nära den; styrgivaren `sensor.hall_temperature_2` sitter mitt i huset |
 | Ort | Falkvägen, Norrköping (58.5877, 16.1924) |
 | Elområde | SE3, rörligt pris |
 | Elöverföring + energiskatt | **0,7084 kr/kWh exkl. moms** (= 0,8855 inkl.) |
@@ -172,6 +174,24 @@ värmen går — utan dödband skulle kamintermen kunna suga upp en del av pumpe
 egen signal, precis det fel baslastmodellen hålls klockstyrd för att undvika.
 Under dödbandet är insignalen exakt noll och kan inte absorbera någonting.
 
+**Men i det här huset är dödbandet inte skiktning, och får inte gissas.** De två
+givarna sitter i olika delar av ett 350 m²-hus på två plan: takgivaren i ett hörn,
+styrgivaren mitt i huset. Baslinjen dem emellan är varken noll eller konstant —
+den andas med årstiden, solen på det hörnet och om dörrar står öppna. Därför
+finns **`hpmpc stove`**, som läser arkivet och föreslår ett dödband ur den
+faktiska fördelningen. Mät det över en period då ingen eldat; **excite-veckan är
+idealisk, den är eldfri per konstruktion.** Att gissa är inte oskyldigt: med en
+rimlig baslinje på 1,4 K och normal drift kallade default 2,0 K **6,4 % av lugna
+timmar för "eldning"**.
+
+**`k_stove` blir den *effektiva* kopplingen till mitthusnoden, inte kaminens
+effekt.** Hörnet värms först, mitten långt senare och svagare, så anpassningen
+hittar vad som faktiskt når styrgivaren. Räkna med ett tal klart under kaminens
+märkeffekt — det är rätt, inte ett fel. Och eftersom modellen har **en** luftnod
+läggs termen på momentant medan verkligheten har en transporttid mellan hörn och
+mitt; den tar bort merparten av biasen men är trubbigare än det syntetiska testet
+antyder, där kaminen värmde samma nod direkt.
+
 **Optimeraren planerar alltid med kaminen på noll.** Ingen kan prognosticera när
 någon tänder. Det är konservativt, inte fel: en oväntad brasa betyder bara att
 huset behövde mindre pumpvärme än planerat, och nästa cykel ser det i
@@ -179,12 +199,21 @@ innetemperaturen.
 
 **Gränsen i dag: anpassningen ser kaminen, observatören gör det inte.**
 `controller.py` bygger sin `Exogenous` utan kaminvärde, så termen är inert i
-styrslingan — exakt som före ändringen, ingenting regredierar. Men observatören
-är en Luenberger som adopterar uppmätt innetemperatur och knuffar *slabestimatet*
-med prediktionsfelet, så under en brasa drar den slutsatsen att plattan är
-varmare än den är och pumpen underhettar några timmar efter att elden dött.
-Självläkande, men nästa steg är att mata in samma signal där — med eget test,
-för det ändrar styrbeteende och ska inte smygas in.
+styrslingan — exakt som före ändringen, ingenting regredierar.
+
+**Det är samtidigt precis det beteende användaren vill ha**, och värt att inte
+råka riva upp: pumpen drar inte ner förrän innetemperaturen *mitt i huset*
+faktiskt stigit. Med en liten kamin i ett hörn av 350 m² är det rätt — att backa
+på en varm hörnvrå vore att svälta resten av huset.
+
+Nästa steg är ändå att mata in signalen i observatören, och det går åt **samma**
+håll som den oron. Observatören är en Luenberger som adopterar uppmätt
+innetemperatur och knuffar *slabestimatet* med prediktionsfelet: under en brasa
+drar den i dag slutsatsen att plattan är varmare än den är, och pumpen
+underhettar några timmar efter att elden dött. Ser observatören kaminen
+förutsägs luftens uppgång i stället, slabestimatet lämnas ifred, och den
+efterföljande svackan uteblir. Kräver eget test — det ändrar styrbeteende och
+ska inte smygas in.
 
 **Backtestets besparing räknas netto efter värme som lämnas i plattan.** Annars
 belönas den körning som råkar sluta med kall platta — samma fel som
@@ -590,6 +619,7 @@ hpmpc excite         # identifieringsexperiment, ~1 vecka
 hpmpc archive        # vår egen historik — omfång, hål, storlek
 hpmpc collect --days 45 && hpmpc train
 hpmpc power          # effektuppdelningen — laddaren ska hamna nära 11 kW
+hpmpc stove --days 7 # takgivaren mot huset; föreslår stove_deadband_k ur datan
 hpmpc plan           # nuvarande plan, skriver ingenting
 hpmpc backtest --days 7
 hpmpc run / hpmpc serve
