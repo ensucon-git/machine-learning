@@ -314,3 +314,24 @@ def test_set_mode_needs_somewhere_to_write(cfg, fake_ha):
 
     with pytest.raises(ValueError, match="No mode entity"):
         set_mode(cfg, fake_ha, "holiday")
+
+
+def test_the_stove_deadband_is_settable_at_runtime(tmp_path):
+    """'hpmpc stove' prints a 'hpmpc set' line for it, so it has to work.
+
+    The deadband is measured from the two sensors as installed and retuned
+    when their baseline drifts - the same argument that makes the pot geometry
+    overridable. A suggestion the tool cannot carry out is worse than none.
+    """
+    from hpmpc import settings
+
+    assert "training.stove_deadband_k" in settings.OVERRIDABLE
+
+    cfg_path = tmp_path / "config.yaml"
+    cfg_path.write_text(
+        "entities:\n  indoor_temp: sensor.in\n  outdoor_temp: sensor.out\n"
+        "training:\n  stove_deadband_k: 2.0\n"
+    )
+    previous, new = settings.set_in_file(cfg_path, "training.stove_deadband_k", 2.5)
+    assert previous == 2.0 and new == 2.5
+    assert "stove_deadband_k: 2.5" in cfg_path.read_text()
