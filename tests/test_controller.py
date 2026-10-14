@@ -542,9 +542,18 @@ def test_dry_run_warns_when_the_emulator_is_the_pumps_only_sensor(controller, cf
     few hours and then drives its failsafe position, which is a fixed mild
     outdoor temperature - so the pump heats while the log says 'dry run'.
     """
-    report = controller.step(now=fake_ha.now, apply=False)
+    cfg.control.dry_run = True
+    report = controller.step(now=fake_ha.now)
     assert fake_ha.written == []
     assert any("failsafe" in note for note in report["notes"])
+
+
+def test_a_plan_is_not_mistaken_for_a_dry_run(controller, cfg, fake_ha):
+    """'hpmpc plan' computes without writing on purpose, while the service
+    keeps writing every cycle; warning about a starved node there is false."""
+    report = controller.step(now=fake_ha.now, apply=False)
+    assert fake_ha.written == []
+    assert not any("failsafe" in note for note in report["notes"])
 
 
 def test_dry_run_is_quiet_when_the_pump_has_its_own_sensor(controller, cfg, fake_ha):

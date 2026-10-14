@@ -1080,7 +1080,10 @@ class Controller:
             # house flat out while the log says "dry run". Clamp offset_min and
             # offset_max toward zero instead: the cycle keeps writing, so the
             # node stays fed, and the controller simply has no authority.
-            if any(self.cfg.entities.outputs()[k] for k in ("fake_temperature", "resistance", "wiper")):
+            # Only for the setting itself: 'hpmpc plan' never writes by design,
+            # and is a separate process while the service keeps the node fed.
+            if self.cfg.control.dry_run and any(
+                    self.cfg.entities.outputs()[k] for k in ("fake_temperature", "resistance", "wiper")):
                 warning = (
                     "dry run with the sensor emulator as the pump's only sensor: nothing is being "
                     "written, so the node falls back to its failsafe position within hours. Clamp "
