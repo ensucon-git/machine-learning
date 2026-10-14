@@ -71,6 +71,11 @@ OVERRIDABLE: dict[str, tuple[float, float]] = {
     "pot.wiper_ohm": (0.0, 1000.0),
     "pot.series_ohm": (0.0, 1000000.0),
     "heat_pump.efficiency_scale": (0.3, 3.0),
+    # Measured at commissioning with 'hpmpc stove' and tuned again whenever the
+    # two sensors' baseline shifts - a door left open, furniture moved, a new
+    # season. Exactly the kind of number that must not require editing a file,
+    # and 'hpmpc stove' prints the 'hpmpc set' line for it.
+    "training.stove_deadband_k": (0.0, 15.0),
 }
 
 BOOLEAN_FIELDS = {"control.dry_run"}

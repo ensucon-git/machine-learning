@@ -97,6 +97,31 @@ entities:
   # efficiency fit entirely, so its exact power never has to be known.
   ev_charging: binary_sensor.eh6nh5cd_charging
 
+  # A temperature sensor near a wood stove, if you burn in one.
+  #
+  # NOT a stove thermometer. What carries the information is how far it runs
+  # ABOVE the rest of the house, so a ceiling sensor in the same room is ideal:
+  # it reads the house when nothing burns and climbs several degrees when
+  # something does. The dataset turns it into 'stove', the excess over the
+  # indoor temperature past training.stove_deadband_k, and identification fits
+  # k_stove - watts per kelvin of that excess.
+  #
+  # Why a proxy and not a switch: a binary "lit" says nothing about how hard.
+  # The excess does - a roaring fire lifts the sensor further than embers - so
+  # one fitted gain covers the whole range instead of an average that is wrong
+  # at both ends.
+  #
+  # Measured on the synthetic house, 14 days with two fires a day: hiding the
+  # stove from the fit inflated the solar aperture from 6 to 16 m2 and more
+  # than doubled the air capacity, because the warmth has to be blamed on
+  # something. Prediction RMSE was 0.465 C hidden against 0.102 C seen.
+  #
+  # The optimiser always plans with this at zero - nobody can forecast when a
+  # fire gets lit. That is conservative, not wrong: an unexpected fire only
+  # means the house needed less pump heat than planned, and the next cycle
+  # sees it in the indoor temperature.
+  stove_temp: sensor.hall_temperature_3
+
   # What the ESP32 reports it is actually driving the potentiometer to. The
   # entity id still says 0-255 because that is the name Home Assistant already
   # has; with two devices in series the value spans 0-510, and 255 is the
@@ -484,6 +509,23 @@ training:
   window_hours: 12                  # short windows pin the fast air dynamics
   window_stride_hours: 3
   burn_in_hours: 24                 # simulated but not scored; lets the slab estimate settle
+
+  # How far entities.stove_temp has to sit above the indoor temperature before
+  # any of it counts as a fire. Below it the input is exactly zero and can
+  # absorb nothing at all.
+  #
+  # DO NOT GUESS THIS. If both sensors are in the same room it is stratification
+  # and a few tenths will do. If they are in different parts of a house - a
+  # ceiling corner by the stove, the control sensor in the middle - the baseline
+  # between them is a standing offset that also breathes with the season and the
+  # sun on that corner, and everything left under the threshold gets multiplied
+  # by k_stove and blamed on a fire nobody lit.
+  #
+  #   hpmpc stove --days 7
+  #
+  # reads the archive and suggests a value from the actual distribution. Point
+  # it at a stretch when nothing was burning; an excitation week is ideal.
+  stove_deadband_k: 2.0
   long_window_hours: 48             # long windows pin the slab, i.e. the storage capacity
   max_windows: 900
   validation_fraction: 0.25

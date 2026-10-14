@@ -368,3 +368,111 @@ def test_the_controller_archives_the_spot_price_it_planned_against(cfg, fake_ha)
 
     assert "price" in report["archive"]["recorded"]
     assert open_archive(cfg).load()["price"].notna().any()
+
+
+def test_stove_command_reads_the_archive_and_suggests_a_deadband(tmp_path, capsys):
+    """The deadband has to come from the two sensors as installed.
+
+    In this house the stove sensor is in a ceiling corner and the control
+    sensor is mid-house, so the baseline between them is neither zero nor
+    constant - guessing it is how a quiet evening gets fitted as a fire.
+    """
+    import numpy as np
+    import pandas as pd
+
+    from hpmpc.archive import open_archive
+    from hpmpc.cli import main
+
+    cfg_path = tmp_path / "config.yaml"
+    cfg_path.write_text(
+        "entities:\n"
+        "  indoor_temp: sensor.mid_house\n"
+        "  outdoor_temp: sensor.outdoor\n"
+        "  stove_temp: sensor.ceiling_corner\n"
+        f"paths:\n  data_dir: {tmp_path}\n"
+    )
+
+    index = pd.date_range("2026-10-01", periods=4 * 24 * 5, freq="15min", tz="UTC")
+    rng = np.random.default_rng(0)
+    # A quiet week: the corner simply runs ~1.2 K warm, breathing a little.
+    baseline = 1.2 + 0.3 * np.sin(np.arange(len(index)) / 40.0) + rng.normal(0, 0.05, len(index))
+    frame = pd.DataFrame(
+        {"t_indoor": 21.0, "t_outdoor": 3.0, "stove_temp": 21.0 + baseline}, index=index
+    )
+    open_archive(_load_cfg(cfg_path)).merge(frame)
+
+    assert main(["--config", str(cfg_path), "stove"]) == 0
+    out = capsys.readouterr().out
+    assert "sensor.ceiling_corner" in out
+    assert "stove_deadband_k" in out
+    # The suggestion must clear the whole quiet baseline, or quiet hours burn.
+    suggested = float(out.split("stove_deadband_k")[1].split()[0])
+    assert suggested > baseline.max()
+
+
+def _load_cfg(path):
+    from hpmpc.config import load_config
+
+    return load_config(path)
+
+
+def test_a_sensor_configured_late_is_reached_back_for(cfg):
+    """A stove sensor added at the end of an excitation week.
+
+    The incremental pull only asks for what happened since the last stored
+    row, so without a reach-back the week's fires - still in the recorder -
+    would be archived as no fire at all, and lost for good once purged.
+    """
+    ha = RecorderHomeAssistant(keep_days=10.0)
+    recorded(cfg, ha, days=7.0)
+    archive = open_archive(cfg)
+    refresh(cfg, ha, archive, now=ha.now)
+    assert "stove_temp" not in archive.load().columns
+
+    # The sensor existed all along; only the configuration is new.
+    stamps = pd.date_range(ha.now - pd.Timedelta(days=7), ha.now, freq="15min", tz="UTC")
+    stove = pd.DataFrame({"entity_id": "sensor.stove", "time": stamps, "value": 24.0})
+    ha.history_frame = pd.concat([ha.history_frame, stove], ignore_index=True)
+    cfg.entities.stove_temp = "sensor.stove"
+
+    info = refresh(cfg, ha, archive, now=ha.now)
+    assert info.get("backfilled") == ["stove_temp"]
+    stored = archive.load()["stove_temp"].dropna()
+    assert stored.index[0] < pd.Timestamp(ha.now - pd.Timedelta(days=6))
+    # Nothing that was already there is disturbed.
+    assert archive.load()["t_indoor"].dropna().index[0] < pd.Timestamp(ha.now - pd.Timedelta(days=6))
+
+
+def test_reaching_back_happens_once_per_new_entity(cfg):
+    """Not on every cycle, and not for entities configured all along that
+    happen to have nothing in the recorder."""
+    ha = RecorderHomeAssistant(keep_days=10.0)
+    recorded(cfg, ha, days=3.0)
+    archive = open_archive(cfg)
+    refresh(cfg, ha, archive, now=ha.now)
+    refresh(cfg, ha, archive, now=ha.now + timedelta(minutes=15))
+    assert len(ha.requests) == 2                  # two ordinary pulls, no reach-back
+
+    cfg.entities.stove_temp = "sensor.stove_with_no_history"
+    refresh(cfg, ha, archive, now=ha.now + timedelta(minutes=30))
+    assert len(ha.requests) == 4                  # the pull, plus one reach-back
+    refresh(cfg, ha, archive, now=ha.now + timedelta(minutes=45))
+    assert len(ha.requests) == 5                  # and never again
+
+
+def test_an_archive_from_before_the_entity_list_still_reaches_back(cfg):
+    """The NUC's case: upgrade and configure the stove sensor in one go."""
+    from hpmpc.archive import KNOWN_ENTITIES
+
+    ha = RecorderHomeAssistant(keep_days=10.0)
+    recorded(cfg, ha, days=7.0)
+    archive = open_archive(cfg)
+    refresh(cfg, ha, archive, now=ha.now)
+    (archive.directory / KNOWN_ENTITIES).unlink()          # as if written by older code
+
+    stamps = pd.date_range(ha.now - pd.Timedelta(days=7), ha.now, freq="15min", tz="UTC")
+    ha.history_frame = pd.concat(
+        [ha.history_frame, pd.DataFrame({"entity_id": "sensor.stove", "time": stamps, "value": 24.0})],
+        ignore_index=True)
+    cfg.entities.stove_temp = "sensor.stove"
+    assert refresh(cfg, ha, archive, now=ha.now).get("backfilled") == ["stove_temp"]

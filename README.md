@@ -149,13 +149,14 @@ En 2R2C-modell med tre tillstånd:
 | `Tf` | pumpens egen filtrerade utetemperatur | 1–6 h |
 
 ```
-Ci·dTi/dt = Him·(Tm−Ti) + Hie_eff·(Te−Ti) + f_sol·Qs + Qint
+Ci·dTi/dt = Him·(Tm−Ti) + Hie_eff·(Te−Ti) + f_sol·Qs + Qint + k_stove·S
 Cm·dTm/dt = Him·(Ti−Tm) + Hme·(Te−Tm) + Qgolv + (1−f_sol)·Qs
 Qgolv     = clip(Hfloor·(Tw−Tm), 0, Qmax)
 Hie_eff   = Hie·(1 + k_wind·v)          ← vinden sitter här
+S         = max(0, T_kamin − Ti − dödband)   ← braskaminen, om du har en
 ```
 
-Tio parametrar, alla fysikaliskt tolkbara. Det är ett medvetet val framför ett rent
+Elva parametrar, alla fysikaliskt tolkbara. Det är ett medvetet val framför ett rent
 neuralt nät: med 3–6 veckors data är ett neuralt nät hopplöst underbestämt och
 extrapolerar farligt vid temperaturer det aldrig sett, medan en fysikalisk modell
 uppför sig rimligt även utanför träningsdatan. Den *lär sig* fortfarande — men den lär
@@ -164,8 +165,13 @@ sig tio tal med betydelse i stället för tiotusen vikter.
 ### 2. Lärd residual (`residual.py`)
 
 Ovanpå fysiken sitter en gradient-boosting-modell (scikit-learn) som fångar det
-2R2C-modellen omöjligt kan veta: morgonduschen, braskaminen, att lågt vintersol
+2R2C-modellen omöjligt kan veta: morgonduschen, matlagningen, att lågt vintersol
 träffar söderfönstren hårdare än en platt globalstrålningssiffra antyder.
+
+Braskaminen hör **inte** hit, vilket den gjorde i en tidigare version av den här
+texten. Residualen ser bara klocka, sol, vind och utetemperatur — den kan omöjligt
+veta när någon tände. Kaminen sitter i stället i fysiken ovan som `k_stove·S`,
+med `entities.stove_temp` som insignal.
 
 Den är medvetet begränsad till **exogena särdrag** — klocka, sol, vind, utetemperatur.
 Aldrig husets eget tillstånd och aldrig styrsignalen. Det ger två saker: optimeraren kan

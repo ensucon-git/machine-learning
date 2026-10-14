@@ -25,6 +25,7 @@ log = logging.getLogger(__name__)
 CONTINUOUS = [
     "t_indoor", "t_outdoor", "wind", "cloud", "humidity", "solar_radiation",
     "t_supply", "t_return", "power", "house_l1", "house_l2", "house_l3", "house_power",
+    "stove_temp",
 ]
 # Signals that hold their value until explicitly changed.
 STEPWISE = ["price", "output_offset", "output_fake_temp", "output_resistance",
@@ -51,6 +52,7 @@ def column_map(cfg: Config) -> dict[str, str]:
         e.house_power_l3: "house_l3",
         e.house_power_total: "house_power",
         e.ev_charging: "ev_charging",
+        e.stove_temp: "stove_temp",
         e.price: "price",
         e.offset_output: "output_offset",
         e.fake_temperature_output: "output_fake_temp",
@@ -100,7 +102,7 @@ def pivot_history(long_frame: pd.DataFrame, mapping: dict[str, str], resample_mi
 
 
 def add_derived(frame: pd.DataFrame, cfg: Config) -> pd.DataFrame:
-    """Add solar irradiance and the actually applied offset."""
+    """Add solar irradiance, the actually applied offset, and the stove input."""
     out = frame.copy()
 
     if "wind" not in out:
@@ -116,6 +118,16 @@ def add_derived(frame: pd.DataFrame, cfg: Config) -> pd.DataFrame:
         ).to_numpy()
 
     out["offset"] = applied_offset(out, cfg)
+
+    # The stove, as excess over the house rather than absolute temperature.
+    # Derived here rather than archived, so moving the deadband re-reads old
+    # history correctly instead of leaving every stored row carrying the
+    # threshold that happened to be set the day it was written.
+    if "stove_temp" in out and "t_indoor" in out:
+        excess = out["stove_temp"] - out["t_indoor"] - float(cfg.training.stove_deadband_k)
+        out["stove"] = excess.clip(lower=0.0).fillna(0.0)
+    else:
+        out["stove"] = 0.0
 
     if "price" not in out:
         out["price"] = 1.0

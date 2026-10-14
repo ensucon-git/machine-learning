@@ -109,6 +109,19 @@ class EntityConfig:
     house_power_l3: str = ""
     house_power_total: str = ""
     ev_charging: str = ""
+    stove_temp: str = ""
+    """A temperature sensor near a wood stove, if you have one and burn in it.
+
+    Not a stove thermometer: what matters is how far it runs ABOVE the rest of
+    the house, so a ceiling sensor in the same room works well. The dataset
+    turns it into ``stove``, the excess over the indoor temperature past
+    ``training.stove_deadband_k``, and identification fits a watts-per-kelvin
+    gain for it.
+
+    Leave it empty and nothing changes - but if you do burn, filling this in
+    matters more than it looks. An unmodelled heat source does not average out;
+    identification has to blame the warmth on something, and it will quietly
+    blame the sun, the envelope or the slab instead."""
     outdoor_humidity: str = ""
     pump_outdoor_temp: str = ""
     """What the heat pump itself reports as the outdoor temperature - the Daikin
@@ -178,6 +191,7 @@ class EntityConfig:
             self.house_power_l3,
             self.house_power_total,
             self.ev_charging,
+            self.stove_temp,
             self.outdoor_humidity,
             self.pump_outdoor_temp,
             self.offset_output,
@@ -496,6 +510,15 @@ class TrainingConfig:
     window_hours: float = 12.0
     window_stride_hours: float = 3.0
     burn_in_hours: float = 24.0
+    stove_deadband_k: float = 2.0
+    """How far ``entities.stove_temp`` has to sit above the indoor temperature
+    before any of it counts as a fire [K].
+
+    A sensor high in a room reads above the house even with nothing burning,
+    and that stratification grows a little when the heating runs. Without a
+    deadband the stove term could absorb part of the heat pump's own signal -
+    the same failure the baseload model is kept clock-only to avoid. Below the
+    deadband the input is exactly zero, so it can absorb nothing at all."""
     long_window_hours: float = 48.0
     regularisation: float = 0.05
     restarts: int = 3

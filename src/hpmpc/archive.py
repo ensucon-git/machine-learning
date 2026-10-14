@@ -25,6 +25,7 @@ history that is read through them.
 
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -209,9 +210,17 @@ def refresh(cfg: Config, ha: HomeAssistant, archive: Archive | None = None,
         return {"rows_added": 0, "reason": "up to date", "pruned": 0}
 
     mapping = column_map(cfg)
+    # Decided before this cycle's pull: the pull itself brings in the newest
+    # rows of a just-configured sensor, and afterwards it would look followed.
+    known = _known_entities(archive, mapping) if last is not None else set()
     long_frame = ha.history(list(mapping.keys()), start, now)
     frame = pivot_history(long_frame, mapping, cfg.training.resample_minutes)
     added = archive.merge(frame)
+    if last is None:
+        _remember_entities(archive, set(mapping))     # this pull already reached back
+        backfilled: list[str] = []
+    else:
+        backfilled = _backfill_new_entities(cfg, ha, archive, mapping, known, now)
     pruned = archive.prune(cfg.training.archive_keep_days)
     log.info("Archive: +%d rows from %s (%s)", added, start.isoformat(timespec="minutes"), reason)
     return {
@@ -220,7 +229,65 @@ def refresh(cfg: Config, ha: HomeAssistant, archive: Archive | None = None,
         "pulled_from": start.isoformat(),
         "pruned": int(pruned),
         "span_days": round(archive.span_days(), 2),
+        **({"backfilled": backfilled} if backfilled else {}),
     }
+
+
+KNOWN_ENTITIES = "entities.json"
+
+
+def _known_entities(archive: Archive, mapping: dict[str, str]) -> set[str]:
+    """The entities this archive has been following."""
+    path = archive.directory / KNOWN_ENTITIES
+    try:
+        return set(json.loads(path.read_text(encoding="utf-8")))
+    except (OSError, ValueError, TypeError):
+        pass
+    # An archive from before the list existed: what it already holds is what
+    # it was following.
+    present: set[str] = set()
+    for month in archive.files()[-2:]:
+        present |= set(_read(month).dropna(axis=1, how="all").columns)
+    return {entity for entity, column in mapping.items() if column in present}
+
+
+def _remember_entities(archive: Archive, entities: set[str]) -> None:
+    archive.directory.mkdir(parents=True, exist_ok=True)
+    (archive.directory / KNOWN_ENTITIES).write_text(json.dumps(sorted(entities)), encoding="utf-8")
+
+
+def _backfill_new_entities(cfg: Config, ha: HomeAssistant, archive: Archive,
+                           mapping: dict[str, str], known: set[str], now: datetime) -> list[str]:
+    """Reach back for an entity that was configured after the archive started.
+
+    The incremental pull only asks for what happened since the last stored row,
+    which is right for every signal the archive already follows and wrong for
+    one that was just added: the recorder still holds its last week or so, and
+    once that is purged nobody can fetch it again. The case that prompted this
+    was a stove sensor configured at the end of an excitation week - without it
+    the week's fires would have been archived as no fire at all.
+
+    "New" means new to the configuration, which is why the archive keeps the
+    list of entities it follows. Asking whether a column has data would be the
+    wrong question twice over: the incremental pull has already brought in the
+    newest two hours of a just-added sensor by the time anything could look,
+    and plenty of entities that have been configured all along simply have
+    nothing in the recorder.
+    """
+    new = {entity: column for entity, column in mapping.items() if entity not in known}
+    _remember_entities(archive, known | set(mapping))
+    if not new:
+        return []
+    start = now - timedelta(days=float(cfg.training.history_days))
+    frame = pivot_history(ha.history(list(new), start, now), new, cfg.training.resample_minutes)
+    if frame.empty:
+        return []
+    archive.merge(frame)
+    found = sorted(c for c in new.values() if c in frame.columns)
+    if found:
+        log.info("Archive: reached back to %s for newly configured %s",
+                 start.isoformat(timespec="minutes"), ", ".join(found))
+    return found
 
 
 # Signals the recorder cannot supply when no entity is configured for them:

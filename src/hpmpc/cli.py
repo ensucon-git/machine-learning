@@ -239,6 +239,73 @@ def cmd_mode(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_stove(args: argparse.Namespace) -> int:
+    """What the stove sensor reads relative to the house, so the deadband can
+    be measured instead of guessed.
+
+    training.stove_deadband_k decides where "a fire" begins, and the right
+    value depends entirely on where the two sensors sit. In one room it is
+    stratification, a few tenths. With the stove sensor in a corner and the
+    control sensor in the middle of a large house it is a standing offset that
+    also breathes with the season, the sun on that corner and whether doors are
+    open - and anything left under the deadband gets multiplied by k_stove and
+    blamed on a fire that was not lit.
+
+    So point this at a stretch when nothing was burning and take the number it
+    suggests. An excitation week is ideal: no fires by design.
+    """
+    import numpy as np
+
+    cfg = _load(args)
+    if not cfg.entities.stove_temp:
+        print("entities.stove_temp is empty - nothing to describe.")
+        print("Set it to a temperature sensor near the stove and let the archive fill.")
+        return 1
+
+    from .archive import dataset_from_archive
+
+    # Straight from our own archive: no Home Assistant connection needed, and
+    # it reaches back further than the recorder does.
+    frame = dataset_from_archive(cfg, days=args.days)
+    if "stove_temp" not in frame or frame["stove_temp"].notna().sum() < 10:
+        print(f"No usable history for {cfg.entities.stove_temp} yet.")
+        print("The archive starts keeping it the cycle after you configure it,")
+        print("so give it a day before expecting anything here.")
+        return 1
+
+    pair = frame[["stove_temp", "t_indoor"]].dropna()
+    excess = (pair["stove_temp"] - pair["t_indoor"]).to_numpy(dtype=float)
+    hours = len(excess) * cfg.training.resample_minutes / 60.0
+    pct = {p: float(np.percentile(excess, p)) for p in (5, 50, 90, 95, 99)}
+
+    print(f"{cfg.entities.stove_temp} minus {cfg.entities.indoor_temp}")
+    print(f"  {hours:.0f} h of history, {excess.min():+.2f} to {excess.max():+.2f} K\n")
+    print(f"{'percentile':>12}{'K':>9}")
+    for p, v in pct.items():
+        print(f"{p:>11}%{v:>9.2f}")
+
+    suggested = round(pct[95] + 0.5, 1)
+    current = float(cfg.training.stove_deadband_k)
+    burning = float(np.mean(excess > current + 1e-9))
+    print(f"\nAt the configured deadband of {current:.1f} K, {100 * burning:.1f}% of this "
+          f"history counts as burning.")
+
+    if pct[95] - pct[5] > 1.5:
+        print(
+            "\nNote: the baseline itself moves by more than 1.5 K across this period, so the\n"
+            "two sensors are not simply offset - they drift apart and together. That is normal\n"
+            "when they sit in different parts of a house, and it is the reason to set the\n"
+            "deadband above the baseline's spread rather than its average."
+        )
+    print(
+        f"\nIf NOTHING was burning in this period, the whole spread above is baseline, and\n"
+        f"  hpmpc set training.stove_deadband_k {suggested}\n"
+        "leaves it all below the threshold. If fires are included, the tail is real and this\n"
+        "number is too high - re-run with --days over a quiet stretch instead."
+    )
+    return 0
+
+
 def cmd_archive(args: argparse.Namespace) -> int:
     """What history we have kept ourselves, independently of the recorder."""
     cfg = _load(args)
@@ -1236,6 +1303,11 @@ def build_parser() -> argparse.ArgumentParser:
                    help="resistance step to report resolution for (default: one step of the "
                         "configured pot)")
     p.set_defaults(func=cmd_ntc_table)
+
+    p = sub.add_parser("stove", help="what the stove sensor reads vs the house - picks the deadband")
+    p.add_argument("--days", type=int, default=None,
+                   help="how far back to look; point it at a stretch with no fires")
+    p.set_defaults(func=cmd_stove)
 
     p = sub.add_parser("archive", help="our own copy of the history - span, gaps, size")
     p.add_argument("--refresh", action="store_true", help="pull new rows from the recorder first")

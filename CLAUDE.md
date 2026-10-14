@@ -17,6 +17,8 @@ bestämt, varför, och vilka fällor som redan är upptäckta.
 |---|---|
 | Värmepump | Daikin Altherma LT: **ERLQ016CAW1** utedel + **EHVH16S26CB9W** hydrobox (260 l, 9 kW elpatron) |
 | Distribution | Golvvärme i betongplatta |
+| Huset | **350 m², två plan** |
+| Braskamin | liten, i ett **hörn** av huset. Takgivare `sensor.hall_temperature_3` nära den; styrgivaren `sensor.hall_temperature_2` sitter mitt i huset |
 | Ort | Falkvägen, Norrköping (58.5877, 16.1924) |
 | Elområde | SE3, rörligt pris |
 | Elöverföring + energiskatt | **0,7084 kr/kWh exkl. moms** (= 0,8855 inkl.) |
@@ -33,6 +35,7 @@ Entiteterna, som de faktiskt heter:
 | innetemperatur (mitt i huset) | `sensor.hall_temperature_2` |
 | husets effekt per fas | `sensor.gx_device_consumption_power_l1` / `_l2` / `_l3` |
 | laddstatus | `binary_sensor.eh6nh5cd_charging` |
+| braskamin (takgivare) | `sensor.hall_temperature_3` — `entities.stove_temp` |
 | ESP32:ns ingång (grader) | `number.varmepump_proxy_simulerad_utetemperatur` — noden äger NTC-tabellen |
 | wiperavläsning från ESP32 | `sensor.varmepump_proxy_mcp41100_wiper_0_255` |
 | utgångar | `input_number.varmepump_offset`, `input_number.varmepump_fiktiv_utetemp` |
@@ -182,6 +185,65 @@ lösning.
 **COP och kapacitet förberäknas utanför tillståndsloopen** (`OperatingPoint`).
 De beror bara på kända insignaler. Tiofaldig skillnad i lösningstid.
 
+**Braskaminen modelleras som en tidsvarierande intern last, inte som utesluten
+data.** Uteslutning var förstahandsvalet — samma mönster som elbilsladdaren — men
+användaren eldar upp till två gånger om dagen under de kallaste veckorna, och det
+är exakt de fönstren som pinnar UA och plattan vid den driftpunkt som betyder
+något. Att kasta dem vore dyrare än att bära en approximation.
+
+Signalen är **takgivarens överskott över husets innetemperatur**, inte en binär
+"brinner". En binär säger ingenting om hur hårt; överskottet gör det — en
+rejäl brasa lyfter givaren längre än glöd — så en enda anpassad förstärkning
+`k_stove` (W per kelvin överskott) täcker hela spannet i stället för ett medel
+som är fel i båda ändarna. Termen sitter på luftnoden bredvid `Q_int`, som är
+samma sak fast konstant.
+
+`training.stove_deadband_k` finns för att skiktningen i ett rum växer något när
+värmen går — utan dödband skulle kamintermen kunna suga upp en del av pumpens
+egen signal, precis det fel baslastmodellen hålls klockstyrd för att undvika.
+Under dödbandet är insignalen exakt noll och kan inte absorbera någonting.
+
+**Men i det här huset är dödbandet inte skiktning, och får inte gissas.** De två
+givarna sitter i olika delar av ett 350 m²-hus på två plan: takgivaren i ett hörn,
+styrgivaren mitt i huset. Baslinjen dem emellan är varken noll eller konstant —
+den andas med årstiden, solen på det hörnet och om dörrar står öppna. Därför
+finns **`hpmpc stove`**, som läser arkivet och föreslår ett dödband ur den
+faktiska fördelningen. Mät det över en period då ingen eldat; **excite-veckan är
+idealisk, den är eldfri per konstruktion.** Att gissa är inte oskyldigt: med en
+rimlig baslinje på 1,4 K och normal drift kallade default 2,0 K **6,4 % av lugna
+timmar för "eldning"**.
+
+**`k_stove` blir den *effektiva* kopplingen till mitthusnoden, inte kaminens
+effekt.** Hörnet värms först, mitten långt senare och svagare, så anpassningen
+hittar vad som faktiskt når styrgivaren. Räkna med ett tal klart under kaminens
+märkeffekt — det är rätt, inte ett fel. Och eftersom modellen har **en** luftnod
+läggs termen på momentant medan verkligheten har en transporttid mellan hörn och
+mitt; den tar bort merparten av biasen men är trubbigare än det syntetiska testet
+antyder, där kaminen värmde samma nod direkt.
+
+**Optimeraren planerar alltid med kaminen på noll.** Ingen kan prognosticera när
+någon tänder. Det är konservativt, inte fel: en oväntad brasa betyder bara att
+huset behövde mindre pumpvärme än planerat, och nästa cykel ser det i
+innetemperaturen.
+
+**Gränsen i dag: anpassningen ser kaminen, observatören gör det inte.**
+`controller.py` bygger sin `Exogenous` utan kaminvärde, så termen är inert i
+styrslingan — exakt som före ändringen, ingenting regredierar.
+
+**Det är samtidigt precis det beteende användaren vill ha**, och värt att inte
+råka riva upp: pumpen drar inte ner förrän innetemperaturen *mitt i huset*
+faktiskt stigit. Med en liten kamin i ett hörn av 350 m² är det rätt — att backa
+på en varm hörnvrå vore att svälta resten av huset.
+
+Nästa steg är ändå att mata in signalen i observatören, och det går åt **samma**
+håll som den oron. Observatören är en Luenberger som adopterar uppmätt
+innetemperatur och knuffar *slabestimatet* med prediktionsfelet: under en brasa
+drar den i dag slutsatsen att plattan är varmare än den är, och pumpen
+underhettar några timmar efter att elden dött. Ser observatören kaminen
+förutsägs luftens uppgång i stället, slabestimatet lämnas ifred, och den
+efterföljande svackan uteblir. Kräver eget test — det ändrar styrbeteende och
+ska inte smygas in.
+
 **Backtestets besparing räknas netto efter värme som lämnas i plattan.** Annars
 belönas den körning som råkar sluta med kall platta — samma fel som
 terminalvärderingen fixar, fast i utvärderingen.
@@ -190,7 +252,7 @@ terminalvärderingen fixar, fast i utvärderingen.
 
 ## Verifierat kontra antaget
 
-**Verifierat** (392 tester, syntetiskt hus med känd sanning):
+**Verifierat** (400 tester, syntetiskt hus med känd sanning):
 - Identifieringen återfinner värmekurva (lutning 0,3495 mot 0,35, R² 0,997) och
   husparametrar (UA +3 %, Ci +4 %, `k_wind` +3 %, plattans tidskonstant inom 8 %).
   `hpmpc train` skriver ut vad den lärt sig om sol och vind som area och
@@ -256,6 +318,15 @@ terminalvärderingen fixar, fast i utvärderingen.
   elprisetjustnu svarar från NUC:en. Alla entiteter svarar, `hpmpc plan` säger
   `[collecting]`, och cykelräknaren går. Kvar i drift innan den styr: en vecka
   `hpmpc excite` när det blivit stadigt kallt, sedan `collect`/`train`/`power`.
+
+- **Kamintermen är mätt mot syntetiskt hus med känd sanning** (14 dygn, två
+  brasor per dygn, `k_stove` 800 W/K = 4 kW vid brasans topp). Döljs kaminen för
+  anpassningen måste värmen skyllas på något, och den gör det: **solarean blåses
+  upp från 6 till 16 m² (+189 % fel mot +58 %)** och luftkapacitansen mer än
+  fördubblas (+127 % mot +25 %). Prediktions-RMSE **0,465 °C dold mot 0,102 °C
+  sedd — 78 % lägre**. `Hie` blev marginellt sämre (19 % mot 16 %); allt annat
+  klart bättre. Testerna ligger i `tests/test_identify.py` och jämför de två
+  anpassningarna mot varandra, inte mot en påhittad absolut tolerans.
 
 **Antaget / ej verifierat:**
 - **Prestandakartans siffror är förankrade i publicerade mätpunkter för
@@ -580,6 +651,26 @@ terminalvärderingen fixar, fast i utvärderingen.
   tillgänglighetsspårning. **Varför det inte syntes förut:** `check_readings`
   nås aldrig i `collecting` — `step()` går till `_collect_only` innan dess —
   så felet var osynligt tills excite, som kör kontrollen utan modell.
+- **Två sessioner arbetade parallellt från `ff6361a`, och `main` hade bara den
+  ena.** Kaminarbetet låg på `claude/ml-heat-pump-controller-0j4ngw`, säsongs-,
+  excite- och givarfixarna på `main`. Hopslaget 2026-10. Faran var konkret: med
+  `entities.stove_temp` i `config.yaml` och en image byggd från `main` hade
+  containern vägrat starta, eftersom okända nycklar är fel. **Kolla
+  `git log origin/main..origin/<annan branch>` innan något säljs in som "pushat
+  till main"** — en ny container klonar inte nödvändigtvis det `main` som körs.
+- **En givare som läggs till i efterhand fick ingen historik.** `refresh`
+  frågar bara efter det som hänt sedan senaste lagrade raden, så en entitet som
+  konfigureras när arkivet redan går kopierades från och med nu — trots att
+  recordern fortfarande höll ~10 dygn av den. Upptäckt när kamingivaren skulle
+  in i slutet av excite-veckan: veckans brasor hade arkiverats som "ingen eld"
+  och dödbandet hade inte kunnat mätas på den. Arkivet för nu en lista över
+  följda entiteter (`history/entities.json`) och hämtar bakåt
+  `history_days` för de nya, en gång. Frågan är "ny i konfigurationen", inte
+  "saknar data" — den senare slår fel åt båda håll: cykelns egen hämtning har
+  redan dragit in den nya givarens två senaste timmar när någon hinner titta,
+  och många entiteter som funnits hela tiden har helt enkelt inget i recordern.
+  Av samma skäl avgörs det *före* cykelns hämtning. Arkiv utan listan (äldre
+  kod) gissar ur vilka kolumner som har data i de två senaste månadsfilerna.
 - **`git pull` uppdaterar inte containern.** Containern kör koden som bakades in
   i imagen; en pull rör bara källan på värden. Symptomet är förvirrande: ett
   `hpmpc set` svarar *"'heat_pump.perceived_min_c' is not changeable at runtime"*
@@ -620,6 +711,11 @@ terminalvärderingen fixar, fast i utvärderingen.
 - Tester kör mot syntetisk data med känd sanning. Nya funktioner ska ha ett test
   som visar att de gör vad de påstår, inte bara att de kör.
 
+Beroendena kan installeras i utvecklingsmiljön (`pip install numpy scipy pandas
+scikit-learn httpx fastapi pytest`) — men de hamnar under **python3.13** medan
+`python3` kan peka på 3.11. Kör sviten med `/usr/bin/python3 -m pytest`, annars
+ser det ut som att numpy saknas. Hela sviten tar ~150 s här.
+
 ```bash
 pytest -q                                       # hela sviten, ~80 s
 pytest -q -k "not identify and not pipeline"    # snabb delmängd, ~5 s
@@ -645,6 +741,7 @@ hpmpc excite         # identifieringsexperiment, ~1 vecka
 hpmpc archive        # vår egen historik — omfång, hål, storlek
 hpmpc collect --days 45 && hpmpc train
 hpmpc power          # effektuppdelningen — laddaren ska hamna nära 11 kW
+hpmpc stove --days 7 # takgivaren mot huset; föreslår stove_deadband_k ur datan
 hpmpc plan           # nuvarande plan, skriver ingenting
 hpmpc backtest --days 7
 hpmpc run / hpmpc serve

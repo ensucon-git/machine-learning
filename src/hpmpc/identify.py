@@ -57,6 +57,7 @@ class WindowSet:
                 self.exog.wind[idx],
                 self.exog.solar_ghi[idx],
                 self.exog.price[idx],
+                stove=self.exog.stove[idx],
             ),
             offset=self.offset[idx],
             target=self.target[idx],
@@ -108,7 +109,7 @@ def make_windows(
     stride = max(1, int(round(stride_hours / dt_hours)))
 
     cols_out, cols_wind, cols_sun, cols_price = [], [], [], []
-    cols_offset, cols_target, cols_supply = [], [], []
+    cols_offset, cols_target, cols_supply, cols_stove = [], [], [], []
     ti0, tf0 = [], []
     min_heating = tr.min_heating_fraction if min_heating_fraction is None else min_heating_fraction
     skipped_no_heat = 0
@@ -131,6 +132,7 @@ def make_windows(
         arr_sun = seg.get("solar_ghi", pd.Series(0.0, index=seg.index)).fillna(0.0).to_numpy(dtype=float)
         arr_price = seg.get("price", pd.Series(1.0, index=seg.index)).fillna(1.0).to_numpy(dtype=float)
         arr_off = seg["offset"].to_numpy(dtype=float)
+        arr_stove = seg.get("stove", pd.Series(0.0, index=seg.index)).fillna(0.0).to_numpy(dtype=float)
         arr_ti = seg["t_indoor"].to_numpy(dtype=float)
         arr_sup = (
             seg["t_supply"].ffill().bfill().to_numpy(dtype=float) if use_measured_supply else None
@@ -151,6 +153,7 @@ def make_windows(
             cols_price.append(arr_price[sl])
             cols_offset.append(arr_off[sl])
             cols_target.append(arr_ti[sl])
+            cols_stove.append(arr_stove[sl])
             if arr_sup is not None:
                 cols_supply.append(arr_sup[sl])
             ti0.append(arr_ti[start])
@@ -173,7 +176,10 @@ def make_windows(
     mask[burn:] = True
 
     ws = WindowSet(
-        exog=Exogenous(np.array(cols_out), np.array(cols_wind), np.array(cols_sun), np.array(cols_price)),
+        exog=Exogenous(
+            np.array(cols_out), np.array(cols_wind), np.array(cols_sun), np.array(cols_price),
+            stove=np.array(cols_stove),
+        ),
         offset=np.array(cols_offset),
         target=np.array(cols_target),
         t_indoor0=np.array(ti0),
@@ -231,6 +237,10 @@ REGULARISATION_WEIGHT = {
     "f_sol_i": 6.0,
     "Q_int": 3.0,
     "Hfloor": 1.0,
+    # Pulled towards zero as hard as Q_int. A stove term that is not earning
+    # its keep must collapse rather than drift up and absorb whatever else the
+    # fit cannot explain - it is the one input here that nothing else bounds.
+    "k_stove": 3.0,
 }
 
 
@@ -396,6 +406,14 @@ def fit_thermal(
             "solar_to_air_pct": round(100.0 * params.f_sol_i),
             "wind_pct_per_m_s": round(100.0 * params.k_wind, 1),
             "ua_at_5_m_s": round(params.heat_loss_w_per_k(wind=5.0), 1),
+        },
+        # Same idea for the stove: kilowatts at a fire that lifts its sensor
+        # 4 K above the house, which is a number you can hold against a log
+        # basket. The bare W/K gain says nothing to anyone.
+        "stove": {
+            "w_per_k_excess": round(params.k_stove, 1),
+            "kw_at_4k_excess": round(params.k_stove * 4.0 / 1000.0, 2),
+            "share_of_hours_burning_pct": round(100.0 * float(np.mean(short.exog.stove > 0.0)), 1),
         },
         "restarts": max(1, restarts),
         "restart_scores": [
