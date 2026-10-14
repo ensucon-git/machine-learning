@@ -25,7 +25,7 @@ from .controller import Controller
 from .archive import build_training_frame
 from .dataset import save_dataset
 from .ha import HomeAssistant, HomeAssistantError
-from .train import load_model, load_model_if_trained, train
+from .train import load_model_if_trained, train
 
 log = logging.getLogger(__name__)
 
@@ -60,18 +60,15 @@ class ControllerService:
         self.controller = Controller(self.cfg, params, self.ha, residual)
         self.controller.reload_config(self.config_path)
 
-    def adopt_new_model(self) -> bool:
-        """Pick up a model trained while we were running, without a restart."""
-        if self.controller.trained:
-            return False
-        try:
-            working, params, residual, metadata = load_model(self.cfg)
-        except (OSError, ValueError, KeyError):
-            return False
+    def adopt_new_model(self, settle_seconds: float = 5.0) -> bool:
+        """Pick up a model trained while we were running - the first one, and
+        every one after it - without a restart."""
         with self.lock:
-            self.cfg = working
+            metadata = self.controller.pick_up_new_model(self.config_path, settle_seconds)
+            if metadata is None:
+                return False
+            self.cfg = self.controller.cfg
             self.model_metadata = metadata
-            self.controller.adopt_model(params, working, residual)
         return True
 
     def step(self, apply: bool | None = None) -> dict[str, Any]:
@@ -146,14 +143,9 @@ class ControllerService:
                 frame, _ = build_training_frame(self.cfg, self.ha)
                 save_dataset(frame, self.cfg.dataset_path)
                 report = train(self.cfg, frame)
-                working, params, residual, metadata = load_model(self.cfg)
-                self.cfg = working
-                self.controller.base_cfg = working
-                self.controller.cfg = working
-                self.controller.params = params
-                self.controller.residual = residual
-                self.controller.solver.params = params
-                self.model_metadata = metadata
+            # The same path a manual 'hpmpc train' takes, so the two can never
+            # disagree about what a freshly trained model means.
+            self.adopt_new_model(settle_seconds=0.0)
             self.last_training = {
                 "at": datetime.now(timezone.utc).isoformat(),
                 "validation_rmse_c": report.get("thermal", {}).get("validation", {}).get("rmse_c"),

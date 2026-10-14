@@ -70,6 +70,17 @@ MODE_OWNED = {
 }
 
 
+def _model_stamp(cfg: Config) -> float | None:
+    """When the model on disk last changed - both files, since they are written apart."""
+    stamps = []
+    for path in (cfg.model_path, cfg.residual_path):
+        try:
+            stamps.append(Path(path).stat().st_mtime)
+        except OSError:
+            continue
+    return max(stamps) if Path(cfg.model_path).exists() and stamps else None
+
+
 @dataclass
 class ControllerState:
     """Everything that must survive a restart."""
@@ -127,6 +138,7 @@ class Controller:
         # reading and fills the archive - it just does not optimise.
         self.solver = MpcSolver(cfg, params) if params is not None else None
         self._config_mtime: float | None = None
+        self._model_stamp: float | None = _model_stamp(cfg) if params is not None else None
         self.mode = cfg.modes.default
         slab = (
             float(steady_state_mass_temp(params, cfg.control.setpoint, 0.0))
@@ -153,6 +165,45 @@ class Controller:
         self.solver = MpcSolver(cfg, params)
         self.state.warm_started = False
         log.info("Model adopted - switching from collecting to control")
+
+    def pick_up_new_model(self, config_path: str | Path,
+                          settle_seconds: float = 5.0) -> dict[str, Any] | None:
+        """Switch to a model that appeared or changed on disk. Returns its metadata.
+
+        'hpmpc train' writes the model from a separate process, so a running
+        service has to notice. It used to only notice the *first* model, which
+        meant every manual retrain needed a restart to take effect - and until
+        then the service kept steering on the model the operator had just
+        decided to replace.
+
+        The configuration is re-read from the file rather than taken from the
+        running one, because the running one already carries the previous
+        model's learned pump settings. A new model that no longer overrides one
+        of them - an efficiency fit that was switched off - would otherwise
+        inherit the old value silently.
+
+        ``settle_seconds`` skips a model written moments ago: the thermal
+        parameters and the residual model are two files, and a cycle that lands
+        between them should wait for the next one rather than adopt half.
+        """
+        stamp = _model_stamp(self.base_cfg)
+        if stamp is None or stamp == self._model_stamp:
+            return None
+        if settle_seconds and datetime.now(timezone.utc).timestamp() - stamp < settle_seconds:
+            return None
+        from .train import load_model
+
+        try:
+            working, params, residual, metadata = load_model(load_config(config_path))
+        except (OSError, ValueError, KeyError) as exc:
+            log.warning("A new model is on disk but could not be loaded (%s); keeping the current one", exc)
+            return None
+        replacing = self.trained
+        self._model_stamp = stamp
+        self.adopt_model(params, working, residual)
+        if replacing:
+            log.info("Switched to the model trained at %s", metadata.get("trained_at", "?"))
+        return metadata
 
     def refresh_settings(self) -> list[str]:
         """Re-derive the active configuration from the file, the mode and the helpers.
@@ -235,6 +286,7 @@ class Controller:
             self.solver.cfg = working
             self.solver.pump = self.pump
             self.solver.params = params
+        self._model_stamp = _model_stamp(working) if params is not None else None
         log.info("Reloaded %s", file_path)
         return True
 

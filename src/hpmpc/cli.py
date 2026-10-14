@@ -1022,13 +1022,10 @@ def cmd_run(args: argparse.Namespace) -> int:
             started = datetime.now(timezone.utc)
             try:
                 controller.reload_config(args.config)
-                if not controller.trained:
-                    try:
-                        fresh, fresh_params, fresh_residual, _ = load_model(controller.base_cfg)
-                        controller.adopt_model(fresh_params, fresh, fresh_residual)
-                        print("Model found - switching from collecting to control.")
-                    except (ModelNotTrained, OSError, ValueError, KeyError):
-                        pass
+                was_trained = controller.trained
+                if controller.pick_up_new_model(args.config) is not None:
+                    print("Model found - switching from collecting to control." if not was_trained
+                          else "New model on disk - switched to it.")
                 if args.excite:
                     report = controller.excite_step(apply=apply, hold_hours=args.hold_hours)
                 else:

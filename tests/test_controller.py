@@ -619,3 +619,97 @@ def test_a_steady_indoor_reading_lets_the_excitation_run(controller, cfg, fake_h
     report = controller.excite_step(now=fake_ha.now, apply=True)
     assert "problems" not in report
     assert not any("paused" in note for note in report["notes"])
+
+
+# ------------------------------------------- a retrained model replaces the old
+
+def _config_file(tmp_path, cfg):
+    from pathlib import Path
+
+    path = Path(tmp_path) / "config.yaml"
+    path.write_text(f"""
+entities:
+  indoor_temp: sensor.indoor
+  outdoor_temp: sensor.outdoor
+  price: sensor.price
+  weather: weather.home
+  offset_output: number.offset
+  fake_temperature_output: number.fake_temp
+control:
+  horizon_hours: 12
+  block_hours: 3
+  warm_start_hours: 0
+optimizer:
+  population: 32
+  elites: 6
+  iterations: 3
+  polish: false
+paths:
+  data_dir: {cfg.paths.data_dir}
+  model_dir: {cfg.paths.model_dir}
+  state_file: {cfg.paths.state_file}
+""", encoding="utf-8")
+    return path
+
+
+def _save_model(cfg, params, overrides, age_seconds):
+    import os
+    import time
+
+    from hpmpc.model.thermal import save_params
+
+    save_params(cfg.model_path, params, {"pump_overrides": overrides, "trained_at": f"-{age_seconds}s"})
+    stamp = time.time() - age_seconds
+    os.utime(cfg.model_path, (stamp, stamp))
+
+
+def _running_controller(tmp_path, cfg, fake_ha):
+    from hpmpc.config import load_config
+    from hpmpc.train import load_model
+
+    path = _config_file(tmp_path, cfg)
+    working, params, residual, _ = load_model(load_config(path))
+    return Controller(working, params, fake_ha, residual), path
+
+
+def test_a_retrained_model_is_picked_up_without_a_restart(tmp_path, cfg, fake_ha):
+    _save_model(cfg, ThermalParams(), {}, age_seconds=120)
+    controller, path = _running_controller(tmp_path, cfg, fake_ha)
+
+    retrained = ThermalParams(Hie=ThermalParams().Hie * 2)
+    _save_model(cfg, retrained, {}, age_seconds=60)
+    assert controller.pick_up_new_model(path) is not None
+    assert controller.params.Hie == pytest.approx(retrained.Hie)
+    assert controller.solver.params.Hie == pytest.approx(retrained.Hie)
+    assert controller.pick_up_new_model(path) is None          # nothing changed since
+
+
+def test_a_learned_value_the_new_model_drops_is_not_inherited(tmp_path, cfg, fake_ha):
+    """The case from the field: the efficiency fit pinned 0.30 at its bound,
+    the operator switched it off and retrained. The running service must end
+    up on the configured value, not keep the old model's 0.30."""
+    _save_model(cfg, ThermalParams(), {"efficiency_scale": 0.3}, age_seconds=120)
+    controller, path = _running_controller(tmp_path, cfg, fake_ha)
+    assert controller.cfg.heat_pump.efficiency_scale == pytest.approx(0.3)
+
+    _save_model(cfg, ThermalParams(), {}, age_seconds=60)
+    controller.pick_up_new_model(path)
+    assert controller.cfg.heat_pump.efficiency_scale == pytest.approx(1.0)
+    assert controller.base_cfg.heat_pump.efficiency_scale == pytest.approx(1.0)
+
+
+def test_a_model_still_being_written_waits_for_the_next_cycle(tmp_path, cfg, fake_ha):
+    _save_model(cfg, ThermalParams(), {}, age_seconds=120)
+    controller, path = _running_controller(tmp_path, cfg, fake_ha)
+    _save_model(cfg, ThermalParams(Hie=50.0), {}, age_seconds=0)
+    assert controller.pick_up_new_model(path) is None
+    assert controller.pick_up_new_model(path, settle_seconds=0) is not None
+
+
+def test_the_first_model_still_ends_collecting_mode(tmp_path, cfg, fake_ha):
+    path = _config_file(tmp_path, cfg)
+    controller = Controller(cfg, None, fake_ha)
+    assert controller.pick_up_new_model(path) is None
+    _save_model(cfg, ThermalParams(), {}, age_seconds=60)
+    assert controller.pick_up_new_model(path) is not None
+    assert controller.trained

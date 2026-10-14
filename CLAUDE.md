@@ -106,8 +106,17 @@ regulariseringen — den gav UA 140 W/K mot sanna 195.
 **Kontrollern startar utan modell** (`load_model_if_trained`, läget `collecting`).
 En färsk installation har ingen modell, och att vägra starta vore bakvänt: pumpen
 har ingen annan givare än den vi driver, och historiken anpassningen behöver
-samlas in av samma slinga. `adopt_model` växlar över utan omstart så fort
-`hpmpc train` körts.
+samlas in av samma slinga. `pick_up_new_model` växlar över utan omstart så
+fort `hpmpc train` körts — **varje** gång, inte bara den första. Tidigare bytte
+tjänsten bara från ingen modell till en modell; en manuell omträning krävde
+omstart, och fram till dess styrde den på modellen man just bestämt sig för att
+ersätta. Konfigurationen läses om från filen vid bytet, inte från den körande:
+den körande bär förra modellens inlärda pumpvärden, och en ny modell som slutat
+åsidosätta ett av dem (verkningsgraden med `power.source: none`) hade annars
+ärvt det gamla värdet tyst — det hände på riktigt 2026-10, 0,30 i gränsen.
+Samma väg används av den automatiska omträningen. Ett par sekunders
+`settle_seconds` hindrar att en cykel som landar mellan termikfilen och
+residualfilen adopterar en halv modell.
 
 **Säsongen hanteras av fysiken, inte av en inställning.** Över
 `heat_pump.heat_stop_temp` gör pumpen ingen värme, alltså gör offseten
@@ -252,7 +261,7 @@ terminalvärderingen fixar, fast i utvärderingen.
 
 ## Verifierat kontra antaget
 
-**Verifierat** (400 tester, syntetiskt hus med känd sanning):
+**Verifierat** (404 tester, syntetiskt hus med känd sanning):
 - Identifieringen återfinner värmekurva (lutning 0,3495 mot 0,35, R² 0,997) och
   husparametrar (UA +3 %, Ci +4 %, `k_wind` +3 %, plattans tidskonstant inom 8 %).
   `hpmpc train` skriver ut vad den lärt sig om sol och vind som area och
