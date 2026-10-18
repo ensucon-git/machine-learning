@@ -252,12 +252,49 @@ def _denormalise(x: np.ndarray, lo: np.ndarray, hi: np.ndarray) -> np.ndarray:
     return lo + np.clip(x, 0.0, 1.0) * (hi - lo)
 
 
+# A window whose offset moves more than this carries information about the
+# offset gain; one where it sits still does not.
+MOVING_OFFSET_STD_K = 0.25
+
+
 def _split(ws: WindowSet, validation_fraction: float) -> tuple[WindowSet, WindowSet]:
-    """Chronological split - the validation windows are the most recent ones, so
-    the score answers "would this have predicted the days I have not used?"."""
-    n_val = max(1, int(round(len(ws) * validation_fraction)))
+    """Chronological split, done separately for windows where the offset moves.
+
+    The validation windows are the most recent ones, so the score answers
+    "would this have predicted the days I have not used?". But a plain
+    chronological cut puts the newest data in validation, and on a fresh
+    install the newest data is precisely the excitation week - the only
+    stretch where the offset moved for reasons the fit cannot confuse with the
+    weather. On the real house it was held out of training for the first three
+    fits.
+
+    So the windows where the offset moves and the ones where it does not are
+    each split chronologically on their own, and recombined. Most of the
+    excitation trains the model; its last quarter still tests it.
+
+    Measured, not assumed: on the synthetic house (31 quiet days, then a week
+    of excitation, newest) both splits recover UA to the same -7 %, because
+    with the heating curve known the weather alone moves the pump enough. The
+    gain this buys is for houses where that is not true, and an honest
+    validation score - it now has to predict windows where the offset moved.
+    It was not the cause of the poor fits on the real house.
+    """
     order = np.arange(len(ws))
-    return ws.subset(order[: len(ws) - n_val]), ws.subset(order[len(ws) - n_val :])
+    moving = ws.offset.std(axis=1) > MOVING_OFFSET_STD_K
+    train_idx: list[np.ndarray] = []
+    val_idx: list[np.ndarray] = []
+    for group in (order[moving], order[~moving]):
+        if len(group) < 2:
+            train_idx.append(group)
+            continue
+        n_val = min(len(group) - 1, max(1, int(round(len(group) * validation_fraction))))
+        train_idx.append(group[: len(group) - n_val])
+        val_idx.append(group[len(group) - n_val:])
+    train = np.sort(np.concatenate(train_idx)) if train_idx else order[:0]
+    val = np.sort(np.concatenate(val_idx)) if val_idx else order[:0]
+    if len(val) == 0 and len(ws) > 1:
+        train, val = order[:-1], order[-1:]
+    return ws.subset(train), ws.subset(val)
 
 
 def _identifiability(jac: np.ndarray, names: Sequence[str]) -> dict[str, Any]:

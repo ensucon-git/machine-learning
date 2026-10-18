@@ -986,10 +986,28 @@ def cmd_train(args: argparse.Namespace) -> int:
     frame = load_dataset(path)
     if args.days:
         frame = frame.iloc[-int(args.days * 24 * 60 / cfg.training.resample_minutes) :]
-    report = train(cfg, frame, fit_curve=not args.no_curve_fit)
+    report = train(cfg, frame, fit_curve=not args.no_curve_fit, force=args.force)
     write_report(Path(cfg.paths.model_dir) / "training_report.json", report)
     print()
     print(summarise(report))
+    if report.get("rejected"):
+        print(f"\nNOT INSTALLED: {report['rejected']}.\n"
+              "The model that was running keeps running. 'hpmpc train --force' installs this one anyway.")
+        return 1
+    return 0
+
+
+def cmd_revert_model(args: argparse.Namespace) -> int:
+    from .train import previous_path, revert_model
+
+    cfg = _load(args)
+    try:
+        metadata = revert_model(cfg)
+    except FileNotFoundError as exc:
+        print(exc)
+        return 1
+    print(f"Back on the model trained at {metadata.get('trained_at', '?')}; the one it replaced is now "
+          f"{previous_path(cfg)}.\nA running service switches within a cycle. Run this again to undo.")
     return 0
 
 
@@ -1320,7 +1338,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--dataset", default=None)
     p.add_argument("--days", type=float, default=None, help="use only the most recent N days")
     p.add_argument("--no-curve-fit", action="store_true", help="keep the configured heating curve")
+    p.add_argument("--force", action="store_true",
+                   help="install the model even if it predicts no better than 'no change'")
     p.set_defaults(func=cmd_train)
+
+    p = sub.add_parser("revert-model", help="go back to the model the last training replaced")
+    p.set_defaults(func=cmd_revert_model)
 
     p = sub.add_parser("plan", help="solve once and print the plan without writing anything")
     p.add_argument("--json", action="store_true")

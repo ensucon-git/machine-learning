@@ -150,7 +150,11 @@ class ControllerService:
                 "at": datetime.now(timezone.utc).isoformat(),
                 "validation_rmse_c": report.get("thermal", {}).get("validation", {}).get("rmse_c"),
             }
-            log.info("Retrained: validation RMSE %s C", self.last_training["validation_rmse_c"])
+            if report.get("rejected"):
+                self.last_training["rejected"] = report["rejected"]
+                log.warning("Retrain rejected, staying on the model we have: %s", report["rejected"])
+            else:
+                log.info("Retrained: validation RMSE %s C", self.last_training["validation_rmse_c"])
         except ValueError as exc:
             # Out of season this is the normal answer, not a fault: identification
             # refuses a dataset with no hours the pump could heat in. Keeping the

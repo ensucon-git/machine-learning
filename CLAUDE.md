@@ -103,6 +103,24 @@ på validerings-RMSE. En hundradels grad är brus på en platt likelihood-ås, o
 att föredra det lät en anpassning vinna just genom att smita undan
 regulariseringen — den gav UA 140 W/K mot sanna 195.
 
+**En omträning som är sämre än persistens installeras inte** (`train.py`).
+Finns redan en modell och valideringens RMSE inte slår "ingenting ändras",
+sparas den nya som `thermal_model.rejected.json` och den körande står kvar.
+Utan spärren ersatte omträningen 2026-10-18 (RMSE 0,598 mot persistens 0,457)
+en bättre modell tyst, och den automatiska omträningen hade gjort samma sak
+mitt i natten. Första modellen spärras inte — utan den finns ingenting att stå
+kvar på, och `collecting` är inte bättre. `hpmpc train --force` installerar
+ändå. Varje installation sparar förra som `thermal_model.prev.json` (+ residual),
+och `hpmpc revert-model` byter tillbaka; modellfilen kopieras sist så att
+mtime-bytet plockar upp ett helt par.
+
+**Valideringen delas stratifierat på offsetrörelse** (`identify._split`).
+Fönster där offseten rör sig (std > 0,25 K) och stilla fönster delas var för
+sig kronologiskt, så excitationsveckan inte hamnar helt i validering eller helt
+i träning. Principiellt rätt, men **det var inte orsaken till de dåliga
+anpassningarna på huset** — mot syntetiskt hus gav båda delningarna UA −7 %.
+Påstods en gång i chatten; det höll inte.
+
 **Kontrollern startar utan modell** (`load_model_if_trained`, läget `collecting`).
 En färsk installation har ingen modell, och att vägra starta vore bakvänt: pumpen
 har ingen annan givare än den vi driver, och historiken anpassningen behöver
@@ -261,7 +279,7 @@ terminalvärderingen fixar, fast i utvärderingen.
 
 ## Verifierat kontra antaget
 
-**Verifierat** (404 tester, syntetiskt hus med känd sanning):
+**Verifierat** (411 tester, syntetiskt hus med känd sanning):
 - Identifieringen återfinner värmekurva (lutning 0,3495 mot 0,35, R² 0,997) och
   husparametrar (UA +3 %, Ci +4 %, `k_wind` +3 %, plattans tidskonstant inom 8 %).
   `hpmpc train` skriver ut vad den lärt sig om sol och vind som area och

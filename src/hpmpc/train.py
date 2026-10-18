@@ -47,7 +47,8 @@ def apply_pump_overrides(cfg: Config, overrides: dict[str, Any]) -> Config:
     return replace(cfg, heat_pump=replace(cfg.heat_pump, **usable))
 
 
-def train(cfg: Config, frame: pd.DataFrame, fit_curve: bool = True) -> dict[str, Any]:
+def train(cfg: Config, frame: pd.DataFrame, fit_curve: bool = True,
+          force: bool = False) -> dict[str, Any]:
     """Fit the heating curve, the building and the COP, then the residual model."""
     report: dict[str, Any] = {
         "trained_at": datetime.now(timezone.utc).isoformat(),
@@ -124,13 +125,91 @@ def train(cfg: Config, frame: pd.DataFrame, fit_curve: bool = True) -> dict[str,
     report["pump_overrides"] = overrides
     report["parameters"] = params.to_dict()
 
+    validation = thermal_metrics.get("validation", {})
+    rmse = validation.get("rmse_c", float("inf"))
+    baseline = validation.get("baseline_rmse_c", float("inf"))
+    if rmse >= baseline and Path(cfg.model_path).exists() and not force:
+        # A model that predicts worse than "nothing will change" must not
+        # replace one that is steering the house - least of all unattended, from
+        # the automatic retrain at three in the morning. Kept beside it, so the
+        # numbers can still be looked at.
+        save_params(rejected_path(cfg), params, metadata=report)
+        report["rejected"] = (
+            f"validation RMSE {rmse:.3f} C is no better than predicting no change "
+            f"({baseline:.3f} C); the running model was kept"
+        )
+        log.warning("New model rejected: %s. Saved for inspection as %s",
+                    report["rejected"], rejected_path(cfg))
+        return report
+
+    _keep_previous(cfg)
     save_params(cfg.model_path, params, metadata=report)
     if residual is not None:
         residual.save(cfg.residual_path)
     elif Path(cfg.residual_path).exists():
         Path(cfg.residual_path).unlink()
-    log.info("Saved model to %s", cfg.model_path)
+    log.info("Saved model to %s (the one it replaced: %s)", cfg.model_path, previous_path(cfg))
     return report
+
+
+def previous_path(cfg: Config) -> Path:
+    return Path(cfg.paths.model_dir) / "thermal_model.prev.json"
+
+
+def rejected_path(cfg: Config) -> Path:
+    return Path(cfg.paths.model_dir) / "thermal_model.rejected.json"
+
+
+def _previous_residual_path(cfg: Config) -> Path:
+    return Path(cfg.paths.model_dir) / "residual_model.prev.joblib"
+
+
+def _keep_previous(cfg: Config) -> None:
+    """Copy the running model aside before it is overwritten.
+
+    Every train used to overwrite the only copy, so a retrain that went wrong
+    left nothing to go back to but another retrain on the same data.
+    """
+    import shutil
+
+    if Path(cfg.model_path).exists():
+        shutil.copy2(cfg.model_path, previous_path(cfg))
+        if Path(cfg.residual_path).exists():
+            shutil.copy2(cfg.residual_path, _previous_residual_path(cfg))
+        elif _previous_residual_path(cfg).exists():
+            _previous_residual_path(cfg).unlink()
+
+
+def revert_model(cfg: Config) -> dict[str, Any]:
+    """Swap the running model and the one it replaced. Running it twice undoes it.
+
+    The files are copied rather than renamed so their modification time is now,
+    which is what tells a running service to pick the change up.
+    """
+    import shutil
+
+    if not previous_path(cfg).exists():
+        raise FileNotFoundError(f"No previous model at {previous_path(cfg)} to go back to")
+    model_dir = Path(cfg.paths.model_dir)
+    swap_model, swap_residual = model_dir / ".swap_model.json", model_dir / ".swap_residual.joblib"
+    shutil.copyfile(cfg.model_path, swap_model)
+    had_residual = Path(cfg.residual_path).exists()
+    if had_residual:
+        shutil.copyfile(cfg.residual_path, swap_residual)
+
+    if _previous_residual_path(cfg).exists():
+        shutil.copyfile(_previous_residual_path(cfg), cfg.residual_path)
+    elif Path(cfg.residual_path).exists():
+        Path(cfg.residual_path).unlink()
+    shutil.copyfile(previous_path(cfg), cfg.model_path)      # last, so the stamp covers both
+
+    shutil.move(str(swap_model), previous_path(cfg))
+    if had_residual:
+        shutil.move(str(swap_residual), _previous_residual_path(cfg))
+    elif _previous_residual_path(cfg).exists():
+        _previous_residual_path(cfg).unlink()
+    _, metadata = load_params(cfg.model_path)
+    return metadata
 
 
 def _previous_params(cfg: Config) -> ThermalParams | None:
