@@ -134,6 +134,20 @@ omträningen tränar från *filens* konfiguration, inte den körande — den bä
 förra modellens inlärda verkningsgrad, som annars hade satt just den skala
 mätaren ska mäta. Mot syntetiskt hus med priorn på 35 %: UA 82 → 200 (sant 195).
 
+**Skalan räknas på dygnsenergi, inte på kvartar** (`identify.daily_energy_balance`).
+Första versionen använde 15-minutersuppdelningen, och på huset 2026-10-18
+ville den ha ×8 (i gränsen, UA ≥ 620) med "±5 %" och R² −0,09. Felet är att en
+riktig pump taktar av/på och gör varmvatten när den vill — i kvartsupplösning
+stämmer ingenting i tid med en jämn modell, och standardfelet ser ändå snävt
+ut eftersom det förutsätter att modellen är rätt. Summerat per dygn blir
+varmvatten och hushåll ett intercept och lutningen mot modellens dygnsel är
+faktorn: en energisignatur. Syntetiskt med taktning + varmvatten: kvarts-R²
+0,13, dygns-R² 0,97, faktorn inom 12 %. Spärr: dygns-R² ≥ 0,5 och ≥ 14 dygn.
+`hpmpc power` skriver dygnstabellen (ute, uppmätt, modell) — läs den först om
+skalan underkänns. Rimlighetskoll för huset: 16 kW-pump + 9 kW elpatron tyder
+på en dimensionerande förlust kring 14–16 kW vid −20, alltså UA i
+storleksordningen 350–400 W/K.
+
 **Valideringen delas stratifierat på offsetrörelse** (`identify._split`).
 Fönster där offseten rör sig (std > 0,25 K) och stilla fönster delas var för
 sig kronologiskt, så excitationsveckan inte hamnar helt i validering eller helt
@@ -299,7 +313,7 @@ terminalvärderingen fixar, fast i utvärderingen.
 
 ## Verifierat kontra antaget
 
-**Verifierat** (419 tester, syntetiskt hus med känd sanning):
+**Verifierat** (420 tester, syntetiskt hus med känd sanning):
 - Identifieringen återfinner värmekurva (lutning 0,3495 mot 0,35, R² 0,997) och
   husparametrar (UA +3 %, Ci +4 %, `k_wind` +3 %, plattans tidskonstant inom 8 %).
   `hpmpc train` skriver ut vad den lärt sig om sol och vind som area och

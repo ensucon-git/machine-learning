@@ -370,7 +370,7 @@ def cmd_archive(args: argparse.Namespace) -> int:
 def cmd_power(args: argparse.Namespace) -> int:
     """Show how whole-house power is being split between the heat pump and the rest."""
     from .disaggregate import disaggregate, house_power, quality_warnings
-    from .identify import BUILDING_FACTOR_BOUNDS, _simulate_period
+    from .identify import BUILDING_FACTOR_BOUNDS, _simulate_period, daily_energy_balance
     from .train import load_model
 
     cfg = _load(args)
@@ -415,10 +415,17 @@ def cmd_power(args: argparse.Namespace) -> int:
     uncertainty = (f" +/- {100 * metrics['efficiency_scale_uncertainty']:.1f}%"
                    if metrics.get("efficiency_scale_uncertainty") else "")
     if building:
-        print(f"building heat scale      x{result.power_factor:.3f}{uncertainty}")
-        print(f"   the meter's view of the house's heat loss relative to the model's "
-              f"{params.heat_loss_w_per_k():.0f} W/K,")
-        print("   with the COP from the performance map. Near 1.0 means the last calibration still holds.")
+        daily = daily_energy_balance(context, working)
+        if daily is not None:
+            print(f"{'day':12}{'outdoor C':>10}{'metered kWh':>13}{'model kWh':>11}")
+            for row in daily["table"]:
+                print(f"{row['day']:12}{row['t_outdoor']:>10.1f}{row['measured_kwh']:>13.1f}{row['model_kwh']:>11.1f}")
+            print("   metered: the balanced load, car charging excluded; model: pump electricity it predicts\n")
+            print(f"building heat scale      x{daily['factor']:.3f} +/- {100 * daily['uncertainty']:.1f}% "
+                  f"(daily fit R2 {daily['r2']}, household + hot water {daily['base_kwh_per_day']} kWh/day)")
+            print(f"   the meter's view of the house's heat loss relative to the model's "
+                  f"{params.heat_loss_w_per_k():.0f} W/K,")
+            print("   with the COP from the performance map. Near 1.0 means the last calibration still holds.")
     else:
         print(f"efficiency scale         {result.efficiency_scale:.4f}{uncertainty}")
         print(f"   relative to the {working.heat_pump.efficiency_scale:.4f} already in the model, so a value")

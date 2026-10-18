@@ -529,22 +529,28 @@ def calibrate_building_scale(frame: pd.DataFrame, cfg: Config, params: ThermalPa
     else:
         from .disaggregate import disaggregate
 
-        result = disaggregate(
+        daily = daily_energy_balance(context, cfg)
+        if daily is None:
+            return None
+        factor, uncertainty = daily["factor"], daily["uncertainty"]
+        method = f"whole-house meter, daily energy over {daily['days']} days"
+        extra = {"daily_r2": daily["r2"], "daily_base_kwh": daily["base_kwh_per_day"]}
+        # The 15-minute split is no longer what sets the scale, but its car
+        # charger estimate is still the best check that the phases are right.
+        split = disaggregate(
             context["data"], cfg, context["q_compressor"], context["q_backup"], context["cop_base"],
             factor_bounds=BUILDING_FACTOR_BOUNDS,
         )
-        if result is None:
-            return None
-        factor = result.power_factor
-        uncertainty = result.metrics.get("efficiency_scale_uncertainty")
-        method = f"whole-house meter, {result.target}"
-        extra = {
-            "car_charger_kw": round(result.ev_power_w / 1000.0, 2),
-            "validation_r2": result.metrics.get("validation_r2"),
-        }
+        if split is not None:
+            extra["car_charger_kw"] = round(split.ev_power_w / 1000.0, 2)
 
     lo, hi = BUILDING_FACTOR_BOUNDS
     reasons = []
+    if extra.get("daily_r2") is not None and extra["daily_r2"] < MIN_DAILY_R2:
+        reasons.append(
+            f"the model's daily heat explains only {100 * extra['daily_r2']:.0f}% of the day-to-day "
+            f"variation in metered energy (need {100 * MIN_DAILY_R2:.0f}%)"
+        )
     if uncertainty is None or not np.isfinite(uncertainty) or uncertainty > MAX_SCALE_UNCERTAINTY:
         shown = "unknown" if uncertainty is None or not np.isfinite(uncertainty) else f"+/-{100 * uncertainty:.0f}%"
         reasons.append(f"the meter determines it only to {shown} (need +/-{100 * MAX_SCALE_UNCERTAINTY:.0f}%)")
@@ -559,6 +565,84 @@ def calibrate_building_scale(frame: pd.DataFrame, cfg: Config, params: ThermalPa
         "heat_loss_before_w_per_k": round(params.heat_loss_w_per_k(), 1),
         "heat_loss_after_w_per_k": round(params.scaled(factor).heat_loss_w_per_k(), 1),
         **extra,
+    }
+
+
+# Below this the model's daily heat does not track what the meter sees, and a
+# ratio between the two means nothing however tight its standard error.
+MIN_DAILY_R2 = 0.5
+MIN_DAILY_COVERAGE = 0.6
+MIN_DAYS = 14
+
+
+def daily_energy_balance(context: dict[str, Any], cfg: Config) -> dict[str, Any] | None:
+    """Metered energy per day against the model's pump energy per day.
+
+    The scale is a question about energy, not timing, so it is answered on
+    days rather than quarter hours. At 15 minutes the pump's own on/off
+    cycling, hot water and defrost do not line up with a smooth model, the
+    regression's R2 goes negative, and its standard error still looks tight
+    because it assumes the model is right. Summed over a day all of that
+    averages out: hot water and the household become an intercept, and the
+    slope against the model's daily electricity is the factor - an energy
+    signature, with the model supplying the COP for each day's weather.
+    """
+    from .disaggregate import ev_mask, house_power
+
+    data = context["data"]
+    total, balanced = house_power(data, cfg)
+    if total is None:
+        return None
+    measured = balanced if cfg.power.target == "balanced" and balanced is not None else total
+    model = context["q_compressor"] / context["cop_base"]
+    target = measured.to_numpy(dtype=float) - context["q_backup"]
+    usable = np.isfinite(target) & np.isfinite(model) & ~ev_mask(data, cfg)
+    days = data.index.tz_convert(cfg.site.timezone).normalize()
+    frame = pd.DataFrame(
+        {
+            "model_w": np.where(usable, model, np.nan),
+            "measured_w": np.where(usable, target, np.nan),
+            "t_outdoor": data["t_outdoor"].to_numpy(dtype=float),
+            "usable": usable.astype(float),
+        },
+        index=data.index,
+    )
+    per_day = frame.groupby(days).mean()
+    per_day = per_day[per_day["usable"] >= MIN_DAILY_COVERAGE]
+    if len(per_day) < MIN_DAYS:
+        log.warning("Only %d days with enough metered data to calibrate the scale (need %d)",
+                    len(per_day), MIN_DAYS)
+        return None
+    x = per_day["model_w"].to_numpy()
+    y = per_day["measured_w"].to_numpy()
+    design = np.column_stack([np.ones_like(x), x])
+    solution, *_ = np.linalg.lstsq(design, y, rcond=None)
+    residual = y - design @ solution
+    dof = max(len(y) - 2, 1)
+    try:
+        covariance = np.linalg.inv(design.T @ design) * float(residual @ residual) / dof
+        standard_error = float(np.sqrt(max(covariance[1, 1], 0.0)))
+    except np.linalg.LinAlgError:
+        standard_error = float("nan")
+    factor = float(solution[1])
+    spread = float(np.sum((y - y.mean()) ** 2))
+    r2 = 1.0 - float(residual @ residual) / spread if spread > 0 else float("nan")
+    table = [
+        {
+            "day": str(day.date()),
+            "t_outdoor": round(float(row.t_outdoor), 1),
+            "measured_kwh": round(float(row.measured_w) * 24 / 1000.0, 1),
+            "model_kwh": round(float(row.model_w) * 24 / 1000.0, 1),
+        }
+        for day, row in per_day.iterrows()
+    ]
+    return {
+        "factor": factor,
+        "uncertainty": standard_error / abs(factor) if factor else float("nan"),
+        "r2": round(r2, 3),
+        "days": len(per_day),
+        "base_kwh_per_day": round(float(solution[0]) * 24 / 1000.0, 1),
+        "table": table,
     }
 
 

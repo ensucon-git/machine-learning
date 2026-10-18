@@ -352,9 +352,11 @@ def summarise(report: dict[str, Any]) -> str:
             + f" ({building['method']}): UA {building['heat_loss_before_w_per_k']} -> "
             f"{building['heat_loss_after_w_per_k']} W/K, {status}"
         )
-        if building.get("car_charger_kw") is not None:
-            lines.append(f"           car charger inferred {building['car_charger_kw']} kW, "
-                         f"split validation R2 {building.get('validation_r2')}")
+        if building.get("daily_r2") is not None:
+            lines.append(f"           daily fit R2 {building['daily_r2']}, household and hot water "
+                         f"{building.get('daily_base_kwh')} kWh/day"
+                         + (f", car charger inferred {building['car_charger_kw']} kW"
+                            if building.get("car_charger_kw") is not None else ""))
     cop = report.get("cop")
     if cop:
         correction = cop.get("efficiency_scale", cop.get("carnot_efficiency"))

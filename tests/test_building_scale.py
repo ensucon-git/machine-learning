@@ -144,3 +144,53 @@ paths:
     assert service.cfg.heat_pump.efficiency_scale == 0.3
     service.maybe_retrain()
     assert seen["train_cfg"].heat_pump.efficiency_scale == 1.0
+
+
+def _cycling_with_hot_water(frame, cfg, rng):
+    """What a real pump looks like on a meter: on/off at full power rather than
+    a smooth modulation, plus hot-water runs the building model knows nothing about."""
+    import pandas as pd
+
+    pump = frame["power"].to_numpy(dtype=float)
+    cycling = np.zeros_like(pump)
+    for start in range(0, len(pump), 4):
+        energy, slot = pump[start:start + 4].sum(), 0
+        while energy > 0 and slot < 4:
+            cycling[start + slot] = min(3500.0, energy)
+            energy -= cycling[start + slot]
+            slot += 1
+        rng.shuffle(cycling[start:start + 4])
+    local = frame.index.tz_convert(cfg.site.timezone)
+    hour = local.hour + local.minute / 60.0
+    day = (local.normalize() - local.normalize()[0]).days
+    for d in range(int(day.max()) + 1):
+        for centre in (6.5, 21.0):
+            if rng.random() < 0.8:
+                begin = centre + rng.normal(0.0, 1.5)
+                cycling[(day == d) & (hour >= begin) & (hour < begin + rng.uniform(0.75, 1.5))] += 3000.0
+    out = frame.copy()
+    out["power"] = cycling
+    return pd.DataFrame(out)
+
+
+def test_the_scale_survives_a_cycling_pump_and_hot_water():
+    """At quarter-hour resolution a cycling pump and hot water make the split's
+    R2 collapse - as on the real house - while the energy per day still says
+    how far off the building is."""
+    from hpmpc.simulator import add_house_electricity, excitation_offsets, simulate_house, synthetic_prices, synthetic_weather
+    import pandas as pd
+
+    cfg = house_config()
+    rng = np.random.default_rng(3)
+    index = pd.date_range("2026-09-05", periods=40 * 96, freq="15min", tz="UTC")
+    truth = ThermalParams(Ci=2100.0, Cm=26000.0, Him=980.0, Hie=165.0, Hme=30.0, k_wind=0.045,
+                          A_sol=5.5, f_sol_i=0.45, Q_int=420.0, Hfloor=1350.0)
+    frame = simulate_house(cfg, truth, synthetic_weather(index, rng, mean_outdoor=9.0),
+                           synthetic_prices(index, rng, cfg.site.timezone), excitation_offsets(index, rng), seed=3)
+    frame = _cycling_with_hot_water(frame, cfg, rng)
+    frame = add_house_electricity(frame, cfg, rng).drop(columns=["power"])
+
+    found = calibrate_building_scale(frame, cfg, truth.scaled(0.35))
+    assert found["accepted"], found["reason"]
+    assert found["daily_r2"] > 0.9
+    assert found["heat_loss_after_w_per_k"] == pytest.approx(truth.heat_loss_w_per_k(), rel=0.12)
