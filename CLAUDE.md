@@ -719,6 +719,20 @@ terminalvärderingen fixar, fast i utvärderingen.
   `_archive_resolved` kallades aldrig. En hel excitationsvecka gav alltså noll
   excitation *och* ett hål i arkivet i precis den vecka anpassningen behöver
   mest. Båda vägarna delar nu `_sense()`.
+- **Temperaturerna ensamma kan inte bestämma UA i watt.** Skalas alla
+  extensiva parametrar (Ci, Cm, Him, Hie, Hme, A_sol, Q_int, Hfloor, k_stove)
+  med samma faktor blir varje innetemperaturkurva identisk — uppmätt till
+  1e-14 °C mellan UA 65 och 585 med obegränsad kapacitet. Det enda i
+  temperaturdatan som förankrar nivån är att pumpen slår i sitt kapacitetstak,
+  och det gör en 16 kW-pump bara de allra kallaste dygnen; resten bestäms av
+  priorn och regulariseringen. Det syntetiska testets "UA +3 %" bär just på
+  kapacitetstaket i januarivädret. Elmätaren är den riktiga ankaret, men den
+  är perfekt sammanblandad med verkningsgradsskalan: ett termiskt skalfel k ger
+  `efficiency_scale` ≈ k (uppmätt 0,60 → 0,583, 0,45 → 0,437; UA/skala
+  återger sanna 195 inom 3 %). Huset 2026-10-18: UA 67 och skalan i golvet
+  0,30 → UA **minst** ~220 W/K om Daikins COP-karta stämmer. Temperatur-
+  prediktionerna påverkas inte av skalfelet; det gör kronorna, avvägningen
+  komfort/kostnad, effekttaket och var kapacitet/elpatron tar slut.
 - **Kalibrera mot pumpens display, inte mot givaren.** Ett par avlästa som
   "jag skickade R, pumpen säger T" innefattar kabelresistans, kontakt och
   pumpens egen linjärisering. En bänkmätning av termistorn missar allt det.
