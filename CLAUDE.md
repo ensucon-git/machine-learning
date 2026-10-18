@@ -148,6 +148,19 @@ skalan underkänns. Rimlighetskoll för huset: 16 kW-pump + 9 kW elpatron tyder
 på en dimensionerande förlust kring 14–16 kW vid −20, alltså UA i
 storleksordningen 350–400 W/K.
 
+**Parametergränserna följer husets storlek** (`ThermalParams.bounds(size)`,
+`size()` = UA / 205). `PARAM_BOUNDS` ritades för ett 140 m²-hus; första
+dygnskalibreringen på huset (×4,44 ±11 %, R² 0,65 → UA 383) stoppades som
+"utanför fysikaliska gränser" fast resultatet var precis vad pumpens
+dimensionering säger — plattkopplingen ensam passerade 6000 W/K. Eftersom
+temperaturerna inte kan skilja storlekar åt är anpassning i en fyra gånger
+större låda kring en fyra gånger större prior *samma problem*, regulariseringen
+inkluderad; standardpriorn har storlek 1 och beter sig som förut. Kvar som
+rimlighetsgräns: UA 20–2000 W/K. Dygnstabellen 2026-10-18 visade ett steg på
+ca +12 kWh/dygn runt 18–19 sept vid samma utetemperatur; bara dagarna efter ger
+×3,0 (UA ~260) mot ×4,4 för alla. Fråga användaren vad som ändrades då innan
+skalan tas som sanning.
+
 **Valideringen delas stratifierat på offsetrörelse** (`identify._split`).
 Fönster där offseten rör sig (std > 0,25 K) och stilla fönster delas var för
 sig kronologiskt, så excitationsveckan inte hamnar helt i validering eller helt
@@ -313,7 +326,7 @@ terminalvärderingen fixar, fast i utvärderingen.
 
 ## Verifierat kontra antaget
 
-**Verifierat** (420 tester, syntetiskt hus med känd sanning):
+**Verifierat** (422 tester, syntetiskt hus med känd sanning):
 - Identifieringen återfinner värmekurva (lutning 0,3495 mot 0,35, R² 0,997) och
   husparametrar (UA +3 %, Ci +4 %, `k_wind` +3 %, plattans tidskonstant inom 8 %).
   `hpmpc train` skriver ut vad den lärt sig om sol och vind som area och

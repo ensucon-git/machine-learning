@@ -369,8 +369,14 @@ def fit_thermal(
 
     short, train_short, val_short, train_long, val_long = _window_sets(frame, cfg)
 
-    prior = (initial or ThermalParams()).clipped()
-    lo, hi = ThermalParams.bounds()
+    # Bounds and the regularisation's normalisation follow the starting
+    # point's size. The temperatures cannot tell sizes apart, so fitting a
+    # house four times larger inside a box four times larger is the same
+    # problem - and the meter, not this fit, decides which size is true.
+    start = initial or ThermalParams()
+    size = start.size()
+    prior = start.clipped(size)
+    lo, hi = ThermalParams.bounds(size)
     x_prior = _normalise(prior.to_vector(), lo, hi)
     names = ThermalParams.names()
     reg_weights = regularisation * np.array([REGULARISATION_WEIGHT.get(n, 1.0) for n in names])
@@ -495,6 +501,9 @@ BUILDING_FACTOR_BOUNDS = (0.2, 8.0)
 # cannot change at all; past it, a scale that does is one the temperatures and
 # the meter disagree about.
 MAX_RESCALE_RMSE_GROWTH = 1.05
+# A passive house to a large draughty villa. Beyond this the meter is seeing
+# something other than the house.
+PLAUSIBLE_HEAT_LOSS_W_PER_K = (20.0, 2000.0)
 
 
 def calibrate_building_scale(frame: pd.DataFrame, cfg: Config, params: ThermalParams) -> dict[str, Any] | None:
@@ -678,8 +687,10 @@ def rescale_thermal(
 ) -> tuple[ThermalParams, dict[str, Any]] | str:
     """Apply a building scale and re-score it, or say why it cannot be applied."""
     scaled = params.scaled(factor)
-    if not np.allclose(scaled.clipped().to_vector(), scaled.to_vector()):
-        return f"scaling by {factor:.2f} would push parameters outside their physical bounds"
+    low, high = PLAUSIBLE_HEAT_LOSS_W_PER_K
+    if not low <= scaled.heat_loss_w_per_k() <= high:
+        return (f"scaling by {factor:.2f} gives a heat loss of {scaled.heat_loss_w_per_k():.0f} W/K, "
+                f"outside the physical bounds {low:.0f}-{high:.0f} for a dwelling")
     _, train_short, val_short, _, val_long = _window_sets(frame, cfg)
     validation = _score(scaled, cfg, val_short)
     before = metrics.get("validation", {}).get("rmse_c")

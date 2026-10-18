@@ -194,3 +194,27 @@ def test_the_scale_survives_a_cycling_pump_and_hot_water():
     assert found["accepted"], found["reason"]
     assert found["daily_r2"] > 0.9
     assert found["heat_loss_after_w_per_k"] == pytest.approx(truth.heat_loss_w_per_k(), rel=0.12)
+
+
+def test_the_bounds_grow_with_the_house():
+    """A 350 m2 house at UA 380 runs its slab coupling past bounds drawn for
+    140 m2. On the real house that refused the meter's x4.4 as 'outside the
+    physical bounds' although the result, UA 383, was exactly what the pump's
+    sizing implies."""
+    lo1, hi1 = ThermalParams.bounds()
+    lo2, hi2 = ThermalParams.bounds(2.0)
+    names = ThermalParams.names()
+    assert hi2[names.index("Hfloor")] == 2 * hi1[names.index("Hfloor")]
+    assert hi2[names.index("k_wind")] == hi1[names.index("k_wind")]      # a ratio, not a size
+    assert ThermalParams().size() == pytest.approx(1.0)
+
+
+def test_a_large_house_can_be_scaled_to_its_true_size(house):
+    cfg, frame, truth = house
+    small = truth.scaled(0.4)
+    validation = rescale_thermal(small, {"validation": {"rmse_c": 1.0}}, frame, cfg, 1.0)[1]["validation"]
+    outcome = rescale_thermal(small, {"validation": validation}, frame, cfg, 12.5)
+    assert not isinstance(outcome, str), outcome
+    scaled, _ = outcome
+    assert scaled.Hfloor > 6000.0                  # past the old fixed bound
+    assert scaled.heat_loss_w_per_k() == pytest.approx(5 * truth.heat_loss_w_per_k())
