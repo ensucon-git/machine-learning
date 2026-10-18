@@ -332,6 +332,14 @@ class PowerConfig:
     """
 
     source: str = "auto"        # "auto" | "heatpump_meter" | "house" | "none"
+    calibrates: str = "building"
+    """What the meter is allowed to correct. Indoor temperatures fix the shape
+    of the building model but not its size in watts - scale every heat flow and
+    store together and the temperatures do not change - so one of the two has
+    to come from the meter. "building" trusts the pump's performance map and
+    lets the meter set the house's heat loss; "efficiency" trusts the fitted
+    house and lets the meter set the COP level, which is only right if the fit
+    happened to land on the true scale."""
     target: str = "balanced"    # "balanced" (3 x min phase) | "total"
     ev_guard_minutes: float = 15.0
     ev_nominal_kw: float = 11.0
@@ -663,6 +671,8 @@ class Config:
         p = self.power
         if p.source not in {"auto", "heatpump_meter", "house", "none"}:
             raise ValueError(f"power.source '{p.source}' is not valid")
+        if p.calibrates not in {"building", "efficiency"}:
+            raise ValueError(f"power.calibrates '{p.calibrates}' is not valid (building | efficiency)")
         if p.target not in {"balanced", "total"}:
             raise ValueError(f"power.target '{p.target}' is not valid")
         if not 0.0 < p.asymmetry <= 1.0:

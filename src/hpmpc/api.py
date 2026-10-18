@@ -139,10 +139,15 @@ class ControllerService:
             return
         log.info("Model is %.0f days old; retraining", age)
         try:
+            # Trained from the file, like 'hpmpc train', not from the running
+            # config: that one carries the last model's learned pump values,
+            # and an efficiency left over from an old calibration would set
+            # the scale the meter is supposed to measure.
+            train_cfg = load_config(self.config_path)
             with self.lock:
-                frame, _ = build_training_frame(self.cfg, self.ha)
-                save_dataset(frame, self.cfg.dataset_path)
-                report = train(self.cfg, frame)
+                frame, _ = build_training_frame(train_cfg, self.ha)
+                save_dataset(frame, train_cfg.dataset_path)
+                report = train(train_cfg, frame)
             # The same path a manual 'hpmpc train' takes, so the two can never
             # disagree about what a freshly trained model means.
             self.adopt_new_model(settle_seconds=0.0)

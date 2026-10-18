@@ -114,6 +114,26 @@ kvar på, och `collecting` är inte bättre. `hpmpc train --force` installerar
 och `hpmpc revert-model` byter tillbaka; modellfilen kopieras sist så att
 mtime-bytet plockar upp ett helt par.
 
+**Elmätaren sätter husets storlek i watt, inte pumpens verkningsgrad**
+(`power.calibrates: building`, `identify.calibrate_building_scale`). Inne-
+temperaturerna bestämmer husmodellens *form* men inte dess *storlek*, se
+fällan nedan, och mätaren kan bara bestämma en av två saker: husets
+värmeförlust eller COP-nivån. Förr fick den sätta verkningsgraden, vilket
+bara är rätt om anpassningen råkat hamna på rätt skala. Den gjorde det inte på
+riktigt: UA 63–126 W/K mot ≥ 220 som mätaren antydde, och skalan låg i golvet
+0,30. Nu litas COP-kartan på (en känd maskin, inom ±15 %), och mätarens
+förhållande mellan uppmätt och modellerad pumpel skalar alla extensiva
+parametrar (`ThermalParams.scaled`). Temperaturprediktionerna ändras inte, så
+valideringen ändras inte — det som rättas är det optimeraren väger mot priset:
+kronor, effekttak, och var kapacitet och elpatron tar slut i kyla. Spärrar:
+osäkerheten måste vara ≤ ±25 %, faktorn får inte ligga i gränsen 0,2–8, och
+skalningen får inte försämra temperaturanpassningen (skulle bara kunna hända
+där pumpen slår i taket). Underkänd skala lämnar UA orört och säger varför.
+Nästa omträning startar från den skalade modellen. Den automatiska
+omträningen tränar från *filens* konfiguration, inte den körande — den bär
+förra modellens inlärda verkningsgrad, som annars hade satt just den skala
+mätaren ska mäta. Mot syntetiskt hus med priorn på 35 %: UA 82 → 200 (sant 195).
+
 **Valideringen delas stratifierat på offsetrörelse** (`identify._split`).
 Fönster där offseten rör sig (std > 0,25 K) och stilla fönster delas var för
 sig kronologiskt, så excitationsveckan inte hamnar helt i validering eller helt
@@ -279,7 +299,7 @@ terminalvärderingen fixar, fast i utvärderingen.
 
 ## Verifierat kontra antaget
 
-**Verifierat** (411 tester, syntetiskt hus med känd sanning):
+**Verifierat** (419 tester, syntetiskt hus med känd sanning):
 - Identifieringen återfinner värmekurva (lutning 0,3495 mot 0,35, R² 0,997) och
   husparametrar (UA +3 %, Ci +4 %, `k_wind` +3 %, plattans tidskonstant inom 8 %).
   `hpmpc train` skriver ut vad den lärt sig om sol och vind som area och
@@ -358,8 +378,9 @@ terminalvärderingen fixar, fast i utvärderingen.
 **Antaget / ej verifierat:**
 - **Prestandakartans siffror är förankrade i publicerade mätpunkter för
   maskinklassen, inte hämtade ur Daikins databook** — den gick inte att nå från
-  utvecklingsmiljön. Formen är rimlig, nivån kalibreras mot elmätaren. Byt
-  tabellen när databooken finns.
+  utvecklingsmiljön. **Sedan 2026-10 är nivån bärande**: elmätaren sätter husets
+  storlek med kartans COP som facit (`power.calibrates: building`), så ett fel
+  i kartans nivå blir ett lika stort fel i UA. Byt tabellen när databooken finns.
 - **Delarens siffror är räknade, inte uppmätta.** 20 kΩ mot en Daikin 20 kΩ-kurva
   ger 0,18–1,83 V över −30…+30 °C. Kontrollera med kända motstånd över J1 vid
   idrifttagning: 20 kΩ → 1,650 V, 68 kΩ → 0,750 V, 200 kΩ → 0,300 V.
@@ -522,7 +543,9 @@ terminalvärderingen fixar, fast i utvärderingen.
   "det blev varmare ute". Excitationen bryter också kopplingen mellan
   värmepumpens effekt och klockan i effektuppdelningen.
 - **`hpmpc power` visar skalan *relativt* den som redan sitter i modellen.** Ett
-  värde nära 1,0 betyder att förra kalibreringen fortfarande stämmer.
+  värde nära 1,0 betyder att förra kalibreringen fortfarande stämmer. Med
+  `calibrates: building` heter raden `building heat scale` och är mätarens syn
+  på husets värmeförlust relativt modellens.
 - **Ett jämnt fel i NTC-tabellen absorberas av kurvanpassningen.**
   `fit_heating_curve` regresserar uppmätt framledning mot *kommenderad* offset,
   så konstant fel och skalfel hamnar i `curve_offset`/`curve_slope` och
@@ -732,7 +755,10 @@ terminalvärderingen fixar, fast i utvärderingen.
   återger sanna 195 inom 3 %). Huset 2026-10-18: UA 67 och skalan i golvet
   0,30 → UA **minst** ~220 W/K om Daikins COP-karta stämmer. Temperatur-
   prediktionerna påverkas inte av skalfelet; det gör kronorna, avvägningen
-  komfort/kostnad, effekttaket och var kapacitet/elpatron tar slut.
+  komfort/kostnad, effekttaket och var kapacitet/elpatron tar slut. Åtgärdat
+  med `power.calibrates: building`, se besluten ovan. Kräver att
+  `power.source` inte är `none` — användaren satte `none` när verkningsgraden
+  fastnade på 0,30, och måste sätta tillbaka `auto`.
 - **Kalibrera mot pumpens display, inte mot givaren.** Ett par avlästa som
   "jag skickade R, pumpen säger T" innefattar kabelresistans, kontakt och
   pumpens egen linjärisering. En bänkmätning av termistorn missar allt det.

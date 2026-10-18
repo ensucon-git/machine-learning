@@ -20,7 +20,7 @@ from typing import Any
 import pandas as pd
 
 from .config import Config
-from .identify import fit_cop, fit_heating_curve, fit_thermal
+from .identify import calibrate_building_scale, fit_cop, fit_heating_curve, fit_thermal, rescale_thermal
 from .model.thermal import ThermalParams, load_params, save_params
 from .residual import ResidualModel, fit_residual
 
@@ -93,9 +93,16 @@ def train(cfg: Config, frame: pd.DataFrame, fit_curve: bool = True,
         params.time_constants_hours()["slab"],
     )
 
-    # 3. COP ---------------------------------------------------------------
-    cop = fit_cop(frame, working, params)
-    report["cop"] = cop
+    # 3. Scale or COP -----------------------------------------------------
+    # The temperatures cannot say how many watts the house loses, only the
+    # meter can, and it cannot also say what the COP is: one of the two has to
+    # be trusted. By default it is the performance map.
+    cop = None
+    if cfg.power.calibrates == "building":
+        params, thermal_metrics = _calibrate_building(frame, working, params, thermal_metrics, report)
+    else:
+        cop = fit_cop(frame, working, params)
+        report["cop"] = cop
     if cop:
         overrides.update(
             {k: cop[k] for k in ("carnot_efficiency", "efficiency_scale", "standby_power_w") if k in cop}
@@ -150,6 +157,34 @@ def train(cfg: Config, frame: pd.DataFrame, fit_curve: bool = True,
         Path(cfg.residual_path).unlink()
     log.info("Saved model to %s (the one it replaced: %s)", cfg.model_path, previous_path(cfg))
     return report
+
+
+def _calibrate_building(frame, cfg, params, thermal_metrics, report):
+    """Let the meter set the building model's heat loss in watts."""
+    building = calibrate_building_scale(frame, cfg, params)
+    report["building_scale"] = building
+    if building is None:
+        log.warning(
+            "No pump or house power to calibrate against: the heat loss in watts is whatever the "
+            "prior said (%.0f W/K). Temperatures cannot determine it.", params.heat_loss_w_per_k(),
+        )
+        return params, thermal_metrics
+    if building["accepted"]:
+        outcome = rescale_thermal(params, thermal_metrics, frame, cfg, building["factor"])
+        if isinstance(outcome, str):
+            building["accepted"], building["reason"] = False, outcome
+        else:
+            params, thermal_metrics = outcome
+            report["thermal"] = thermal_metrics
+            log.info(
+                "Building scale from the meter: x%.2f (+/-%.0f%%), UA %.0f -> %.0f W/K",
+                building["factor"], 100 * (building["uncertainty"] or 0.0),
+                building["heat_loss_before_w_per_k"], building["heat_loss_after_w_per_k"],
+            )
+            return params, thermal_metrics
+    log.warning("Building scale from the meter not applied (x%.2f): %s",
+                building["factor"], building["reason"])
+    return params, thermal_metrics
 
 
 def previous_path(cfg: Config) -> Path:
@@ -307,6 +342,19 @@ def summarise(report: dict[str, Any]) -> str:
             f"           identifiability: condition number {ident.get('condition_number')}, "
             f"weakest direction {list((ident.get('weakest_direction') or {}).keys())}"
         )
+    building = report.get("building_scale")
+    if building:
+        status = "applied" if building.get("accepted") else f"NOT applied - {building.get('reason')}"
+        uncertainty = building.get("uncertainty")
+        lines.append(
+            f"Scale:     meter says x{building['factor']}"
+            + (f" +/-{100 * uncertainty:.1f}%" if uncertainty is not None else "")
+            + f" ({building['method']}): UA {building['heat_loss_before_w_per_k']} -> "
+            f"{building['heat_loss_after_w_per_k']} W/K, {status}"
+        )
+        if building.get("car_charger_kw") is not None:
+            lines.append(f"           car charger inferred {building['car_charger_kw']} kW, "
+                         f"split validation R2 {building.get('validation_r2')}")
     cop = report.get("cop")
     if cop:
         correction = cop.get("efficiency_scale", cop.get("carnot_efficiency"))

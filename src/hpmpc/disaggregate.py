@@ -72,10 +72,15 @@ class Disaggregation:
     span_hours: float
     target: str
     metrics: dict[str, Any] = field(default_factory=dict)
+    power_factor: float = 1.0
+    """Measured pump power over the power the model predicts, unclipped. With
+    the efficiency taken from the map this is the factor the building model's
+    heat is off by; ``efficiency_scale`` is its reciprocal, clipped."""
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "efficiency_scale": round(self.efficiency_scale, 4),
+            "power_factor": round(self.power_factor, 4),
             "ev_power_w": round(self.ev_power_w, 1),
             "used_samples": self.used_samples,
             "span_hours": round(self.span_hours, 1),
@@ -214,6 +219,7 @@ def disaggregate(
     q_compressor: np.ndarray,
     q_backup: np.ndarray,
     cop_base: np.ndarray,
+    factor_bounds: tuple[float, float] = (1.0 / 3.0, 1.0 / 0.3),
 ) -> Disaggregation | None:
     """Split whole-house power and recover the pump's efficiency scale.
 
@@ -254,10 +260,12 @@ def disaggregate(
     # Backup heat is resistive, so its power is known exactly: move it across.
     y_all = measured.to_numpy(dtype=float) - q_backup
 
-    # c = 1 / efficiency_scale, bounded to the same range the config allows.
+    # c = 1 / efficiency_scale. The default bounds are the range the config
+    # allows for an efficiency; calibrating the building's scale instead needs
+    # more room, because that is where a temperature-only fit can be far off.
     lower = np.full(design_all.shape[1], -np.inf)
     upper = np.full(design_all.shape[1], np.inf)
-    lower[0], upper[0] = 1.0 / 3.0, 1.0 / 0.3
+    lower[0], upper[0] = factor_bounds
     lower[1] = 0.0                      # the base load's constant term
 
     split = int(fit_mask.sum() * (1.0 - settings.validation_fraction))
@@ -302,6 +310,7 @@ def disaggregate(
         span_hours=float(fit_mask.sum()) * _step_minutes(frame, cfg) / 60.0,
         target=target_name,
         metrics=metrics,
+        power_factor=float(solution[0]),
     )
 
 

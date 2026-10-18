@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import json
 import math
-from dataclasses import asdict, dataclass, fields
+from dataclasses import asdict, dataclass, fields, replace
 from pathlib import Path
 from typing import Any
 
@@ -53,6 +53,10 @@ PARAM_BOUNDS: dict[str, tuple[float, float]] = {
     # enough that a runaway fit is visibly at the limit.
     "k_stove": (0.0, 3000.0),
 }
+
+# Every parameter measured in watts or watt-hours. Scaling all of them together
+# leaves indoor temperatures unchanged; the rest are ratios and stay put.
+EXTENSIVE_PARAMS = ("Ci", "Cm", "Him", "Hie", "Hme", "A_sol", "Q_int", "Hfloor", "k_stove")
 
 
 @dataclass
@@ -94,6 +98,16 @@ class ThermalParams:
     def clipped(self) -> "ThermalParams":
         lo, hi = self.bounds()
         return ThermalParams.from_vector(np.clip(self.to_vector(), lo, hi))
+
+    def scaled(self, factor: float) -> "ThermalParams":
+        """The same house, with every heat flow and heat store ``factor`` times larger.
+
+        Indoor temperatures cannot tell these apart: every term of both node
+        equations scales together, so the trajectories are identical until the
+        pump reaches its capacity. That is why the level has to come from an
+        electricity meter, and why applying it does not undo the fit.
+        """
+        return replace(self, **{n: getattr(self, n) * float(factor) for n in EXTENSIVE_PARAMS})
 
     def to_dict(self) -> dict[str, float]:
         return asdict(self)

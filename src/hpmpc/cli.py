@@ -370,7 +370,7 @@ def cmd_archive(args: argparse.Namespace) -> int:
 def cmd_power(args: argparse.Namespace) -> int:
     """Show how whole-house power is being split between the heat pump and the rest."""
     from .disaggregate import disaggregate, house_power, quality_warnings
-    from .identify import _simulate_period
+    from .identify import BUILDING_FACTOR_BOUNDS, _simulate_period
     from .train import load_model
 
     cfg = _load(args)
@@ -389,8 +389,10 @@ def cmd_power(args: argparse.Namespace) -> int:
     if context is None:
         print("Not enough data to simulate the period")
         return 1
+    building = working.power.calibrates == "building"
     result = disaggregate(
-        context["data"], working, context["q_compressor"], context["q_backup"], context["cop_base"]
+        context["data"], working, context["q_compressor"], context["q_backup"], context["cop_base"],
+        **({"factor_bounds": BUILDING_FACTOR_BOUNDS} if building else {}),
     )
     if result is None:
         print(
@@ -410,11 +412,17 @@ def cmd_power(args: argparse.Namespace) -> int:
     print(f"{'balanced other load':28}{metrics['base_load_kwh']:>10.1f}{metrics['base_load_kwh'] / measured_kwh:>9.1%}")
     print(f"{'whole house measured':28}{measured_kwh:>10.1f}")
     print()
-    print(f"efficiency scale         {result.efficiency_scale:.4f}"
-          + (f" +/- {100 * metrics['efficiency_scale_uncertainty']:.1f}%"
-             if metrics.get("efficiency_scale_uncertainty") else ""))
-    print(f"   relative to the {working.heat_pump.efficiency_scale:.4f} already in the model, so a value")
-    print("   near 1.0 here means the last calibration is still right.")
+    uncertainty = (f" +/- {100 * metrics['efficiency_scale_uncertainty']:.1f}%"
+                   if metrics.get("efficiency_scale_uncertainty") else "")
+    if building:
+        print(f"building heat scale      x{result.power_factor:.3f}{uncertainty}")
+        print(f"   the meter's view of the house's heat loss relative to the model's "
+              f"{params.heat_loss_w_per_k():.0f} W/K,")
+        print("   with the COP from the performance map. Near 1.0 means the last calibration still holds.")
+    else:
+        print(f"efficiency scale         {result.efficiency_scale:.4f}{uncertainty}")
+        print(f"   relative to the {working.heat_pump.efficiency_scale:.4f} already in the model, so a value")
+        print("   near 1.0 here means the last calibration is still right.")
     print(f"car charger inferred     {result.ev_power_w / 1000:.1f} kW "
           f"(configured nominal {working.power.ev_nominal_kw:.1f} kW)")
     print(f"charging fraction        {metrics['charging_fraction']:.1%} of samples, excluded from the fit")

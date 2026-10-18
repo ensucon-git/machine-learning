@@ -83,7 +83,7 @@ def test_training_produces_a_usable_model_file(trained):
     params, metadata = load_params(cfg.model_path)
     assert params.heat_loss_w_per_k() > 0
     assert metadata["trained_at"]
-    assert set(report) >= {"thermal", "heating_curve", "cop", "parameters", "pump_overrides", "data"}
+    assert set(report) >= {"thermal", "heating_curve", "building_scale", "parameters", "pump_overrides", "data"}
 
 
 def test_learned_pump_settings_are_reapplied_on_load(trained):

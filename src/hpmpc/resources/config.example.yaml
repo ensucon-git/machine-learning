@@ -452,6 +452,7 @@ modes:
 # dedicated meter on the pump; see 'hpmpc power' to inspect the result.
 power:
   source: auto                      # auto | heatpump_meter | house | none
+  calibrates: building              # the meter sets the house's heat loss in watts; the COP map is trusted
   target: balanced                  # "balanced" uses 3 x min(phase), which is mostly the pump
   ev_guard_minutes: 15              # widen the charging mask; the sensor flips before the current does
   ev_nominal_kw: 11.0               # only a sanity check - the fit infers it independently
