@@ -245,3 +245,40 @@ def test_training_can_ignore_the_weeks_before_the_heating_was_switched_on(house)
     bad.training.ignore_before = "19 september"
     with pytest.raises(ValueError, match="not a date"):
         bad.validate()
+
+
+def test_power_reports_energy_per_day_and_no_quarter_hour_share(house, tmp_path, capsys):
+    """With the meter calibrating the building, 'hpmpc power' shows the daily
+    energy it calibrated on - not the quarter-hour split's heat pump share,
+    which on the real house said 6.7% with a warning while the daily balance
+    had already found the scale."""
+    from hpmpc.cli import main
+    from hpmpc.dataset import save_dataset
+
+    cfg, frame, truth = house
+    save_params(tmp_path / "thermal_model.json", truth)
+    save_dataset(frame, tmp_path / "history.csv.gz")
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(
+        f"""
+entities:
+  indoor_temp: sensor.indoor
+  outdoor_temp: sensor.outdoor
+  house_power_l1: sensor.l1
+  house_power_l2: sensor.l2
+  house_power_l3: sensor.l3
+  ev_charging: binary_sensor.eh6nh5cd_charging
+heat_pump:
+  model: daikin_erlq016caw1
+paths:
+  data_dir: {tmp_path}
+  model_dir: {tmp_path}
+  state_file: {tmp_path / "state.json"}
+""",
+        encoding="utf-8",
+    )
+    assert main(["--config", str(config_file), "power", "--dataset", str(tmp_path / "history.csv.gz")]) == 0
+    out = capsys.readouterr().out
+    assert "building heat scale" in out
+    assert "space heating" in out and "household + hot water" in out
+    assert "share" not in out and "Warnings" not in out

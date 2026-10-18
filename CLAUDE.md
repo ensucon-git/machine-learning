@@ -170,6 +170,21 @@ Nästa höst: sätt det till dagen värmen slås på igen, eller låt det vara �
 sommaren filtreras redan bort av `min_heating_fraction`, men bara för
 anpassningen, inte för skalan.
 
+**Första modellen som håller** (2026-10-18, `ignore_before: 2026-09-19`):
+validering 0,246 °C mot persistens 0,412 (förut 0,43 mot 0,48), 48 h 0,194 °C,
+skala ×5,25 ±14 % → **UA 366 W/K**, dygns-R² 0,66, laddaren 11,3 kW, residual
+accepterad (8 %). Att kasta dygnen före värmestarten gjorde mer för
+temperaturanpassningen än något annat. Kontroll: 18 okt (5,2 °C) mätt 47,2 kWh
+minus intercept 25,4 = 21,8 kWh värme-el; planen räknar ~22 kWh/dygn vid ~3 °C.
+**Plattans tidskonstant blev 0,68 h** — det är nodbyte, inte fel: total
+kapacitet (Ci+Cm ≈ 61 h × 366 W/K ≈ 22 kWh/K ≈ 80 MJ/K) stämmer med 10 cm
+betong på 350 m², och den lagrade värmen sitter nu i "luft"-noden medan
+"plattan" blivit en snabb nod mellan vatten och rum. Terminalvärderingen
+räknar både Ci och Cm, så lastförskjutningen ser lagret. Tidskonstanterna ska
+alltså inte läsas bokstavligt för det här huset. `hpmpc power` visar numera
+dygnsuppdelningen i byggnadsläget i stället för kvartsuppdelningens pumpandel
+och varningar (som sa 6,7 % och "kontrollera faserna").
+
 **Valideringen delas stratifierat på offsetrörelse** (`identify._split`).
 Fönster där offseten rör sig (std > 0,25 K) och stilla fönster delas var för
 sig kronologiskt, så excitationsveckan inte hamnar helt i validering eller helt
@@ -335,7 +350,7 @@ terminalvärderingen fixar, fast i utvärderingen.
 
 ## Verifierat kontra antaget
 
-**Verifierat** (423 tester, syntetiskt hus med känd sanning):
+**Verifierat** (424 tester, syntetiskt hus med känd sanning):
 - Identifieringen återfinner värmekurva (lutning 0,3495 mot 0,35, R² 0,997) och
   husparametrar (UA +3 %, Ci +4 %, `k_wind` +3 %, plattans tidskonstant inom 8 %).
   `hpmpc train` skriver ut vad den lärt sig om sol och vind som area och

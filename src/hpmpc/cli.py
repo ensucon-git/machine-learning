@@ -402,6 +402,11 @@ def cmd_power(args: argparse.Namespace) -> int:
         return 1
 
     metrics = result.metrics
+    daily = daily_energy_balance(context, working) if building else None
+    if daily is not None:
+        _print_daily_power(daily, params, result, working)
+        return 0
+
     step_hours = (result.base_load_w.index[1] - result.base_load_w.index[0]).total_seconds() / 3600.0
     total, _ = house_power(context["data"], working)
     measured_kwh = float(total.sum() * step_hours / 1000.0)
@@ -414,22 +419,9 @@ def cmd_power(args: argparse.Namespace) -> int:
     print()
     uncertainty = (f" +/- {100 * metrics['efficiency_scale_uncertainty']:.1f}%"
                    if metrics.get("efficiency_scale_uncertainty") else "")
-    if building:
-        daily = daily_energy_balance(context, working)
-        if daily is not None:
-            print(f"{'day':12}{'outdoor C':>10}{'metered kWh':>13}{'model kWh':>11}")
-            for row in daily["table"]:
-                print(f"{row['day']:12}{row['t_outdoor']:>10.1f}{row['measured_kwh']:>13.1f}{row['model_kwh']:>11.1f}")
-            print("   metered: the balanced load, car charging excluded; model: pump electricity it predicts\n")
-            print(f"building heat scale      x{daily['factor']:.3f} +/- {100 * daily['uncertainty']:.1f}% "
-                  f"(daily fit R2 {daily['r2']}, household + hot water {daily['base_kwh_per_day']} kWh/day)")
-            print(f"   the meter's view of the house's heat loss relative to the model's "
-                  f"{params.heat_loss_w_per_k():.0f} W/K,")
-            print("   with the COP from the performance map. Near 1.0 means the last calibration still holds.")
-    else:
-        print(f"efficiency scale         {result.efficiency_scale:.4f}{uncertainty}")
-        print(f"   relative to the {working.heat_pump.efficiency_scale:.4f} already in the model, so a value")
-        print("   near 1.0 here means the last calibration is still right.")
+    print(f"efficiency scale         {result.efficiency_scale:.4f}{uncertainty}")
+    print(f"   relative to the {working.heat_pump.efficiency_scale:.4f} already in the model, so a value")
+    print("   near 1.0 here means the last calibration is still right.")
     print(f"car charger inferred     {result.ev_power_w / 1000:.1f} kW "
           f"(configured nominal {working.power.ev_nominal_kw:.1f} kW)")
     print(f"charging fraction        {metrics['charging_fraction']:.1%} of samples, excluded from the fit")
@@ -444,7 +436,36 @@ def cmd_power(args: argparse.Namespace) -> int:
     else:
         print("\nNo warnings. The car charger figure is the check worth trusting: if an 11 kW")
         print("charger comes out near 11 kW, the phase entities and the split are both sane.")
-    return 0 if not warnings else 0
+    return 0
+
+
+def _print_daily_power(daily: dict[str, Any], params, result, working) -> None:
+    """The meter's view when it calibrates the building: energy per day.
+
+    The quarter-hour split is still run for its car charger estimate, but its
+    heat pump share and warnings are left out - a cycling pump and hot water
+    make them meaningless at that resolution, which is why the scale is not
+    taken from them.
+    """
+    print(f"{'day':12}{'outdoor C':>10}{'metered kWh':>13}{'model kWh':>11}")
+    for row in daily["table"]:
+        print(f"{row['day']:12}{row['t_outdoor']:>10.1f}{row['measured_kwh']:>13.1f}{row['model_kwh']:>11.1f}")
+    print("   metered: the balanced load, car charging excluded; model: pump electricity it predicts\n")
+    days = daily["days"]
+    metered = sum(row["measured_kwh"] for row in daily["table"])
+    heating = sum(row["model_kwh"] for row in daily["table"]) * daily["factor"]
+    base = daily["base_kwh_per_day"] * days
+    print(f"Over {days} days:  {'kWh':>8}{'per day':>9}")
+    print(f"  space heating        {heating:>8.0f}{heating / days:>9.1f}")
+    print(f"  household + hot water{base:>8.0f}{base / days:>9.1f}")
+    print(f"  metered balanced load{metered:>8.0f}{metered / days:>9.1f}\n")
+    print(f"building heat scale      x{daily['factor']:.3f} +/- {100 * daily['uncertainty']:.1f}% "
+          f"(daily fit R2 {daily['r2']})")
+    print(f"   the meter's view of the house's heat loss relative to the model's "
+          f"{params.heat_loss_w_per_k():.0f} W/K,")
+    print("   with the COP from the performance map. Near 1.0 means the last calibration still holds.")
+    print(f"car charger inferred     {result.ev_power_w / 1000:.1f} kW "
+          f"(configured nominal {working.power.ev_nominal_kw:.1f} kW) - the check that the phases are right")
 
 
 def cmd_settings(args: argparse.Namespace) -> int:
