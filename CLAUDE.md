@@ -869,16 +869,24 @@ hpmpc run / hpmpc serve
 
 ## Var vi står
 
-**Systemet är i drift.** Kortet byggt, potentiometern uppmätt, NTC-kurvan
-kalibrerad mot pumpens display, och hela kedjan hpmpc → HA → ESP32 → pumpen
-går igenom. Kontrollern samlar historik i läget `collecting` med offset 0 —
-pumpen kör sin egen kurva omodifierad tills en modell finns.
+**Systemet styr, med klampad offset (2026-10-18).** Excitationsveckan är
+körd, modellen tränad och installerad: validering 0,246 °C (persistens 0,412),
+48 h 0,194 °C, UA 366 W/K satt av elmätaren (×5,25 ±14 %), laddaren 11,3 kW,
+residual accepterad. Användarens `config.yaml` har `power.source: auto`,
+`training.ignore_before: "2026-09-19"` och `training.stove_deadband_k` satt.
+Offseten är klampad till **±0,5 K i Home Assistant** (`input_number.offset_min`
+/ `offset_max`), och `hpmpc plan` väljer +0,5 genom hela horisonten — huset
+glider inom komfortbandet, vilket är det billigaste.
 
-`hpmpc providers`, `hpmpc check` och `hpmpc curve` är avklarade och körda live.
-**Kvar: excitationsveckan.** Den väntar på att det ska bli stadigt kallt — över
-`heat_stop_temp` gör offseten ingenting, så en vecka i mellansäsong vore
-bortkastad. Därefter `collect && train && power` och några dygn med klampad
-offset. Detaljerad ordning under "Nästa steg".
+**Här står vi och väntar:** användaren återkommer om ett par dagar med
+`hpmpc plan`. Då: jämför planens `indoor`-kolumn med vad
+`sensor.hall_temperature_2` faktiskt visade några timmar senare (ska stämma
+inom några tiondelar), och ta beslut om att vidga: max +3, efter ett par dygn
+min −2, sedan −6 — alltid i HA, aldrig med `hpmpc set`. Värt att titta på i
+samma veva: att skalan i nästa `hpmpc power` ligger nära ×1,0, och att planens
+dygnsel stämmer mot mätarens (18 okt: 47,2 kWh mätt − 25,4 hushåll/varmvatten
+= 21,8 kWh mot planens ~22 kWh/dygn vid ~3 °C). Detaljerad ordning under
+"Nästa steg".
 
 **Deployment:** repot har numera en `main`, och NUC:en (`/opt/hpmpc`) står på
 den. Det fanns ingen default branch alls innan — bara `claude/*` — så en
@@ -939,9 +947,9 @@ delaren mot kända motstånd. Först därefter pumpen.
 5. ~~Verifiera `collecting` live~~ — gjort: entiteter svarar, `plan` säger
    `[collecting]`, cyklerna räknar.
 
-**Kvar, i den här ordningen:**
+**Steg 6–9 är gjorda (2026-10).** Kvar: 10 och 11.
 
-6. **Vänta tills det är stadigt kallt.** `hpmpc plan` ska säga `[collecting]`
+6. ~~**Vänta tills det är stadigt kallt.**~~ `hpmpc plan` ska säga `[collecting]`
    över hela dygnet, inte `[standby]`. Med `heat_stop_temp: 18` betyder det
    ungefär dygnsmedel under ~12 °C. Hellre vänta två veckor än att excitera en
    vecka där pumpen står still halva tiden.
@@ -965,7 +973,7 @@ delaren mot kända motstånd. Först därefter pumpen.
    `sh -c` inne i containern. Tre tal att läsa: `offset_excitation.std` väl över
    0,5 (annars var veckan förgäves), `validation RMSE` under 0,3 °C, laddaren
    nära 11 kW.
-10. **Några dygn med klampad offset**, läs `hpmpc plan`. Inte `dry_run` — se
+10. **← HÄR (från 2026-10-18).** **Några dygn med klampad offset**, läs `hpmpc plan`. Inte `dry_run` — se
     fällorna.
 11. **Vidga stegvis**, på samma ställe: +3, sedan −2, sedan −6.
 
