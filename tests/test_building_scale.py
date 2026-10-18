@@ -218,3 +218,30 @@ def test_a_large_house_can_be_scaled_to_its_true_size(house):
     scaled, _ = outcome
     assert scaled.Hfloor > 6000.0                  # past the old fixed bound
     assert scaled.heat_loss_w_per_k() == pytest.approx(5 * truth.heat_loss_w_per_k())
+
+
+def test_training_can_ignore_the_weeks_before_the_heating_was_switched_on(house):
+    """On the real house the metered energy stepped up ~12 kWh/day around the
+    day space heating was switched on. Before it the model assumes heat the
+    pump never made, which steepens the meter's slope (x4.4 against x3.0)."""
+    import pandas as pd
+
+    from hpmpc.config import Config
+    from hpmpc.train import training_window
+
+    cfg, frame, _ = house
+    cut = dataclasses.replace(cfg, training=dataclasses.replace(cfg.training, ignore_before="2026-01-20"))
+    kept = training_window(frame, cut)
+    assert kept.index[0] == pd.Timestamp("2026-01-20", tz=cfg.site.timezone)
+    assert len(kept) < len(frame)
+    assert training_window(frame, cfg) is frame
+
+    nothing_left = dataclasses.replace(cfg, training=dataclasses.replace(cfg.training, ignore_before="2030-01-01"))
+    with pytest.raises(ValueError, match="ignore_before"):
+        train(nothing_left, frame)
+
+    bad = Config()
+    bad.entities.indoor_temp = "sensor.indoor"
+    bad.training.ignore_before = "19 september"
+    with pytest.raises(ValueError, match="not a date"):
+        bad.validate()

@@ -47,9 +47,24 @@ def apply_pump_overrides(cfg: Config, overrides: dict[str, Any]) -> Config:
     return replace(cfg, heat_pump=replace(cfg.heat_pump, **usable))
 
 
+def training_window(frame: pd.DataFrame, cfg: Config) -> pd.DataFrame:
+    """The part of the history training is allowed to see (training.ignore_before)."""
+    if not cfg.training.ignore_before or frame.empty:
+        return frame
+    start = pd.Timestamp(cfg.training.ignore_before).tz_localize(cfg.site.timezone)
+    kept = frame[frame.index >= start]
+    if len(kept) < len(frame):
+        log.info("Ignoring %d rows before %s (training.ignore_before)",
+                 len(frame) - len(kept), cfg.training.ignore_before)
+    return kept
+
+
 def train(cfg: Config, frame: pd.DataFrame, fit_curve: bool = True,
           force: bool = False) -> dict[str, Any]:
     """Fit the heating curve, the building and the COP, then the residual model."""
+    frame = training_window(frame, cfg)
+    if frame.empty:
+        raise ValueError(f"No history left after training.ignore_before ({cfg.training.ignore_before})")
     report: dict[str, Any] = {
         "trained_at": datetime.now(timezone.utc).isoformat(),
         "data": {

@@ -371,14 +371,14 @@ def cmd_power(args: argparse.Namespace) -> int:
     """Show how whole-house power is being split between the heat pump and the rest."""
     from .disaggregate import disaggregate, house_power, quality_warnings
     from .identify import BUILDING_FACTOR_BOUNDS, _simulate_period, daily_energy_balance
-    from .train import load_model
+    from .train import load_model, training_window
 
     cfg = _load(args)
     path = Path(args.dataset or cfg.dataset_path)
     if not path.exists():
         print(f"No dataset at {path} - run 'hpmpc collect' first")
         return 1
-    frame = load_dataset(path)
+    frame = training_window(load_dataset(path), cfg)
     try:
         working, params, _, _ = load_model(cfg)
     except (OSError, ValueError, KeyError):

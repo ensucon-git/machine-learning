@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import re
 from dataclasses import dataclass, field, fields, is_dataclass
+from datetime import date
 from pathlib import Path
 from typing import Any, get_type_hints
 
@@ -546,6 +547,16 @@ class TrainingConfig:
 
     Dropping them means the archive can run all year with nothing to switch on
     and off by hand. 0 disables the filter and fits on everything."""
+    ignore_before: str = ""
+    """Train only on history from this local date on, e.g. "2026-09-19".
+
+    For when the history holds a stretch the house was not in the state the
+    model describes - typically the weeks before the pump's space heating was
+    switched on in the autumn, when the model assumes it heats below
+    heat_stop_temp but it was making hot water only. Those days are wrong for
+    the building fit and worse for the meter's scale: modelled heat against
+    metered nothing steepens the daily slope. Ages out on its own once the
+    date is older than history_days. Empty uses everything."""
     keep_excitation: bool = True
     """Always train on the recorded excitation runs, however old.
 
@@ -642,6 +653,11 @@ class Config:
                     f"{', '.join(sorted(OUTPUT_DOMAINS))} entity"
                 )
         t = self.training
+        if t.ignore_before:
+            try:
+                date.fromisoformat(t.ignore_before)
+            except ValueError as exc:
+                raise ValueError(f"training.ignore_before '{t.ignore_before}' is not a date: {exc}") from exc
         if t.archive and 0 < t.archive_keep_days < t.history_days:
             raise ValueError(
                 f"training.archive_keep_days ({t.archive_keep_days}) is shorter than "

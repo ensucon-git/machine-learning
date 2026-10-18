@@ -487,6 +487,7 @@ optimizer:
 training:
   history_days: 45
   resample_minutes: 15
+  ignore_before: ""                # e.g. "2026-09-19": skip the weeks before space heating was switched on
 
   # Keep our own copy of the history, under data/history/.
   #

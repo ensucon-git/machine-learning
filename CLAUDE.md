@@ -158,8 +158,17 @@ större låda kring en fyra gånger större prior *samma problem*, regulariserin
 inkluderad; standardpriorn har storlek 1 och beter sig som förut. Kvar som
 rimlighetsgräns: UA 20–2000 W/K. Dygnstabellen 2026-10-18 visade ett steg på
 ca +12 kWh/dygn runt 18–19 sept vid samma utetemperatur; bara dagarna efter ger
-×3,0 (UA ~260) mot ×4,4 för alla. Fråga användaren vad som ändrades då innan
-skalan tas som sanning.
+×3,0 (UA ~260) mot ×4,4 för alla. Användaren minns inte säkert, men tror att
+värmen slogs på då — alternativet, att poolvärmen stängdes av, kan inte ge
+steget: poolen är enfas, och att ta bort en enfaslast kan bara *sänka*
+3 × min(fas), aldrig höja den. Före steget gjorde pumpen alltså troligen bara
+varmvatten medan modellen trodde att den värmde under 18 °C. Därför finns
+**`training.ignore_before`** (lokalt datum, används av `train`, den
+automatiska omträningen och `hpmpc power`); satt till `2026-09-19` hos
+användaren. Åldras ut av sig själv när datumet passerat `history_days`.
+Nästa höst: sätt det till dagen värmen slås på igen, eller låt det vara —
+sommaren filtreras redan bort av `min_heating_fraction`, men bara för
+anpassningen, inte för skalan.
 
 **Valideringen delas stratifierat på offsetrörelse** (`identify._split`).
 Fönster där offseten rör sig (std > 0,25 K) och stilla fönster delas var för
@@ -326,7 +335,7 @@ terminalvärderingen fixar, fast i utvärderingen.
 
 ## Verifierat kontra antaget
 
-**Verifierat** (422 tester, syntetiskt hus med känd sanning):
+**Verifierat** (423 tester, syntetiskt hus med känd sanning):
 - Identifieringen återfinner värmekurva (lutning 0,3495 mot 0,35, R² 0,997) och
   husparametrar (UA +3 %, Ci +4 %, `k_wind` +3 %, plattans tidskonstant inom 8 %).
   `hpmpc train` skriver ut vad den lärt sig om sol och vind som area och
