@@ -400,8 +400,38 @@ class MpcSolver:
                 "cost_history": history,
                 "block_hours": self.cfg.control.block_hours,
                 "horizon_hours": self.cfg.control.horizon_hours,
+                "constant_offsets": self._what_if(exog, state, previous_offset),
             },
         )
+
+    def _what_if(self, exog: Exogenous, state: State, previous_offset: float) -> list[dict[str, float]]:
+        """What holding one offset for the whole horizon would do, at a few points.
+
+        The plan alone cannot answer "why does it not just heat more?". This
+        can: if the coldest allowed offset barely moves the indoor temperature,
+        the model thinks the house does not respond, and no weighting will make
+        the optimiser try.
+        """
+        c = self.cfg.control
+        values = np.array(sorted({c.offset_min, -1.0, 0.0, 1.0, c.offset_max}), dtype=float)
+        values = values[(values >= c.offset_min) & (values <= c.offset_max)]
+        candidates = np.repeat(values[:, None], self.n_blocks, axis=1)
+        _, parts, traj = self.evaluate(candidates, exog, state, previous_offset)
+        rows = []
+        for i, value in enumerate(values):
+            cost = self._breakdown(parts, i)
+            indoor = traj["t_indoor"][i]
+            rows.append({
+                "offset": round(float(value), 2),
+                "mean_indoor": round(float(np.mean(indoor)), 2),
+                "min_indoor": round(float(np.min(indoor)), 2),
+                "end_indoor": round(float(indoor[-1]), 2),
+                "kwh": round(cost.energy_kwh, 1),
+                "net_cost_sek": round(cost.net_cost_sek, 1),
+                "comfort_penalty": round(cost.comfort + cost.hard, 1),
+                "total": round(cost.total, 1),
+            })
+        return rows
 
     def _baselines(
         self, constants: dict[str, Any], flat_offset: float, target_mean_indoor: float

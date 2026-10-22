@@ -1233,6 +1233,19 @@ def _print_plan(report: dict[str, Any]) -> None:
     )
     for note in report.get("notes", []):
         print(f"  note: {note}")
+    what_if = mpc.get("constant_offsets") or []
+    if what_if:
+        print("\nHolding one offset for the whole horizon instead (the model's view):")
+        print(f"{'offset':>8}{'mean':>8}{'min':>8}{'end':>8}{'kWh':>8}{'net SEK':>9}{'comfort':>9}{'total':>9}")
+        for row in what_if:
+            print(f"{row['offset']:>8.2f}{row['mean_indoor']:>8.2f}{row['min_indoor']:>8.2f}"
+                  f"{row['end_indoor']:>8.2f}{row['kwh']:>8.1f}{row['net_cost_sek']:>9.1f}"
+                  f"{row['comfort_penalty']:>9.1f}{row['total']:>9.1f}")
+        cost = mpc.get("cost") or {}
+        print(f"{'plan':>8}{mpc['predicted_indoor_mean']:>8.2f}{mpc['predicted_indoor_min']:>8.2f}"
+              f"{mpc['predicted_indoor_end']:>8.2f}{mpc['horizon_kwh']:>8.1f}{mpc['horizon_net_cost_sek']:>9.1f}"
+              f"{cost.get('comfort', 0.0) + cost.get('hard', 0.0):>9.1f}{cost.get('total', 0.0):>9.1f}")
+        print("   negative offset = pump shown colder = more heat; comfort = penalty for leaving the band")
     rows = report.get("plan", [])
     if rows:
         print(f"\n{'time':17}{'price':>7}{'out':>7}{'offset':>8}{'supply':>8}{'indoor':>8}{'kW':>7}")
