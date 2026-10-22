@@ -210,7 +210,16 @@ def cmd_mode(args: argparse.Namespace) -> int:
             print(f"\nMode set to '{args.name}'. The controller applies it on its next cycle.")
 
         active, notes = resolve_mode(cfg, ha)
-        control = apply_mode(cfg, active).control
+        # The same precedence the controller uses: profile, then the helpers,
+        # except the comfort fields a non-default mode owns. The profile alone
+        # would show 21.0 while the dashboard - and the controller - say 21.5.
+        from .controller import MODE_OWNED
+        from .settings import apply as apply_settings, read_from_home_assistant
+
+        values = read_from_home_assistant(cfg, ha)
+        if active != cfg.modes.default:
+            values = {k: v for k, v in values.items() if k not in MODE_OWNED}
+        control = apply_settings(apply_mode(cfg, active), values)[0].control
         print(f"\nActive mode: {active}")
         print(f"  setpoint      {control.setpoint:.1f} C")
         print(f"  comfort band  {control.comfort_min:.1f} - {control.comfort_max:.1f} C")

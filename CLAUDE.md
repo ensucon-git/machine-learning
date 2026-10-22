@@ -350,7 +350,7 @@ terminalvärderingen fixar, fast i utvärderingen.
 
 ## Verifierat kontra antaget
 
-**Verifierat** (425 tester, syntetiskt hus med känd sanning):
+**Verifierat** (427 tester, syntetiskt hus med känd sanning):
 - Identifieringen återfinner värmekurva (lutning 0,3495 mot 0,35, R² 0,997) och
   husparametrar (UA +3 %, Ci +4 %, `k_wind` +3 %, plattans tidskonstant inom 8 %).
   `hpmpc train` skriver ut vad den lärt sig om sol och vind som area och
@@ -810,6 +810,25 @@ terminalvärderingen fixar, fast i utvärderingen.
   med `power.calibrates: building`, se besluten ovan. Kräver att
   `power.source` inte är `none` — användaren satte `none` när verkningsgraden
   fastnade på 0,30, och måste sätta tillbaka `auto`.
+- **Börvärdeshjälparen nådde aldrig optimeraren i normalläget** (hittat
+  2026-10-22). `refresh_settings` gjorde rätt — fil → profil → hjälpare, och
+  loggen sa "setpoint 21.5, comfort 20.8–22.5" — men `build_schedule` anropade
+  `apply_mode` *igen* på den redan lösta konfigurationen, och profilen
+  `normal: setpoint: 21.0` lade tillbaka 21,0 ovanpå hjälparens 21,5.
+  Optimeraren planerade alltså mot 20,3–22,0 och lät huset ligga 0,3–0,5 K
+  under bandet på instrumentpanelen, med positiv offset. Syntes först i
+  "tänk om"-tabellen: komfortstraff 0 vid en lägsta temperatur på 20,19.
+  Det gamla testet kontrollerade `controller.cfg`, inte schemat optimeraren
+  får — nu skickar kontrollern in `active=self.cfg.control` och
+  `normal=self.default_control` (standardläget löst med hjälparna, som en
+  hemkomst blandar tillbaka mot), och testerna läser `report["comfort"]`.
+  `hpmpc mode` visade samma fel och löser nu också med hjälparna.
+  **`hpmpc plan` skriver numera en "tänk om"-tabell** (fast offset min, −1, 0,
+  +1, max: medel/min/slut inne, kWh, kronor, komfortstraff) — första stället
+  att titta när planen ser konstig ut. Modellparametrarna 2026-10-22: Ci 17 808,
+  Cm 4 532, Him 5 922, Hie 44, Hme 322, Hfloor 444, Q_int 1 979 W, A_sol 4,4 —
+  i praktiken en nod med 22 kWh/K och 61 h tidskonstant. Följd: −3 K i 36 h
+  lyfter slutet bara ~0,55 K, så ett höjt börvärde tar ett par dygn.
 - **Kalibrera mot pumpens display, inte mot givaren.** Ett par avlästa som
   "jag skickade R, pumpen säger T" innefattar kabelresistans, kontakt och
   pumpens egen linjärisering. En bänkmätning av termistorn missar allt det.
@@ -877,6 +896,11 @@ residual accepterad. Användarens `config.yaml` har `power.source: auto`,
 Offseten är klampad till **±0,5 K i Home Assistant** (`input_number.offset_min`
 / `offset_max`), och `hpmpc plan` väljer +0,5 genom hela horisonten — huset
 glider inom komfortbandet, vilket är det billigaste.
+
+**2026-10-22:** användaren höjde börvärdet till 21,5 och vidgade offseten till
+±3 — och upptäckte via `hpmpc plan` att optimeraren ignorerade börvärdet (se
+fällan "Börvärdeshjälparen nådde aldrig optimeraren"). Rättat och pushat;
+tills den nya imagen körs rådde jag `offset_max: 0` i HA som skydd.
 
 **Här står vi och väntar:** användaren återkommer om ett par dagar med
 `hpmpc plan`. Då: jämför planens `indoor`-kolumn med vad

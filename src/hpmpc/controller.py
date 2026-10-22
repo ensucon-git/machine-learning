@@ -140,6 +140,7 @@ class Controller:
         self._config_mtime: float | None = None
         self._model_stamp: float | None = _model_stamp(cfg) if params is not None else None
         self.mode = cfg.modes.default
+        self.default_control = apply_mode(cfg, cfg.modes.default).control
         slab = (
             float(steady_state_mass_temp(params, cfg.control.setpoint, 0.0))
             if params is not None
@@ -223,6 +224,10 @@ class Controller:
         candidate = apply_mode(base, mode)
 
         values = read_from_home_assistant(base, self.ha)
+        # What the default mode resolves to with these helpers - the band a
+        # return time blends back towards. Kept beside the active one so the
+        # comfort schedule never has to re-derive either from a profile.
+        self.default_control = apply_settings(apply_mode(base, base.modes.default), values)[0].control
         if mode != base.modes.default:
             ignored = sorted(set(values) & MODE_OWNED)
             if ignored:
@@ -883,7 +888,8 @@ class Controller:
         )
 
         comfort = build_schedule(
-            self.cfg, forecast.index, self.mode, read_return_time(self.base_cfg, self.ha)
+            self.cfg, forecast.index, self.mode, read_return_time(self.base_cfg, self.ha),
+            active=self.cfg.control, normal=self.default_control,
         )
         report["comfort"] = comfort.summary()
         result: MpcResult = self.solver.solve(

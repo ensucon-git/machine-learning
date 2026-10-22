@@ -179,21 +179,30 @@ def build_schedule(
     index: pd.DatetimeIndex,
     mode: str,
     return_time: datetime | None = None,
+    active: ControlConfig | None = None,
+    normal: ControlConfig | None = None,
 ) -> ComfortSchedule:
     """Comfort targets across the horizon for the active mode.
 
     Flat, unless a return time falls inside the horizon - then the band moves
     back to the default profile as that moment arrives, and the optimiser does
     the rest.
+
+    ``active`` and ``normal`` are the comfort settings as already resolved -
+    file, then profile, then the Home Assistant helpers. The controller must
+    pass them. Re-applying the profile here put the profile's setpoint back on
+    top of the helper's: the dashboard said 21.5, the log said 21.5, and the
+    optimiser planned against the profile's 21.0. Without them the profile is
+    applied to ``cfg``, which is right only for a config with no helpers.
     """
-    active = apply_mode(cfg, mode).control
+    active = active if active is not None else apply_mode(cfg, mode).control
     steps = len(index)
     schedule = ComfortSchedule.flat(active, steps, mode=mode)
 
     if return_time is None or mode == cfg.modes.default:
         return schedule
 
-    normal = apply_mode(cfg, cfg.modes.default).control
+    normal = normal if normal is not None else apply_mode(cfg, cfg.modes.default).control
     target = _as_utc(return_time)
     stamps = pd.DatetimeIndex(index)
     stamps = stamps.tz_localize("UTC") if stamps.tz is None else stamps.tz_convert("UTC")
