@@ -901,6 +901,15 @@ glider inom komfortbandet, vilket är det billigaste.
 ±3 — och upptäckte via `hpmpc plan` att optimeraren ignorerade börvärdet (se
 fällan "Börvärdeshjälparen nådde aldrig optimeraren"). Rättat och pushat;
 tills den nya imagen körs rådde jag `offset_max: 0` i HA som skydd.
+Efter bygget (samma kväll) planerar den rätt: −3 K i ~20 h, komfortstraffet
+syns i "tänk om"-tabellen, huset når bandets botten 20,8 efter ett dygn.
+**Förväntan att förklara för användaren:** inom bandet finns ingen dragning
+mot börvärdet utöver den svaga terminaltermen, så huset hamnar nära
+*underkanten* (21,5 − 0,7 = 20,8), inte på 21,5. Vill man ligga nära
+börvärdet ska `input_number.komfort_under` minskas (t.ex. 0,3) — det kostar
+lastförskjutning, eftersom bandet är just det utrymme optimeraren flyttar
+värme inom. Föreslog också att `offset_min` kan gå till −6 nu: −3 ligger i
+gränsen i ett dygn, alltså en aktiv begränsning.
 
 **Här står vi och väntar:** användaren återkommer om ett par dagar med
 `hpmpc plan`. Då: jämför planens `indoor`-kolumn med vad
