@@ -911,15 +911,19 @@ lastförskjutning, eftersom bandet är just det utrymme optimeraren flyttar
 värme inom. Föreslog också att `offset_min` kan gå till −6 nu: −3 ligger i
 gränsen i ett dygn, alltså en aktiv begränsning.
 
-**Här står vi och väntar:** användaren återkommer om ett par dagar med
-`hpmpc plan`. Då: jämför planens `indoor`-kolumn med vad
-`sensor.hall_temperature_2` faktiskt visade några timmar senare (ska stämma
-inom några tiondelar), och ta beslut om att vidga: max +3, efter ett par dygn
-min −2, sedan −6 — alltid i HA, aldrig med `hpmpc set`. Värt att titta på i
-samma veva: att skalan i nästa `hpmpc power` ligger nära ×1,0, och att planens
-dygnsel stämmer mot mätarens (18 okt: 47,2 kWh mätt − 25,4 hushåll/varmvatten
-= 21,8 kWh mot planens ~22 kWh/dygn vid ~3 °C). Detaljerad ordning under
-"Nästa steg".
+**Här står vi och väntar (från 2026-10-22):** börvärde 21,5, band 20,8–22,5,
+offset ±3 i HA (föreslaget: `offset_min` −6). Användaren återkommer om några
+dagar med `hpmpc plan`. Titta då på, i den här ordningen:
+1. Har huset nått bandet (≥ 20,8)? Annars: ligger planen fortfarande i
+   `offset_min` — då är gränsen den aktiva begränsningen.
+2. Stämmer planens `indoor` mot vad `sensor.hall_temperature_2` faktiskt
+   visade några timmar senare (inom några tiondelar)?
+3. Syns prisflytt när huset är i bandet — mer värme (negativ offset) på
+   billiga/milda timmar, glidning (positiv) på dyra? "Saving vs constant
+   offset" ska då bli några procent, inte ~0.
+4. Har användaren valt mellan "nära 21,5" (`komfort_under` ~0,3) och "spara
+   mest" (behåll 0,7)? Förklarat 2026-10-22, inget beslut än.
+5. `hpmpc power`: skalan nära ×1,0, och dygnselen mot mätaren.
 
 **Deployment:** repot har numera en `main`, och NUC:en (`/opt/hpmpc`) står på
 den. Det fanns ingen default branch alls innan — bara `claude/*` — så en
@@ -1006,9 +1010,9 @@ delaren mot kända motstånd. Först därefter pumpen.
    `sh -c` inne i containern. Tre tal att läsa: `offset_excitation.std` väl över
    0,5 (annars var veckan förgäves), `validation RMSE` under 0,3 °C, laddaren
    nära 11 kW.
-10. **← HÄR (från 2026-10-18).** **Några dygn med klampad offset**, läs `hpmpc plan`. Inte `dry_run` — se
-    fällorna.
-11. **Vidga stegvis**, på samma ställe: +3, sedan −2, sedan −6.
+10. ~~**Några dygn med klampad offset**~~ — gjort 2026-10-18 till 22.
+11. **← HÄR (från 2026-10-22).** **Vidga stegvis**, på samma ställe: ±3 är
+    satt; −6 föreslaget eftersom −3 ligger i gränsen under uppvärmningen.
 
 Säsongsväxlingen kräver sedan ingenting: stäng av **pumpen**, låt containern
 gå. Regulatorn går i `standby` när ingen offset kan producera värme, arkivet
