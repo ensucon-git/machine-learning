@@ -915,6 +915,19 @@ lastförskjutning, eftersom bandet är just det utrymme optimeraren flyttar
 värme inom. Föreslog också att `offset_min` kan gå till −6 nu: −3 ligger i
 gränsen i ett dygn, alltså en aktiv begränsning.
 
+**2026-11-03, omträning med 45 dygn efter värmestarten:** skalan höll —
+×1,00 ±9 %, dygns-R² 0,75, UA 394 W/K (mot 366) — alltså stämmer
+mätarkalibreringen fortfarande. Validering 0,313 °C mot persistens 0,399
+(förut 0,246 mot 0,412), 48 h 0,30 °C: relativt sämre, troligen för att
+huset nu hålls stilla av regulatorn och persistens därför blir svårare att
+slå; följ upp om det fortsätter. Residualen kastades. Användaren har vidgat
+offseten till −6/+4. Planen visar nu riktig prisflytt: glider (+1,9 K) i
+morgontoppen 4,2 kr, förvärmer (−3,1 K) natten därpå på 2,07 kr, och håller
+huset 20,7–21,2 nära bandets botten. "Saving vs constant offset" blev −0,9 %
+— planen betalar lite mer än den matchade konstanta offseten för att inte
+dyka under bandet; måttet räknar inte komfortstraffet. `komfort_under` är
+fortfarande obestämt.
+
 **Här står vi och väntar (från 2026-10-22):** börvärde 21,5, band 20,8–22,5,
 offset ±3 i HA (föreslaget: `offset_min` −6). Användaren återkommer om några
 dagar med `hpmpc plan`. Titta då på, i den här ordningen:
