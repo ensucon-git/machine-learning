@@ -280,7 +280,7 @@ def test_plan_output_explains_a_fallback_instead_of_dumping_json(capsys):
             "mode": "fallback",
             "offset": 0.0,
             "problems": ["t_indoor is stale (95 min > 45 min)"],
-            "notes": ["dry run - nothing written to Home Assistant"],
+            "notes": ["preview only - nothing written by this command; the running service writes as usual"],
             "readings": {"t_indoor": 21.1, "t_indoor_age_min": 95.2, "t_outdoor": 3.6},
             "output": {"entity_id": "number.utegivare_resistans", "value": 49763.2, "unit": "ohm"},
         }

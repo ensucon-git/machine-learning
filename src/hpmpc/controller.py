@@ -1077,7 +1077,15 @@ class Controller:
         outputs = self.outputs(offset, t_outdoor)
         report["outputs"] = outputs
         if not apply:
-            report["notes"].append("dry run - nothing written to Home Assistant")
+            # Two different things reach here, and the note has to say which.
+            # 'hpmpc plan' never writes - that is what it is for - and printing
+            # "dry run" on every plan sent the user looking for a dry_run switch
+            # to turn off while the service was writing normally all along.
+            report["notes"].append(
+                "dry run (control.dry_run is on) - nothing written to Home Assistant"
+                if self.cfg.control.dry_run
+                else "preview only - nothing written by this command; the running service writes as usual"
+            )
             # "Compute everything, write nothing" is safe where the pump has its
             # own sensor. Here it is not: the emulator IS the sensor, and it is
             # fed by writes. Stop writing and Home Assistant stops pushing, the

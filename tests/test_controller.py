@@ -554,6 +554,16 @@ def test_a_plan_is_not_mistaken_for_a_dry_run(controller, cfg, fake_ha):
     report = controller.step(now=fake_ha.now, apply=False)
     assert fake_ha.written == []
     assert not any("failsafe" in note for note in report["notes"])
+    # Nor may it call itself a dry run: every plan said so, and the user went
+    # looking for a dry_run switch to turn off while the service wrote normally.
+    assert not any("dry run" in note for note in report["notes"])
+    assert any("preview only" in note for note in report["notes"])
+
+
+def test_a_real_dry_run_says_so(controller, cfg, fake_ha):
+    cfg.control.dry_run = True
+    report = controller.step(now=fake_ha.now)
+    assert any("control.dry_run is on" in note for note in report["notes"])
 
 
 def test_dry_run_is_quiet_when_the_pump_has_its_own_sensor(controller, cfg, fake_ha):

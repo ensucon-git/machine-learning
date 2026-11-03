@@ -350,7 +350,7 @@ terminalvärderingen fixar, fast i utvärderingen.
 
 ## Verifierat kontra antaget
 
-**Verifierat** (427 tester, syntetiskt hus med känd sanning):
+**Verifierat** (428 tester, syntetiskt hus med känd sanning):
 - Identifieringen återfinner värmekurva (lutning 0,3495 mot 0,35, R² 0,997) och
   husparametrar (UA +3 %, Ci +4 %, `k_wind` +3 %, plattans tidskonstant inom 8 %).
   `hpmpc train` skriver ut vad den lärt sig om sol och vind som area och
@@ -712,6 +712,10 @@ terminalvärderingen fixar, fast i utvärderingen.
   någon av utgångarna fake_temperature/resistance/wiper är konfigurerad.
   `hpmpc plan` är fortfarande helt ofarligt — den är en separat process som
   räknar en gång och skriver aldrig.
+  **Planens not sa förr "dry run - nothing written"** även när `dry_run` var av
+  — `plan` skriver aldrig — och användaren frågade 2026-11 om de skulle köra
+  `hpmpc set control.dry_run 0`. Nu står det "preview only" för `plan` och
+  "control.dry_run is on" bara när inställningen verkligen är på.
 - **`hpmpc serve` loggade inte läget.** `_print_cycle` körs bara i `hpmpc run`,
   och containern kör `serve` — så `docker compose logs` visade skrivraden från
   `_write` men aldrig om beslutet kom från optimeraren, `collecting`, en
