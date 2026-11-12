@@ -482,6 +482,20 @@ terminalvärderingen fixar, fast i utvärderingen.
 - **Regulatorn skriver alla konfigurerade utgångar samtidigt**, inget `output_mode`.
   Samma beslut i kelvin, grader och ohm — då kan de inte säga emot varandra. Historiken
   läses tillbaka från kelvin-entiteten eftersom den inte kräver någon omräkning.
+- **En full disk kapar en månadsfil mitt i, och det stoppade hela kontrollern.**
+  Arkivet är gzippade CSV:er. Fylls disken under en skrivning kapas gzip-strömmen
+  och `pd.read_csv` kastar djupt inifrån sin parser — traceback med
+  `parsers.py`/`parsers.pyx`, vilket ser ut som att pandas eller hpmpc gått
+  sönder. Det gör det inte; det är en fil. Allvaret satt i att `_read` saknade
+  felhantering och anropas av `last_timestamp()`, alltså **varje styrcykel** —
+  en trasig fil stoppade allt, raka motsatsen till ett arkiv som ska läka själv.
+  `_salvage()` räddar nu det som skrevs före kapningen (gzip packar upp
+  sekventiellt, så allt före brottet är helt — 1186 av 2000 rader i testet),
+  skriver om filen och lägger originalet åt sidan som `.corrupt-<ts>`, aldrig
+  raderat. Två fällor i den koden, båda hittade av testet: `readlines()` läser
+  till slutet *innan* det kastar och slänger då allt partiellt innehåll — man
+  måste iterera rad för rad; och `to_csv` gissar kompression ur filändelsen, så
+  en stagead fil utan `.gz` blev okomprimerad och oläslig nästa gång.
 - **Arkivet och recordern kan inte hamna i konflikt.** Raderas arkivet fyller det
   sig från det recordern har kvar; kortas recorderns retention behåller arkivet
   det redan kopierat. `training.archive: false` går direkt mot recordern som förut.
