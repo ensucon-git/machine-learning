@@ -249,6 +249,9 @@ config trasig nog att stoppa kontrollern är just den vars senaste goda kopia
 behövs. `hpmpc restore` vägrar skriva över en datakatalog med modell eller
 arkiv utan `--force`. INSTALL.md sa förut att historiken "alltid kan hämtas om
 från Home Assistant" — fel sedan arkivet fanns, rättat.
+**Körd live 2026-11-12:** första kopian 96 filer, 0,7 MB, skrevs till NAS:en
+som root utan root_squash-problem. Sidecaren tog en egen direkt vid start
+(ingen kopia fanns), därför låg det två filer med nio sekunders mellanrum.
 
 **Historiken kopieras ur recordern varje styrcykel** (`archive.py`). Recordern är
 ett rullande fönster som rensas av ett annat system; identifieringen vill ha sex
