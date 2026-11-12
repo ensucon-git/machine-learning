@@ -335,3 +335,43 @@ def test_the_stove_deadband_is_settable_at_runtime(tmp_path):
     previous, new = settings.set_in_file(cfg_path, "training.stove_deadband_k", 2.5)
     assert previous == 2.0 and new == 2.5
     assert "stove_deadband_k: 2.5" in cfg_path.read_text()
+
+
+def test_the_optimiser_plans_against_the_setpoint_helper_not_the_profile(cfg, fake_ha):
+    """The bug this guards: the helper said 21.5, the log said 21.5, and the
+    comfort schedule re-applied the 'normal' profile's 21.0 on top - so the
+    optimiser kept the house at the bottom of the old band, 0.5 K below the
+    one on the dashboard. Checking the config was not enough; it is the
+    schedule the optimiser receives that has to move."""
+    from hpmpc.controller import Controller
+    from hpmpc.model.thermal import ThermalParams
+
+    assert cfg.modes.profile(cfg.modes.default).get("setpoint") is not None
+    cfg.runtime_overrides = {"control.setpoint": "input_number.borvarde"}
+    fake_ha.set("input_number.borvarde", 22.5)
+    controller = Controller(cfg, ThermalParams(), fake_ha)
+    report = controller.step(now=fake_ha.now, apply=False)
+    assert report["comfort"]["setpoint_now"] == pytest.approx(22.5)
+    assert report["comfort"]["comfort_band_now"][0] == pytest.approx(21.8)
+    assert controller.solver.comfort.setpoint[-1] == pytest.approx(22.5)
+
+
+def test_coming_home_blends_back_to_the_helper_setpoint(cfg, fake_ha):
+    """Returning from holiday aims at the normal band as the dashboard sets it,
+    not at the profile's number."""
+    from datetime import timedelta
+
+    from hpmpc.controller import Controller
+    from hpmpc.model.thermal import ThermalParams
+
+    cfg.modes.holiday_entity = "input_boolean.semester"
+    cfg.modes.return_entity = "input_datetime.hemkomst"
+    cfg.runtime_overrides = {"control.setpoint": "input_number.borvarde"}
+    fake_ha.set("input_number.borvarde", 22.5)
+    fake_ha.set("input_boolean.semester", "on")
+    back = fake_ha.now + timedelta(hours=4)
+    fake_ha.set("input_datetime.hemkomst", back.isoformat(), {"timestamp": back.timestamp()})
+    controller = Controller(cfg, ThermalParams(), fake_ha)
+    report = controller.step(now=fake_ha.now, apply=False)
+    assert report["comfort"]["setpoint_now"] == pytest.approx(16.0)
+    assert report["comfort"]["setpoint_end"] == pytest.approx(22.5)

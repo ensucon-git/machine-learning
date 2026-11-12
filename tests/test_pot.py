@@ -278,7 +278,7 @@ def test_the_shortfall_reaches_home_assistant(cfg, fake_ha):
 def test_even_the_sensor_failure_path_keeps_the_pump_supplied(cfg, fake_ha):
     """A stale indoor sensor must not leave the pump's own sensor input dark."""
     controller = controller_for(cfg, fake_ha)
-    fake_ha.set("sensor.indoor", 21.0, age_minutes=600)
+    fake_ha.set("sensor.indoor", 21.0, age_minutes=cfg.control.max_indoor_age_minutes + 60)
     fake_ha.set("sensor.outdoor", -12.0)
     report = controller.step(apply=True)
     assert report["mode"] == "fallback"

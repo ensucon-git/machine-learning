@@ -884,6 +884,28 @@ gott. Kör det gärna igen efter en säsong.
 
 `hpmpc collect` varnar automatiskt när excitationen är för svag.
 
+Excitationen behöver ingen historik — den läser inget dataset och ingen modell.
+Kör den alltså **före** `collect` och `train`, inte efter, och se till att veckan
+hamnar inom det fönster `collect --days` läser. Stoppa styrcontainern under tiden,
+annars skriver två processer till samma entitet var femtonde minut.
+
+Det enda excitationen kräver är att pumpen faktiskt värmer: över
+`heat_pump.heat_stop_temp` gör offseten ingenting.
+
+### Säsongerna sköter sig själva
+
+Det finns inget sommarläge att slå på. Över värmestoppet kan inget offset
+producera värme, och då:
+
+- går regulatorn i `standby` och håller `fallback_offset` — sanningen till
+  pumpens givare — i stället för att optimera mellan identiska framtider;
+- fortsätter arkiveringen som vanligt, eftersom hål i historiken inte går att
+  fylla i efterhand;
+- hoppar anpassningen över de fönstren (`training.min_heating_fraction`), så att
+  ett dataset som spänner över ett år ändå bara lär sig av eldningssäsongen.
+
+Första kalla natten återgår allt av sig självt.
+
 ---
 
 ## Träning och vad siffrorna betyder
@@ -1101,8 +1123,11 @@ Utöver det finns två *ekonomiska* spärrar som skyddar mot att optimeringen sl
 elpatronen är prissatt korrekt i målfunktionen (COP 1,0), och `max_electric_power_kw`
 hindrar planen från att stapla kompressor och elpatron ovanpå varandra.
 
-Kör gärna `dry_run: true` (eller `hpmpc plan`) i några dygn först och läs planerna innan
-du släpper det skarpt.
+Läs planerna med `hpmpc plan` i några dygn innan du släpper det skarpt. Klampa under
+tiden `control.offset_min`/`offset_max` mot 0 — **inte** `dry_run`. Med emulatorn som
+pumpens enda givare slutar `dry_run` skriva, och då faller noden till sitt failsafe-läge
+efter några timmar; en klampad offset skriver vidare varje cykel men kan inte påverka
+något.
 
 ---
 
@@ -1330,8 +1355,10 @@ vilket är precis det fel kontrollen finns för att fånga.
 1. Koppla **inte** in pumpen än. Kommendera några resistanser och mät med multimeter.
    Reostaterna har verklig wiper-resistans och några procents tolerans — mät, anta inte.
 2. Mät pumpens egen givare vid kända temperaturer och kör `hpmpc calibrate-ntc`.
-3. Koppla in pumpen med `dry_run: true` och offset 0. Pumpens display ska visa den
-   riktiga utetemperaturen. Gör den inte det är kalibreringen fel — fixa det först.
+3. Koppla in pumpen och låt regulatorn köra med offset 0 (läget `collecting` gör
+   det av sig själv). Pumpens display ska visa den riktiga utetemperaturen. Gör den
+   inte det är kalibreringen fel — fixa det först. Använd inte `dry_run` till det:
+   då skrivs ingenting, och displayen visar nodens bootvärde i stället.
 4. Kommendera −2 K stadigt i ett dygn och kontrollera att framledningen stiger med
    ungefär `curve_slope × 2` K. Först därefter släpper du regulatorn.
 

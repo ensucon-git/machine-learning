@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import re
 from dataclasses import dataclass, field, fields, is_dataclass
+from datetime import date
 from pathlib import Path
 from typing import Any, get_type_hints
 
@@ -332,6 +333,14 @@ class PowerConfig:
     """
 
     source: str = "auto"        # "auto" | "heatpump_meter" | "house" | "none"
+    calibrates: str = "building"
+    """What the meter is allowed to correct. Indoor temperatures fix the shape
+    of the building model but not its size in watts - scale every heat flow and
+    store together and the temperatures do not change - so one of the two has
+    to come from the meter. "building" trusts the pump's performance map and
+    lets the meter set the house's heat loss; "efficiency" trusts the fitted
+    house and lets the meter set the COP level, which is only right if the fit
+    happened to land on the true scale."""
     target: str = "balanced"    # "balanced" (3 x min phase) | "total"
     ev_guard_minutes: float = 15.0
     ev_nominal_kw: float = 11.0
@@ -400,6 +409,24 @@ class ControlConfig:
     Leave at 0 when the price entity already includes VAT."""
     dry_run: bool = False
     max_data_age_minutes: float = 45.0
+    """How old the outdoor reading may be before the controller falls back.
+
+    Short on purpose: the outdoor temperature is literally what the pump is
+    told, and the sensor on the board's J1 reports every minute."""
+    max_indoor_age_minutes: float = 1440.0
+    """How long the indoor reading may go without a sign of life.
+
+    Deliberately long. Indoor temperature over a concrete slab is the slowest
+    signal in the system, and a sensor that reports on change with a 0.1-0.5 C
+    threshold can legitimately stay silent for hours in a house that is simply
+    holding steady - which is what a well-controlled house does. Treating that
+    as a fault disables control precisely when it is working best.
+
+    It is a backstop, not the dead-sensor detection. A Zigbee or ESPHome device
+    that actually goes away is marked unavailable by its own integration and
+    caught at once; and a sensor that heartbeats is judged on last_reported,
+    which stays fresh however steady the value. This only has to catch an
+    integration with neither, frozen on its last value."""
     actuator_error_warn_c: float = 1.5
     """Warn when what the pump believes differs from what was commanded by more
     than this, averaged over many cycles. This is the only closed-loop check on
@@ -506,6 +533,38 @@ class TrainingConfig:
     restarts: int = 3
     max_windows: int = 900
     validation_fraction: float = 0.25
+    min_heating_fraction: float = 0.5
+    """Skip training windows where the pump spends less than this share of the
+    scored hours able to heat at all.
+
+    Above ``heat_pump.heat_stop_temp`` the pump makes no heat, so the offset -
+    the one input the controller has - does nothing. Those hours carry no
+    information about the gain the whole scheme depends on, and summer brings
+    months of them: free-floating indoor temperature, open windows, hot water
+    as the only load. Fitting on them trades winter accuracy for a season the
+    controller never acts in, and past ``max_windows`` they crowd the winter
+    windows out, because the subsample is spread evenly over the history.
+
+    Dropping them means the archive can run all year with nothing to switch on
+    and off by hand. 0 disables the filter and fits on everything."""
+    ignore_before: str = ""
+    """Train only on history from this local date on, e.g. "2026-09-19".
+
+    For when the history holds a stretch the house was not in the state the
+    model describes - typically the weeks before the pump's space heating was
+    switched on in the autumn, when the model assumes it heats below
+    heat_stop_temp but it was making hot water only. Those days are wrong for
+    the building fit and worse for the meter's scale: modelled heat against
+    metered nothing steepens the daily slope. Ages out on its own once the
+    date is older than history_days. Empty uses everything."""
+    keep_excitation: bool = True
+    """Always train on the recorded excitation runs, however old.
+
+    Retraining reads the newest ``history_days``, so without this the
+    excitation week drops out six weeks after it ran, and later fits learn the
+    offset gain only from what the optimiser chose - correlated with price and
+    weather. Runs are recorded by 'hpmpc excite' (see hpmpc.excitation) and kept
+    for as long as the archive still holds their rows."""
     retrain_days: int = 30
     """Retrain automatically when the model is older than this, if the
     controller is running as a service. 0 disables it. The house changes with
@@ -594,6 +653,11 @@ class Config:
                     f"{', '.join(sorted(OUTPUT_DOMAINS))} entity"
                 )
         t = self.training
+        if t.ignore_before:
+            try:
+                date.fromisoformat(t.ignore_before)
+            except ValueError as exc:
+                raise ValueError(f"training.ignore_before '{t.ignore_before}' is not a date: {exc}") from exc
         if t.archive and 0 < t.archive_keep_days < t.history_days:
             raise ValueError(
                 f"training.archive_keep_days ({t.archive_keep_days}) is shorter than "
@@ -623,6 +687,8 @@ class Config:
         p = self.power
         if p.source not in {"auto", "heatpump_meter", "house", "none"}:
             raise ValueError(f"power.source '{p.source}' is not valid")
+        if p.calibrates not in {"building", "efficiency"}:
+            raise ValueError(f"power.calibrates '{p.calibrates}' is not valid (building | efficiency)")
         if p.target not in {"balanced", "total"}:
             raise ValueError(f"power.target '{p.target}' is not valid")
         if not 0.0 < p.asymmetry <= 1.0:

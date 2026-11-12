@@ -416,6 +416,66 @@ def _load_cfg(path):
     return load_config(path)
 
 
+def test_a_sensor_configured_late_is_reached_back_for(cfg):
+    """A stove sensor added at the end of an excitation week.
+
+    The incremental pull only asks for what happened since the last stored
+    row, so without a reach-back the week's fires - still in the recorder -
+    would be archived as no fire at all, and lost for good once purged.
+    """
+    ha = RecorderHomeAssistant(keep_days=10.0)
+    recorded(cfg, ha, days=7.0)
+    archive = open_archive(cfg)
+    refresh(cfg, ha, archive, now=ha.now)
+    assert "stove_temp" not in archive.load().columns
+
+    # The sensor existed all along; only the configuration is new.
+    stamps = pd.date_range(ha.now - pd.Timedelta(days=7), ha.now, freq="15min", tz="UTC")
+    stove = pd.DataFrame({"entity_id": "sensor.stove", "time": stamps, "value": 24.0})
+    ha.history_frame = pd.concat([ha.history_frame, stove], ignore_index=True)
+    cfg.entities.stove_temp = "sensor.stove"
+
+    info = refresh(cfg, ha, archive, now=ha.now)
+    assert info.get("backfilled") == ["stove_temp"]
+    stored = archive.load()["stove_temp"].dropna()
+    assert stored.index[0] < pd.Timestamp(ha.now - pd.Timedelta(days=6))
+    # Nothing that was already there is disturbed.
+    assert archive.load()["t_indoor"].dropna().index[0] < pd.Timestamp(ha.now - pd.Timedelta(days=6))
+
+
+def test_reaching_back_happens_once_per_new_entity(cfg):
+    """Not on every cycle, and not for entities configured all along that
+    happen to have nothing in the recorder."""
+    ha = RecorderHomeAssistant(keep_days=10.0)
+    recorded(cfg, ha, days=3.0)
+    archive = open_archive(cfg)
+    refresh(cfg, ha, archive, now=ha.now)
+    refresh(cfg, ha, archive, now=ha.now + timedelta(minutes=15))
+    assert len(ha.requests) == 2                  # two ordinary pulls, no reach-back
+
+    cfg.entities.stove_temp = "sensor.stove_with_no_history"
+    refresh(cfg, ha, archive, now=ha.now + timedelta(minutes=30))
+    assert len(ha.requests) == 4                  # the pull, plus one reach-back
+    refresh(cfg, ha, archive, now=ha.now + timedelta(minutes=45))
+    assert len(ha.requests) == 5                  # and never again
+
+
+def test_an_archive_from_before_the_entity_list_still_reaches_back(cfg):
+    """The NUC's case: upgrade and configure the stove sensor in one go."""
+    from hpmpc.archive import KNOWN_ENTITIES
+
+    ha = RecorderHomeAssistant(keep_days=10.0)
+    recorded(cfg, ha, days=7.0)
+    archive = open_archive(cfg)
+    refresh(cfg, ha, archive, now=ha.now)
+    (archive.directory / KNOWN_ENTITIES).unlink()          # as if written by older code
+
+    stamps = pd.date_range(ha.now - pd.Timedelta(days=7), ha.now, freq="15min", tz="UTC")
+    ha.history_frame = pd.concat(
+        [ha.history_frame, pd.DataFrame({"entity_id": "sensor.stove", "time": stamps, "value": 24.0})],
+        ignore_index=True)
+    cfg.entities.stove_temp = "sensor.stove"
+    assert refresh(cfg, ha, archive, now=ha.now).get("backfilled") == ["stove_temp"]
 # ---------------------------------------------------------------------------
 # A disk that fills up mid-write leaves a gzip stream cut in half. That used to
 # take down every caller, including last_timestamp - so one bad file stopped

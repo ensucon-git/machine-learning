@@ -83,7 +83,7 @@ def test_training_produces_a_usable_model_file(trained):
     params, metadata = load_params(cfg.model_path)
     assert params.heat_loss_w_per_k() > 0
     assert metadata["trained_at"]
-    assert set(report) >= {"thermal", "heating_curve", "cop", "parameters", "pump_overrides", "data"}
+    assert set(report) >= {"thermal", "heating_curve", "building_scale", "parameters", "pump_overrides", "data"}
 
 
 def test_learned_pump_settings_are_reapplied_on_load(trained):
@@ -280,7 +280,7 @@ def test_plan_output_explains_a_fallback_instead_of_dumping_json(capsys):
             "mode": "fallback",
             "offset": 0.0,
             "problems": ["t_indoor is stale (95 min > 45 min)"],
-            "notes": ["dry run - nothing written to Home Assistant"],
+            "notes": ["preview only - nothing written by this command; the running service writes as usual"],
             "readings": {"t_indoor": 21.1, "t_indoor_age_min": 95.2, "t_outdoor": 3.6},
             "output": {"entity_id": "number.utegivare_resistans", "value": 49763.2, "unit": "ohm"},
         }

@@ -45,16 +45,37 @@ class EntityState:
     state: str
     attributes: dict[str, Any]
     last_updated: datetime | None
+    last_reported: datetime | None = None
+    """When the integration last *reported* this state, changed or not.
+
+    Home Assistant 2024.3 and later. ``last_updated`` only moves when the value
+    or an attribute changes, so a sensor that keeps saying 21.4 in a house that
+    is holding perfectly still looks hours old while being entirely healthy.
+    ``last_reported`` moves on every report, which makes it the actual "is this
+    device still talking" signal. Older installations do not send it."""
 
     @property
     def numeric(self) -> float | None:
         return to_float(self.state)
 
+    @property
+    def heard_from(self) -> datetime | None:
+        """The most recent sign of life: a report if we have one, else a change."""
+        stamps = [t for t in (self.last_reported, self.last_updated) if t is not None]
+        return max(stamps) if stamps else None
+
+    @property
+    def age_source(self) -> str:
+        if self.last_reported is not None and self.heard_from == self.last_reported:
+            return "last reported"
+        return "last changed" if self.last_updated is not None else "unknown"
+
     def age(self, now: datetime | None = None) -> timedelta | None:
-        if self.last_updated is None:
+        heard = self.heard_from
+        if heard is None:
             return None
         now = now or datetime.now(timezone.utc)
-        return now - self.last_updated
+        return now - heard
 
 
 def to_float(value: Any) -> float | None:
@@ -211,6 +232,7 @@ class HomeAssistant:
             state=payload.get("state", ""),
             attributes=payload.get("attributes", {}) or {},
             last_updated=_parse_ts(payload.get("last_updated") or payload.get("last_changed")),
+            last_reported=_parse_ts(payload.get("last_reported")),
         )
 
     def get_states(self, entity_ids: Iterable[str]) -> dict[str, EntityState]:

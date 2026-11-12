@@ -107,3 +107,38 @@ def test_a_missing_token_says_which_key_is_meant():
     with pytest.raises(HomeAssistantError) as excinfo:
         HomeAssistant(HomeAssistantConfig(base_url="http://ha:8123", token=""))
     assert "HPMPC_API_KEY is a different thing" in str(excinfo.value)
+
+
+def test_age_is_measured_from_the_last_report_not_the_last_change():
+    from datetime import datetime, timedelta, timezone
+
+    from hpmpc.ha import EntityState
+
+    now = datetime(2026, 10, 7, 12, 0, tzinfo=timezone.utc)
+    steady = EntityState("sensor.hall", "21.4", {},
+                         last_updated=now - timedelta(hours=4),
+                         last_reported=now - timedelta(minutes=2))
+    assert steady.age(now) == timedelta(minutes=2)
+    assert steady.age_source == "last reported"
+
+    # An installation older than Home Assistant 2024.3 sends no last_reported.
+    legacy = EntityState("sensor.hall", "21.4", {}, last_updated=now - timedelta(hours=4))
+    assert legacy.age(now) == timedelta(hours=4)
+    assert legacy.age_source == "last changed"
+
+
+def test_last_reported_is_read_from_the_state_payload(monkeypatch):
+    from hpmpc.config import HomeAssistantConfig
+    from hpmpc.ha import HomeAssistant
+
+    ha = HomeAssistant(HomeAssistantConfig(base_url="http://192.0.2.1:8123", token="t"))
+    payload = {
+        "entity_id": "sensor.hall", "state": "21.4", "attributes": {},
+        "last_changed": "2026-10-07T06:00:00+00:00",
+        "last_updated": "2026-10-07T06:00:00+00:00",
+        "last_reported": "2026-10-07T09:58:00+00:00",
+    }
+    monkeypatch.setattr(ha, "_request", lambda *a, **k: payload)
+    state = ha.get_state("sensor.hall")
+    assert state.last_reported is not None
+    assert state.heard_from == state.last_reported

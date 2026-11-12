@@ -84,6 +84,7 @@ def make_windows(
     stride_hours: float | None = None,
     max_windows: int | None = None,
     use_measured_supply: bool | None = None,
+    min_heating_fraction: float | None = None,
 ) -> WindowSet:
     """Slice the history into fixed-length simulation windows.
 
@@ -110,6 +111,8 @@ def make_windows(
     cols_out, cols_wind, cols_sun, cols_price = [], [], [], []
     cols_offset, cols_target, cols_supply, cols_stove = [], [], [], []
     ti0, tf0 = [], []
+    min_heating = tr.min_heating_fraction if min_heating_fraction is None else min_heating_fraction
+    skipped_no_heat = 0
 
     for seg in segments(frame, tr.resample_minutes):
         if len(seg) < span:
@@ -119,6 +122,10 @@ def make_windows(
             seg["offset"] = 0.0
         seg["offset"] = seg["offset"].fillna(0.0)
         filt = _filtered_outdoor_for_segment(seg, cfg, dt_hours)
+        # The offset is part of the perceived temperature, so an excitation
+        # block that drags the pump below its heat-stop point counts as heating
+        # even on a mild day - which is exactly the window worth keeping.
+        heat_ok = hp.heating_enabled(filt, cfg.heat_pump)
 
         arr_out = seg["t_outdoor"].to_numpy(dtype=float)
         arr_wind = seg.get("wind", pd.Series(0.0, index=seg.index)).fillna(0.0).to_numpy(dtype=float)
@@ -135,6 +142,11 @@ def make_windows(
             sl = slice(start, start + span)
             if not np.isfinite(arr_ti[sl]).all() or not np.isfinite(arr_out[sl]).all():
                 continue
+            # Only the scored part matters; the burn-in exists to settle the
+            # slab estimate, not to be predicted.
+            if min_heating > 0.0 and float(np.mean(heat_ok[sl][burn:])) < min_heating:
+                skipped_no_heat += 1
+                continue
             cols_out.append(arr_out[sl])
             cols_wind.append(arr_wind[sl])
             cols_sun.append(arr_sun[sl])
@@ -148,6 +160,13 @@ def make_windows(
             tf0.append(filt[start])
 
     if not cols_out:
+        if skipped_no_heat:
+            raise ValueError(
+                f"No training windows where the pump could heat ({skipped_no_heat} skipped): this "
+                f"history is all above heat_stop_temp={cfg.heat_pump.heat_stop_temp:.0f} C, so the "
+                "offset did nothing and there is no gain to learn. Train on data from the heating "
+                "season, or set training.min_heating_fraction: 0 to fit on it anyway."
+            )
         raise ValueError(
             "Not enough contiguous history to build training windows - "
             f"need at least {span * dt_hours:.0f} h without gaps"
@@ -171,9 +190,16 @@ def make_windows(
     )
 
     if max_windows and len(ws) > max_windows:
-        # Keep an evenly spread subsample so all seasons/weather stay represented.
+        # Keep an evenly spread subsample so the whole range of weather that
+        # survived the heating filter stays represented.
         idx = np.linspace(0, len(ws) - 1, max_windows).round().astype(int)
         ws = ws.subset(np.unique(idx))
+    if skipped_no_heat:
+        log.info(
+            "Skipped %d windows where the pump could not heat (below %.0f%% of the scored hours) - "
+            "the offset has no effect there",
+            skipped_no_heat, 100.0 * min_heating,
+        )
     log.info("Built %d training windows (%d steps each, %d scored)", len(ws), span, span - burn)
     return ws
 
@@ -226,12 +252,49 @@ def _denormalise(x: np.ndarray, lo: np.ndarray, hi: np.ndarray) -> np.ndarray:
     return lo + np.clip(x, 0.0, 1.0) * (hi - lo)
 
 
+# A window whose offset moves more than this carries information about the
+# offset gain; one where it sits still does not.
+MOVING_OFFSET_STD_K = 0.25
+
+
 def _split(ws: WindowSet, validation_fraction: float) -> tuple[WindowSet, WindowSet]:
-    """Chronological split - the validation windows are the most recent ones, so
-    the score answers "would this have predicted the days I have not used?"."""
-    n_val = max(1, int(round(len(ws) * validation_fraction)))
+    """Chronological split, done separately for windows where the offset moves.
+
+    The validation windows are the most recent ones, so the score answers
+    "would this have predicted the days I have not used?". But a plain
+    chronological cut puts the newest data in validation, and on a fresh
+    install the newest data is precisely the excitation week - the only
+    stretch where the offset moved for reasons the fit cannot confuse with the
+    weather. On the real house it was held out of training for the first three
+    fits.
+
+    So the windows where the offset moves and the ones where it does not are
+    each split chronologically on their own, and recombined. Most of the
+    excitation trains the model; its last quarter still tests it.
+
+    Measured, not assumed: on the synthetic house (31 quiet days, then a week
+    of excitation, newest) both splits recover UA to the same -7 %, because
+    with the heating curve known the weather alone moves the pump enough. The
+    gain this buys is for houses where that is not true, and an honest
+    validation score - it now has to predict windows where the offset moved.
+    It was not the cause of the poor fits on the real house.
+    """
     order = np.arange(len(ws))
-    return ws.subset(order[: len(ws) - n_val]), ws.subset(order[len(ws) - n_val :])
+    moving = ws.offset.std(axis=1) > MOVING_OFFSET_STD_K
+    train_idx: list[np.ndarray] = []
+    val_idx: list[np.ndarray] = []
+    for group in (order[moving], order[~moving]):
+        if len(group) < 2:
+            train_idx.append(group)
+            continue
+        n_val = min(len(group) - 1, max(1, int(round(len(group) * validation_fraction))))
+        train_idx.append(group[: len(group) - n_val])
+        val_idx.append(group[len(group) - n_val:])
+    train = np.sort(np.concatenate(train_idx)) if train_idx else order[:0]
+    val = np.sort(np.concatenate(val_idx)) if val_idx else order[:0]
+    if len(val) == 0 and len(ws) > 1:
+        train, val = order[:-1], order[-1:]
+    return ws.subset(train), ws.subset(val)
 
 
 def _identifiability(jac: np.ndarray, names: Sequence[str]) -> dict[str, Any]:
@@ -265,6 +328,26 @@ def _identifiability(jac: np.ndarray, names: Sequence[str]) -> dict[str, Any]:
     }
 
 
+def _window_sets(frame: pd.DataFrame, cfg: Config):
+    """Short and long windows, each split into training and validation."""
+    tr = cfg.training
+    short = make_windows(frame, cfg)
+    train_short, val_short = _split(short, tr.validation_fraction)
+    try:
+        long = make_windows(
+            frame,
+            cfg,
+            window_hours=tr.long_window_hours,
+            stride_hours=max(tr.window_stride_hours * 2, 6.0),
+            max_windows=max(60, tr.max_windows // 4),
+        )
+        train_long, val_long = _split(long, tr.validation_fraction)
+    except ValueError:
+        log.info("Not enough contiguous history for long windows; using short windows only")
+        train_long = val_long = None
+    return short, train_short, val_short, train_long, val_long
+
+
 def fit_thermal(
     frame: pd.DataFrame,
     cfg: Config,
@@ -284,23 +367,16 @@ def fit_thermal(
     regularisation = tr.regularisation if regularisation is None else regularisation
     restarts = tr.restarts if restarts is None else restarts
 
-    short = make_windows(frame, cfg)
-    train_short, val_short = _split(short, tr.validation_fraction)
-    try:
-        long = make_windows(
-            frame,
-            cfg,
-            window_hours=tr.long_window_hours,
-            stride_hours=max(tr.window_stride_hours * 2, 6.0),
-            max_windows=max(60, tr.max_windows // 4),
-        )
-        train_long, val_long = _split(long, tr.validation_fraction)
-    except ValueError:
-        log.info("Not enough contiguous history for long windows; using short windows only")
-        train_long = val_long = None
+    short, train_short, val_short, train_long, val_long = _window_sets(frame, cfg)
 
-    prior = (initial or ThermalParams()).clipped()
-    lo, hi = ThermalParams.bounds()
+    # Bounds and the regularisation's normalisation follow the starting
+    # point's size. The temperatures cannot tell sizes apart, so fitting a
+    # house four times larger inside a box four times larger is the same
+    # problem - and the meter, not this fit, decides which size is true.
+    start = initial or ThermalParams()
+    size = start.size()
+    prior = start.clipped(size)
+    lo, hi = ThermalParams.bounds(size)
     x_prior = _normalise(prior.to_vector(), lo, hi)
     names = ThermalParams.names()
     reg_weights = regularisation * np.array([REGULARISATION_WEIGHT.get(n, 1.0) for n in names])
@@ -371,6 +447,28 @@ def fit_thermal(
         "n_windows_train": len(train_short),
         "n_windows_validation": len(val_short),
         "used_measured_supply": short.supply is not None,
+        **_physical_summary(params),
+        "restarts": max(1, restarts),
+        "restart_scores": [
+            {"objective": round(a["cost"], 8), "validation_rmse_c": a["score"], "drift": round(a["drift"], 4)}
+            for a in attempts
+        ],
+    }
+    metrics["stove"]["share_of_hours_burning_pct"] = round(100.0 * float(np.mean(short.exog.stove > 0.0)), 1)
+    if train_long is not None:
+        metrics["validation_long_horizon"] = _score(params, cfg, val_long)
+    if best_solution is not None:
+        metrics["optimizer"] = {
+            "success": bool(best_solution.success),
+            "nfev": int(best_solution.nfev),
+            "cost": float(best_solution.cost),
+        }
+        metrics["identifiability"] = _identifiability(np.asarray(best_solution.jac), names)
+    return params, metrics
+
+
+def _physical_summary(params: ThermalParams) -> dict[str, Any]:
+    return {
         "time_constants_hours": {k: round(v, 2) for k, v in params.time_constants_hours().items()},
         "heat_loss_w_per_k": round(params.heat_loss_w_per_k(), 1),
         # What the fit concluded about the weather, in units someone can argue
@@ -387,24 +485,227 @@ def fit_thermal(
         "stove": {
             "w_per_k_excess": round(params.k_stove, 1),
             "kw_at_4k_excess": round(params.k_stove * 4.0 / 1000.0, 2),
-            "share_of_hours_burning_pct": round(100.0 * float(np.mean(short.exog.stove > 0.0)), 1),
         },
-        "restarts": max(1, restarts),
-        "restart_scores": [
-            {"objective": round(a["cost"], 8), "validation_rmse_c": a["score"], "drift": round(a["drift"], 4)}
-            for a in attempts
-        ],
     }
-    if train_long is not None:
-        metrics["validation_long_horizon"] = _score(params, cfg, val_long)
-    if best_solution is not None:
-        metrics["optimizer"] = {
-            "success": bool(best_solution.success),
-            "nfev": int(best_solution.nfev),
-            "cost": float(best_solution.cost),
+
+
+# The meter may only set the building's scale when it actually determines it.
+# A wider uncertainty than this is the split guessing, and a guess must not
+# move the heat loss the optimiser trades comfort against price with.
+MAX_SCALE_UNCERTAINTY = 0.25
+# Wide on purpose: this is the one direction a temperature-only fit leaves
+# free, so it is where the fit can be furthest off - on the real house the
+# first fits landed at a third of what the meter implied.
+BUILDING_FACTOR_BOUNDS = (0.2, 8.0)
+# Applying the scale must not make the temperature fit worse. Below capacity it
+# cannot change at all; past it, a scale that does is one the temperatures and
+# the meter disagree about.
+MAX_RESCALE_RMSE_GROWTH = 1.05
+# A passive house to a large draughty villa. Beyond this the meter is seeing
+# something other than the house.
+PLAUSIBLE_HEAT_LOSS_W_PER_K = (20.0, 2000.0)
+
+
+def calibrate_building_scale(frame: pd.DataFrame, cfg: Config, params: ThermalParams) -> dict[str, Any] | None:
+    """How many times larger the house's heat flows are than the fit made them.
+
+    Indoor temperatures fix the building model's shape but not its size: scale
+    every conductance, capacitance and gain by the same factor and every
+    trajectory is unchanged until the pump runs out of capacity, which a
+    well-sized pump almost never does. The fit's heat loss in watts is
+    therefore set by its prior, not by the house. The meter is the anchor:
+    with the COP taken from the performance map, measured pump electricity
+    times COP is the heat actually delivered, and its ratio to the heat the
+    model delivered is the factor. Returns None when there is nothing to
+    calibrate against.
+    """
+    if cfg.power.source == "none":
+        return None
+    context = _simulate_period(frame, cfg, params)
+    if context is None:
+        return None
+    has_meter = "power" in frame and frame["power"].notna().sum() >= 200
+    extra: dict[str, Any] = {}
+    if has_meter and cfg.power.source in {"auto", "heatpump_meter"}:
+        found = _factor_from_meter(context, cfg)
+        if found is None:
+            return None
+        factor, uncertainty = found
+        method = "dedicated heat pump meter"
+    elif cfg.power.source == "heatpump_meter":
+        log.warning("power.source is 'heatpump_meter' but no heat pump power sensor has usable data")
+        return None
+    else:
+        from .disaggregate import disaggregate
+
+        daily = daily_energy_balance(context, cfg)
+        if daily is None:
+            return None
+        factor, uncertainty = daily["factor"], daily["uncertainty"]
+        method = f"whole-house meter, daily energy over {daily['days']} days"
+        extra = {"daily_r2": daily["r2"], "daily_base_kwh": daily["base_kwh_per_day"]}
+        # The 15-minute split is no longer what sets the scale, but its car
+        # charger estimate is still the best check that the phases are right.
+        split = disaggregate(
+            context["data"], cfg, context["q_compressor"], context["q_backup"], context["cop_base"],
+            factor_bounds=BUILDING_FACTOR_BOUNDS,
+        )
+        if split is not None:
+            extra["car_charger_kw"] = round(split.ev_power_w / 1000.0, 2)
+
+    lo, hi = BUILDING_FACTOR_BOUNDS
+    reasons = []
+    if extra.get("daily_r2") is not None and extra["daily_r2"] < MIN_DAILY_R2:
+        reasons.append(
+            f"the model's daily heat explains only {100 * extra['daily_r2']:.0f}% of the day-to-day "
+            f"variation in metered energy (need {100 * MIN_DAILY_R2:.0f}%)"
+        )
+    if uncertainty is None or not np.isfinite(uncertainty) or uncertainty > MAX_SCALE_UNCERTAINTY:
+        shown = "unknown" if uncertainty is None or not np.isfinite(uncertainty) else f"+/-{100 * uncertainty:.0f}%"
+        reasons.append(f"the meter determines it only to {shown} (need +/-{100 * MAX_SCALE_UNCERTAINTY:.0f}%)")
+    if factor <= lo * 1.02 or factor >= hi / 1.02:
+        reasons.append(f"the factor {factor:.2f} is at the limit of {lo}-{hi}, so the true value is unknown")
+    return {
+        "factor": round(float(factor), 4),
+        "uncertainty": None if uncertainty is None or not np.isfinite(uncertainty) else round(float(uncertainty), 4),
+        "method": method,
+        "accepted": not reasons,
+        "reason": "; ".join(reasons) or None,
+        "heat_loss_before_w_per_k": round(params.heat_loss_w_per_k(), 1),
+        "heat_loss_after_w_per_k": round(params.scaled(factor).heat_loss_w_per_k(), 1),
+        **extra,
+    }
+
+
+# Below this the model's daily heat does not track what the meter sees, and a
+# ratio between the two means nothing however tight its standard error.
+MIN_DAILY_R2 = 0.5
+MIN_DAILY_COVERAGE = 0.6
+MIN_DAYS = 14
+
+
+def daily_energy_balance(context: dict[str, Any], cfg: Config) -> dict[str, Any] | None:
+    """Metered energy per day against the model's pump energy per day.
+
+    The scale is a question about energy, not timing, so it is answered on
+    days rather than quarter hours. At 15 minutes the pump's own on/off
+    cycling, hot water and defrost do not line up with a smooth model, the
+    regression's R2 goes negative, and its standard error still looks tight
+    because it assumes the model is right. Summed over a day all of that
+    averages out: hot water and the household become an intercept, and the
+    slope against the model's daily electricity is the factor - an energy
+    signature, with the model supplying the COP for each day's weather.
+    """
+    from .disaggregate import ev_mask, house_power
+
+    data = context["data"]
+    total, balanced = house_power(data, cfg)
+    if total is None:
+        return None
+    measured = balanced if cfg.power.target == "balanced" and balanced is not None else total
+    model = context["q_compressor"] / context["cop_base"]
+    target = measured.to_numpy(dtype=float) - context["q_backup"]
+    usable = np.isfinite(target) & np.isfinite(model) & ~ev_mask(data, cfg)
+    days = data.index.tz_convert(cfg.site.timezone).normalize()
+    frame = pd.DataFrame(
+        {
+            "model_w": np.where(usable, model, np.nan),
+            "measured_w": np.where(usable, target, np.nan),
+            "t_outdoor": data["t_outdoor"].to_numpy(dtype=float),
+            "usable": usable.astype(float),
+        },
+        index=data.index,
+    )
+    per_day = frame.groupby(days).mean()
+    per_day = per_day[per_day["usable"] >= MIN_DAILY_COVERAGE]
+    if len(per_day) < MIN_DAYS:
+        log.warning("Only %d days with enough metered data to calibrate the scale (need %d)",
+                    len(per_day), MIN_DAYS)
+        return None
+    x = per_day["model_w"].to_numpy()
+    y = per_day["measured_w"].to_numpy()
+    design = np.column_stack([np.ones_like(x), x])
+    solution, *_ = np.linalg.lstsq(design, y, rcond=None)
+    residual = y - design @ solution
+    dof = max(len(y) - 2, 1)
+    try:
+        covariance = np.linalg.inv(design.T @ design) * float(residual @ residual) / dof
+        standard_error = float(np.sqrt(max(covariance[1, 1], 0.0)))
+    except np.linalg.LinAlgError:
+        standard_error = float("nan")
+    factor = float(solution[1])
+    spread = float(np.sum((y - y.mean()) ** 2))
+    r2 = 1.0 - float(residual @ residual) / spread if spread > 0 else float("nan")
+    table = [
+        {
+            "day": str(day.date()),
+            "t_outdoor": round(float(row.t_outdoor), 1),
+            "measured_kwh": round(float(row.measured_w) * 24 / 1000.0, 1),
+            "model_kwh": round(float(row.model_w) * 24 / 1000.0, 1),
         }
-        metrics["identifiability"] = _identifiability(np.asarray(best_solution.jac), names)
-    return params, metrics
+        for day, row in per_day.iterrows()
+    ]
+    return {
+        "factor": factor,
+        "uncertainty": standard_error / abs(factor) if factor else float("nan"),
+        "r2": round(r2, 3),
+        "days": len(per_day),
+        "base_kwh_per_day": round(float(solution[0]) * 24 / 1000.0, 1),
+        "table": table,
+    }
+
+
+def _factor_from_meter(context: dict[str, Any], cfg: Config) -> tuple[float, float] | None:
+    """Least-squares ratio of metered to modelled compressor power."""
+    data = context["data"]
+    q = context["q_heat"]
+    q_backup = context["q_backup"]
+    q_compressor = context["q_compressor"]
+    power = data["power"].to_numpy(dtype=float)
+    finite = np.isfinite(power)
+    idle = finite & (q < 0.02 * max(float(np.max(q)), 1.0))
+    standby = float(np.median(power[idle])) if idle.sum() > 20 else cfg.heat_pump.standby_power_w
+    standby = float(np.clip(standby, 0.0, 300.0))
+    run = finite & (q_compressor > 0.15 * max(float(np.max(q_compressor)), 1.0)) & (q_backup <= 1.0)
+    if run.sum() < 100:
+        log.warning("Too few compressor-only samples to calibrate the building against the meter (%d)",
+                    int(run.sum()))
+        return None
+    x = q_compressor[run] / context["cop_base"][run]
+    z = power[run] - standby
+    denom = float(np.sum(x * x))
+    if denom <= 0:
+        return None
+    factor = float(np.sum(x * z)) / denom
+    residual = z - factor * x
+    standard_error = float(np.sqrt(np.sum(residual**2) / max(run.sum() - 1, 1) / denom))
+    return factor, standard_error / max(abs(factor), 1e-9)
+
+
+def rescale_thermal(
+    params: ThermalParams, metrics: dict[str, Any], frame: pd.DataFrame, cfg: Config, factor: float
+) -> tuple[ThermalParams, dict[str, Any]] | str:
+    """Apply a building scale and re-score it, or say why it cannot be applied."""
+    scaled = params.scaled(factor)
+    low, high = PLAUSIBLE_HEAT_LOSS_W_PER_K
+    if not low <= scaled.heat_loss_w_per_k() <= high:
+        return (f"scaling by {factor:.2f} gives a heat loss of {scaled.heat_loss_w_per_k():.0f} W/K, "
+                f"outside the physical bounds {low:.0f}-{high:.0f} for a dwelling")
+    _, train_short, val_short, _, val_long = _window_sets(frame, cfg)
+    validation = _score(scaled, cfg, val_short)
+    before = metrics.get("validation", {}).get("rmse_c")
+    after = validation.get("rmse_c")
+    if before is not None and after is not None and after > before * MAX_RESCALE_RMSE_GROWTH + 0.005:
+        return (f"scaling by {factor:.2f} worsens the temperature fit ({before:.3f} -> {after:.3f} C): "
+                "the meter and the temperatures disagree about where the pump runs out of capacity")
+    updated = dict(metrics)
+    updated.update(_physical_summary(scaled))
+    updated["stove"] = {**metrics.get("stove", {}), **updated["stove"]}
+    updated["train"] = _score(scaled, cfg, train_short)
+    updated["validation"] = validation
+    if val_long is not None:
+        updated["validation_long_horizon"] = _score(scaled, cfg, val_long)
+    return scaled, updated
 
 
 def _score(params: ThermalParams, cfg: Config, ws: WindowSet) -> dict[str, float]:

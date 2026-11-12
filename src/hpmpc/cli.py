@@ -210,7 +210,16 @@ def cmd_mode(args: argparse.Namespace) -> int:
             print(f"\nMode set to '{args.name}'. The controller applies it on its next cycle.")
 
         active, notes = resolve_mode(cfg, ha)
-        control = apply_mode(cfg, active).control
+        # The same precedence the controller uses: profile, then the helpers,
+        # except the comfort fields a non-default mode owns. The profile alone
+        # would show 21.0 while the dashboard - and the controller - say 21.5.
+        from .controller import MODE_OWNED
+        from .settings import apply as apply_settings, read_from_home_assistant
+
+        values = read_from_home_assistant(cfg, ha)
+        if active != cfg.modes.default:
+            values = {k: v for k, v in values.items() if k not in MODE_OWNED}
+        control = apply_settings(apply_mode(cfg, active), values)[0].control
         print(f"\nActive mode: {active}")
         print(f"  setpoint      {control.setpoint:.1f} C")
         print(f"  comfort band  {control.comfort_min:.1f} - {control.comfort_max:.1f} C")
@@ -339,6 +348,21 @@ def cmd_archive(args: argparse.Namespace) -> int:
         for gap in gaps:
             print(f"    {gap['hours']:>6.1f} h after {gap['after']}")
 
+    from .excitation import describe as describe_excitation, runs_for
+
+    runs = describe_excitation(cfg)
+    if not runs and not cfg.model_path.exists():
+        # Before the first model the backfill is still safe: look now, so the
+        # operator sees the week counted before training rather than after.
+        runs_for(cfg, archive.load())
+        runs = describe_excitation(cfg)
+    if runs:
+        print("  excitation runs kept for training regardless of age:")
+        for run in runs:
+            print(f"    {run['start'][:16]}  ->  {run['end'][:16]}   {run['days']} d")
+    else:
+        print("  no excitation run recorded - 'hpmpc excite' for a week in the heating season")
+
     need = cfg.training.history_days
     if info["span_days"] < need:
         print()
@@ -355,15 +379,15 @@ def cmd_archive(args: argparse.Namespace) -> int:
 def cmd_power(args: argparse.Namespace) -> int:
     """Show how whole-house power is being split between the heat pump and the rest."""
     from .disaggregate import disaggregate, house_power, quality_warnings
-    from .identify import _simulate_period
-    from .train import load_model
+    from .identify import BUILDING_FACTOR_BOUNDS, _simulate_period, daily_energy_balance
+    from .train import load_model, training_window
 
     cfg = _load(args)
     path = Path(args.dataset or cfg.dataset_path)
     if not path.exists():
         print(f"No dataset at {path} - run 'hpmpc collect' first")
         return 1
-    frame = load_dataset(path)
+    frame = training_window(load_dataset(path), cfg)
     try:
         working, params, _, _ = load_model(cfg)
     except (OSError, ValueError, KeyError):
@@ -374,8 +398,10 @@ def cmd_power(args: argparse.Namespace) -> int:
     if context is None:
         print("Not enough data to simulate the period")
         return 1
+    building = working.power.calibrates == "building"
     result = disaggregate(
-        context["data"], working, context["q_compressor"], context["q_backup"], context["cop_base"]
+        context["data"], working, context["q_compressor"], context["q_backup"], context["cop_base"],
+        **({"factor_bounds": BUILDING_FACTOR_BOUNDS} if building else {}),
     )
     if result is None:
         print(
@@ -385,6 +411,11 @@ def cmd_power(args: argparse.Namespace) -> int:
         return 1
 
     metrics = result.metrics
+    daily = daily_energy_balance(context, working) if building else None
+    if daily is not None:
+        _print_daily_power(daily, params, result, working)
+        return 0
+
     step_hours = (result.base_load_w.index[1] - result.base_load_w.index[0]).total_seconds() / 3600.0
     total, _ = house_power(context["data"], working)
     measured_kwh = float(total.sum() * step_hours / 1000.0)
@@ -395,9 +426,9 @@ def cmd_power(args: argparse.Namespace) -> int:
     print(f"{'balanced other load':28}{metrics['base_load_kwh']:>10.1f}{metrics['base_load_kwh'] / measured_kwh:>9.1%}")
     print(f"{'whole house measured':28}{measured_kwh:>10.1f}")
     print()
-    print(f"efficiency scale         {result.efficiency_scale:.4f}"
-          + (f" +/- {100 * metrics['efficiency_scale_uncertainty']:.1f}%"
-             if metrics.get("efficiency_scale_uncertainty") else ""))
+    uncertainty = (f" +/- {100 * metrics['efficiency_scale_uncertainty']:.1f}%"
+                   if metrics.get("efficiency_scale_uncertainty") else "")
+    print(f"efficiency scale         {result.efficiency_scale:.4f}{uncertainty}")
     print(f"   relative to the {working.heat_pump.efficiency_scale:.4f} already in the model, so a value")
     print("   near 1.0 here means the last calibration is still right.")
     print(f"car charger inferred     {result.ev_power_w / 1000:.1f} kW "
@@ -414,7 +445,36 @@ def cmd_power(args: argparse.Namespace) -> int:
     else:
         print("\nNo warnings. The car charger figure is the check worth trusting: if an 11 kW")
         print("charger comes out near 11 kW, the phase entities and the split are both sane.")
-    return 0 if not warnings else 0
+    return 0
+
+
+def _print_daily_power(daily: dict[str, Any], params, result, working) -> None:
+    """The meter's view when it calibrates the building: energy per day.
+
+    The quarter-hour split is still run for its car charger estimate, but its
+    heat pump share and warnings are left out - a cycling pump and hot water
+    make them meaningless at that resolution, which is why the scale is not
+    taken from them.
+    """
+    print(f"{'day':12}{'outdoor C':>10}{'metered kWh':>13}{'model kWh':>11}")
+    for row in daily["table"]:
+        print(f"{row['day']:12}{row['t_outdoor']:>10.1f}{row['measured_kwh']:>13.1f}{row['model_kwh']:>11.1f}")
+    print("   metered: the balanced load, car charging excluded; model: pump electricity it predicts\n")
+    days = daily["days"]
+    metered = sum(row["measured_kwh"] for row in daily["table"])
+    heating = sum(row["model_kwh"] for row in daily["table"]) * daily["factor"]
+    base = daily["base_kwh_per_day"] * days
+    print(f"Over {days} days:  {'kWh':>8}{'per day':>9}")
+    print(f"  space heating        {heating:>8.0f}{heating / days:>9.1f}")
+    print(f"  household + hot water{base:>8.0f}{base / days:>9.1f}")
+    print(f"  metered balanced load{metered:>8.0f}{metered / days:>9.1f}\n")
+    print(f"building heat scale      x{daily['factor']:.3f} +/- {100 * daily['uncertainty']:.1f}% "
+          f"(daily fit R2 {daily['r2']})")
+    print(f"   the meter's view of the house's heat loss relative to the model's "
+          f"{params.heat_loss_w_per_k():.0f} W/K,")
+    print("   with the COP from the performance map. Near 1.0 means the last calibration still holds.")
+    print(f"car charger inferred     {result.ev_power_w / 1000:.1f} kW "
+          f"(configured nominal {working.power.ev_nominal_kw:.1f} kW) - the check that the phases are right")
 
 
 def cmd_settings(args: argparse.Namespace) -> int:
@@ -748,7 +808,12 @@ def cmd_check(args: argparse.Namespace) -> int:
             ok = False
             continue
         age = state.age()
-        age_txt = f"{age.total_seconds() / 60:.0f} min ago" if age else "unknown age"
+        # Say which clock the age came from. "last changed" on a steady sensor
+        # is not a fault, and "last reported" is the one that proves the
+        # device is still talking - the difference is exactly what decides
+        # whether an hours-old indoor reading should worry anyone.
+        age_txt = (f"{age.total_seconds() / 60:.0f} min since {state.age_source}"
+                   if age else "unknown age")
         print(f"  ok       {name:16} {entity_id} = {state.state} ({age_txt})")
 
     configured = {k: v for k, v in cfg.entities.outputs().items() if v}
@@ -966,10 +1031,28 @@ def cmd_train(args: argparse.Namespace) -> int:
     frame = load_dataset(path)
     if args.days:
         frame = frame.iloc[-int(args.days * 24 * 60 / cfg.training.resample_minutes) :]
-    report = train(cfg, frame, fit_curve=not args.no_curve_fit)
+    report = train(cfg, frame, fit_curve=not args.no_curve_fit, force=args.force)
     write_report(Path(cfg.paths.model_dir) / "training_report.json", report)
     print()
     print(summarise(report))
+    if report.get("rejected"):
+        print(f"\nNOT INSTALLED: {report['rejected']}.\n"
+              "The model that was running keeps running. 'hpmpc train --force' installs this one anyway.")
+        return 1
+    return 0
+
+
+def cmd_revert_model(args: argparse.Namespace) -> int:
+    from .train import previous_path, revert_model
+
+    cfg = _load(args)
+    try:
+        metadata = revert_model(cfg)
+    except FileNotFoundError as exc:
+        print(exc)
+        return 1
+    print(f"Back on the model trained at {metadata.get('trained_at', '?')}; the one it replaced is now "
+          f"{previous_path(cfg)}.\nA running service switches within a cycle. Run this again to undo.")
     return 0
 
 
@@ -1002,13 +1085,10 @@ def cmd_run(args: argparse.Namespace) -> int:
             started = datetime.now(timezone.utc)
             try:
                 controller.reload_config(args.config)
-                if not controller.trained:
-                    try:
-                        fresh, fresh_params, fresh_residual, _ = load_model(controller.base_cfg)
-                        controller.adopt_model(fresh_params, fresh, fresh_residual)
-                        print("Model found - switching from collecting to control.")
-                    except (ModelNotTrained, OSError, ValueError, KeyError):
-                        pass
+                was_trained = controller.trained
+                if controller.pick_up_new_model(args.config) is not None:
+                    print("Model found - switching from collecting to control." if not was_trained
+                          else "New model on disk - switched to it.")
                 if args.excite:
                     report = controller.excite_step(apply=apply, hold_hours=args.hold_hours)
                 else:
@@ -1114,6 +1194,11 @@ def _print_plan(report: dict[str, Any]) -> None:
             # and it lasts weeks. Do not describe it as something going wrong.
             print(f"\nCollecting history - no model yet, holding "
                   f"{report.get('offset', 0.0):+.2f} K  [collecting]")
+        elif report.get("mode") == "standby":
+            # Nor is this: it is summer. There is no plan because no offset
+            # would change anything, not because anything failed.
+            print(f"\nOut of season - the pump cannot heat anywhere in the horizon, holding "
+                  f"{report.get('offset', 0.0):+.2f} K  [standby]")
         else:
             print(
                 f"\nNo plan this cycle - the controller fell back to "
@@ -1157,6 +1242,19 @@ def _print_plan(report: dict[str, Any]) -> None:
     )
     for note in report.get("notes", []):
         print(f"  note: {note}")
+    what_if = mpc.get("constant_offsets") or []
+    if what_if:
+        print("\nHolding one offset for the whole horizon instead (the model's view):")
+        print(f"{'offset':>8}{'mean':>8}{'min':>8}{'end':>8}{'kWh':>8}{'net SEK':>9}{'comfort':>9}{'total':>9}")
+        for row in what_if:
+            print(f"{row['offset']:>8.2f}{row['mean_indoor']:>8.2f}{row['min_indoor']:>8.2f}"
+                  f"{row['end_indoor']:>8.2f}{row['kwh']:>8.1f}{row['net_cost_sek']:>9.1f}"
+                  f"{row['comfort_penalty']:>9.1f}{row['total']:>9.1f}")
+        cost = mpc.get("cost") or {}
+        print(f"{'plan':>8}{mpc['predicted_indoor_mean']:>8.2f}{mpc['predicted_indoor_min']:>8.2f}"
+              f"{mpc['predicted_indoor_end']:>8.2f}{mpc['horizon_kwh']:>8.1f}{mpc['horizon_net_cost_sek']:>9.1f}"
+              f"{cost.get('comfort', 0.0) + cost.get('hard', 0.0):>9.1f}{cost.get('total', 0.0):>9.1f}")
+        print("   negative offset = pump shown colder = more heat; comfort = penalty for leaving the band")
     rows = report.get("plan", [])
     if rows:
         print(f"\n{'time':17}{'price':>7}{'out':>7}{'offset':>8}{'supply':>8}{'indoor':>8}{'kW':>7}")
@@ -1186,6 +1284,11 @@ def _print_cycle(report: dict[str, Any]) -> None:
         f" -> {rendered}"
         f" {'(written)' if report.get('applied') else '(not written)'}{extra}"
     )
+    # Problems before notes: "sensor problem - excitation paused" is a note, and
+    # without the problem beside it the operator is told that something is wrong
+    # and not what, for a week at a time.
+    for problem in report.get("problems", []):
+        print(f"          PROBLEM: {problem}")
     for note in report.get("notes", []):
         print(f"          note: {note}")
     archive = report.get("archive") or {}
@@ -1293,7 +1396,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--dataset", default=None)
     p.add_argument("--days", type=float, default=None, help="use only the most recent N days")
     p.add_argument("--no-curve-fit", action="store_true", help="keep the configured heating curve")
+    p.add_argument("--force", action="store_true",
+                   help="install the model even if it predicts no better than 'no change'")
     p.set_defaults(func=cmd_train)
+
+    p = sub.add_parser("revert-model", help="go back to the model the last training replaced")
+    p.set_defaults(func=cmd_revert_model)
 
     p = sub.add_parser("plan", help="solve once and print the plan without writing anything")
     p.add_argument("--json", action="store_true")

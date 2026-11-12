@@ -47,6 +47,13 @@ OVERRIDABLE: dict[str, tuple[float, float]] = {
     "control.weight_backup_heater": (0.0, 100.0),
     "control.max_electric_power_kw": (0.0, 100.0),
     "control.dry_run": (0.0, 1.0),
+    # How a sensor reports is discovered at commissioning, with the pump
+    # running - not something to fix by editing the file and restarting. The
+    # outdoor limit is short (it is what the pump is told); the indoor one is
+    # long, because a steady indoor temperature is the normal state of a slab
+    # house, not a fault.
+    "control.max_data_age_minutes": (5.0, 360.0),
+    "control.max_indoor_age_minutes": (30.0, 10080.0),   # up to a week
     "heat_pump.curve_slope": (0.0, 2.0),
     "heat_pump.curve_offset": (0.0, 60.0),
     "heat_pump.curve_ref": (0.0, 40.0),

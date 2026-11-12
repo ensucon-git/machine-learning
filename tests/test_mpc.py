@@ -242,3 +242,20 @@ def test_more_notice_means_a_later_and_cheaper_start(cfg):
         return int(heating[0]) if heating.size else len(result.offset_schedule)
 
     assert first_heating_step(30.0) > first_heating_step(20.0)
+
+
+def test_the_plan_reports_what_holding_each_offset_would_do(cfg):
+    """'Why does it not just heat more?' needs the model's own answer: the
+    coldest allowed offset must show more energy and a warmer house than the
+    warmest, and the plan must never be worse than any of them."""
+    params = ThermalParams()
+    solver = MpcSolver(cfg, params)
+    result = solver.solve(scenario(cfg), start_state(params))
+    rows = result.summary()["constant_offsets"]
+    offsets = [row["offset"] for row in rows]
+    assert offsets[0] == pytest.approx(cfg.control.offset_min)
+    assert offsets[-1] == pytest.approx(cfg.control.offset_max)
+    assert 0.0 in offsets
+    assert rows[0]["kwh"] > rows[-1]["kwh"]
+    assert rows[0]["mean_indoor"] > rows[-1]["mean_indoor"]
+    assert result.cost.total <= min(row["total"] for row in rows) + 0.1

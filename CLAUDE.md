@@ -26,7 +26,7 @@ bestämt, varför, och vilka fällor som redan är upptäckta.
 | Effektmätning | Victron, **hela husets effekt per fas** — ingen mätare enbart på pumpen |
 | Elbilsladdare | 11 kW över alla tre faser, `binary_sensor.eh6nh5cd_charging` (`Charging` / `Not charging`) |
 | Körs på | NUC, Docker (Portainer), skilt från Home Assistant |
-| Utegivare | **ingen** — utetemperaturen hämtas via `weather.smhi_home` i Home Assistant (direkt-SMHI gav 404 hos användaren). `entities.outdoor_temp` finns kvar för att koppla in en givare senare |
+| Utegivare | Pumpens egen termistor sitter på kortets **J1** sedan 2026-09 och publiceras som `sensor.varmepump_proxy_verklig_utetemperatur`. Den står i `entities.outdoor_temp` och vinner över `weather.smhi_home`, som fortfarande bär prognosen (direkt-SMHI gav 404 hos användaren) |
 
 Entiteterna, som de faktiskt heter:
 
@@ -103,11 +103,138 @@ på validerings-RMSE. En hundradels grad är brus på en platt likelihood-ås, o
 att föredra det lät en anpassning vinna just genom att smita undan
 regulariseringen — den gav UA 140 W/K mot sanna 195.
 
+**En omträning som är sämre än persistens installeras inte** (`train.py`).
+Finns redan en modell och valideringens RMSE inte slår "ingenting ändras",
+sparas den nya som `thermal_model.rejected.json` och den körande står kvar.
+Utan spärren ersatte omträningen 2026-10-18 (RMSE 0,598 mot persistens 0,457)
+en bättre modell tyst, och den automatiska omträningen hade gjort samma sak
+mitt i natten. Första modellen spärras inte — utan den finns ingenting att stå
+kvar på, och `collecting` är inte bättre. `hpmpc train --force` installerar
+ändå. Varje installation sparar förra som `thermal_model.prev.json` (+ residual),
+och `hpmpc revert-model` byter tillbaka; modellfilen kopieras sist så att
+mtime-bytet plockar upp ett helt par.
+
+**Elmätaren sätter husets storlek i watt, inte pumpens verkningsgrad**
+(`power.calibrates: building`, `identify.calibrate_building_scale`). Inne-
+temperaturerna bestämmer husmodellens *form* men inte dess *storlek*, se
+fällan nedan, och mätaren kan bara bestämma en av två saker: husets
+värmeförlust eller COP-nivån. Förr fick den sätta verkningsgraden, vilket
+bara är rätt om anpassningen råkat hamna på rätt skala. Den gjorde det inte på
+riktigt: UA 63–126 W/K mot ≥ 220 som mätaren antydde, och skalan låg i golvet
+0,30. Nu litas COP-kartan på (en känd maskin, inom ±15 %), och mätarens
+förhållande mellan uppmätt och modellerad pumpel skalar alla extensiva
+parametrar (`ThermalParams.scaled`). Temperaturprediktionerna ändras inte, så
+valideringen ändras inte — det som rättas är det optimeraren väger mot priset:
+kronor, effekttak, och var kapacitet och elpatron tar slut i kyla. Spärrar:
+osäkerheten måste vara ≤ ±25 %, faktorn får inte ligga i gränsen 0,2–8, och
+skalningen får inte försämra temperaturanpassningen (skulle bara kunna hända
+där pumpen slår i taket). Underkänd skala lämnar UA orört och säger varför.
+Nästa omträning startar från den skalade modellen. Den automatiska
+omträningen tränar från *filens* konfiguration, inte den körande — den bär
+förra modellens inlärda verkningsgrad, som annars hade satt just den skala
+mätaren ska mäta. Mot syntetiskt hus med priorn på 35 %: UA 82 → 200 (sant 195).
+
+**Skalan räknas på dygnsenergi, inte på kvartar** (`identify.daily_energy_balance`).
+Första versionen använde 15-minutersuppdelningen, och på huset 2026-10-18
+ville den ha ×8 (i gränsen, UA ≥ 620) med "±5 %" och R² −0,09. Felet är att en
+riktig pump taktar av/på och gör varmvatten när den vill — i kvartsupplösning
+stämmer ingenting i tid med en jämn modell, och standardfelet ser ändå snävt
+ut eftersom det förutsätter att modellen är rätt. Summerat per dygn blir
+varmvatten och hushåll ett intercept och lutningen mot modellens dygnsel är
+faktorn: en energisignatur. Syntetiskt med taktning + varmvatten: kvarts-R²
+0,13, dygns-R² 0,97, faktorn inom 12 %. Spärr: dygns-R² ≥ 0,5 och ≥ 14 dygn.
+`hpmpc power` skriver dygnstabellen (ute, uppmätt, modell) — läs den först om
+skalan underkänns. Rimlighetskoll för huset: 16 kW-pump + 9 kW elpatron tyder
+på en dimensionerande förlust kring 14–16 kW vid −20, alltså UA i
+storleksordningen 350–400 W/K.
+
+**Parametergränserna följer husets storlek** (`ThermalParams.bounds(size)`,
+`size()` = UA / 205). `PARAM_BOUNDS` ritades för ett 140 m²-hus; första
+dygnskalibreringen på huset (×4,44 ±11 %, R² 0,65 → UA 383) stoppades som
+"utanför fysikaliska gränser" fast resultatet var precis vad pumpens
+dimensionering säger — plattkopplingen ensam passerade 6000 W/K. Eftersom
+temperaturerna inte kan skilja storlekar åt är anpassning i en fyra gånger
+större låda kring en fyra gånger större prior *samma problem*, regulariseringen
+inkluderad; standardpriorn har storlek 1 och beter sig som förut. Kvar som
+rimlighetsgräns: UA 20–2000 W/K. Dygnstabellen 2026-10-18 visade ett steg på
+ca +12 kWh/dygn runt 18–19 sept vid samma utetemperatur; bara dagarna efter ger
+×3,0 (UA ~260) mot ×4,4 för alla. Användaren minns inte säkert, men tror att
+värmen slogs på då — alternativet, att poolvärmen stängdes av, kan inte ge
+steget: poolen är enfas, och att ta bort en enfaslast kan bara *sänka*
+3 × min(fas), aldrig höja den. Före steget gjorde pumpen alltså troligen bara
+varmvatten medan modellen trodde att den värmde under 18 °C. Därför finns
+**`training.ignore_before`** (lokalt datum, används av `train`, den
+automatiska omträningen och `hpmpc power`); satt till `2026-09-19` hos
+användaren. Åldras ut av sig själv när datumet passerat `history_days`.
+Nästa höst: sätt det till dagen värmen slås på igen, eller låt det vara —
+sommaren filtreras redan bort av `min_heating_fraction`, men bara för
+anpassningen, inte för skalan.
+
+**Första modellen som håller** (2026-10-18, `ignore_before: 2026-09-19`):
+validering 0,246 °C mot persistens 0,412 (förut 0,43 mot 0,48), 48 h 0,194 °C,
+skala ×5,25 ±14 % → **UA 366 W/K**, dygns-R² 0,66, laddaren 11,3 kW, residual
+accepterad (8 %). Att kasta dygnen före värmestarten gjorde mer för
+temperaturanpassningen än något annat. Kontroll: 18 okt (5,2 °C) mätt 47,2 kWh
+minus intercept 25,4 = 21,8 kWh värme-el; planen räknar ~22 kWh/dygn vid ~3 °C.
+**Plattans tidskonstant blev 0,68 h** — det är nodbyte, inte fel: total
+kapacitet (Ci+Cm ≈ 61 h × 366 W/K ≈ 22 kWh/K ≈ 80 MJ/K) stämmer med 10 cm
+betong på 350 m², och den lagrade värmen sitter nu i "luft"-noden medan
+"plattan" blivit en snabb nod mellan vatten och rum. Terminalvärderingen
+räknar både Ci och Cm, så lastförskjutningen ser lagret. Tidskonstanterna ska
+alltså inte läsas bokstavligt för det här huset. `hpmpc power` visar numera
+dygnsuppdelningen i byggnadsläget i stället för kvartsuppdelningens pumpandel
+och varningar (som sa 6,7 % och "kontrollera faserna").
+
+**Valideringen delas stratifierat på offsetrörelse** (`identify._split`).
+Fönster där offseten rör sig (std > 0,25 K) och stilla fönster delas var för
+sig kronologiskt, så excitationsveckan inte hamnar helt i validering eller helt
+i träning. Principiellt rätt, men **det var inte orsaken till de dåliga
+anpassningarna på huset** — mot syntetiskt hus gav båda delningarna UA −7 %.
+Påstods en gång i chatten; det höll inte.
+
 **Kontrollern startar utan modell** (`load_model_if_trained`, läget `collecting`).
 En färsk installation har ingen modell, och att vägra starta vore bakvänt: pumpen
 har ingen annan givare än den vi driver, och historiken anpassningen behöver
-samlas in av samma slinga. `adopt_model` växlar över utan omstart så fort
-`hpmpc train` körts.
+samlas in av samma slinga. `pick_up_new_model` växlar över utan omstart så
+fort `hpmpc train` körts — **varje** gång, inte bara den första. Tidigare bytte
+tjänsten bara från ingen modell till en modell; en manuell omträning krävde
+omstart, och fram till dess styrde den på modellen man just bestämt sig för att
+ersätta. Konfigurationen läses om från filen vid bytet, inte från den körande:
+den körande bär förra modellens inlärda pumpvärden, och en ny modell som slutat
+åsidosätta ett av dem (verkningsgraden med `power.source: none`) hade annars
+ärvt det gamla värdet tyst — det hände på riktigt 2026-10, 0,30 i gränsen.
+Samma väg används av den automatiska omträningen. Ett par sekunders
+`settle_seconds` hindrar att en cykel som landar mellan termikfilen och
+residualfilen adopterar en halv modell.
+
+**Säsongen hanteras av fysiken, inte av en inställning.** Över
+`heat_pump.heat_stop_temp` gör pumpen ingen värme, alltså gör offseten
+ingenting. Tre följder, alla automatiska: regulatorn går i `standby` och håller
+`fallback_offset` när inte ens `offset_min` kan få horisontens kallaste timme
+under värmestoppet; arkiveringen fortsätter (hål går inte att fylla i efterhand,
+och utan utegivare är arkivet enda stället `t_outdoor` finns); och
+`make_windows` hoppar över fönster där pumpen inte kunde värma
+(`training.min_heating_fraction: 0.5` av de *poängsatta* stegen, inte
+inbränningen). Alternativet — att pausa `collect` över sommaren — sågs över och
+valdes bort: det ger permanenta hål i den enda historiken, och löser fel problem.
+Det är träningen som ska filtrera, inte insamlingen. Testet på standby är
+medvetet på horisontens *kallaste* timme med det mest negativa tillåtna offsetet:
+en mild höstdag där −8 K skulle starta pumpen är en dag värd att optimera.
+
+**Excitationsveckan åldras aldrig ur träningen** (`excitation.py`,
+`training.keep_excitation`). Omträningen läser de senaste `history_days`, så
+utan detta faller veckan ur fönstret sex veckor efter att den kördes, och varje
+senare anpassning lär sig offsetförstärkningen enbart av offset som optimeraren
+själv valt — korrelerat med pris och väder. Att köra om excite var 45:e dygn
+mitt i vintern är inget rimligt krav. `hpmpc excite` skriver därför sina
+körningar till `data/excitation_runs.json` (bara cykler som faktiskt exciterade,
+inte pausade), och `dataset_from_archive` tar alltid med deras rader så länge
+arkivet har dem. Excitation som kördes innan filen fanns **backfylls en gång ur
+arkivet** — men bara så länge ingen modell finns: före första `train` håller
+regulatorn offset 0, så icke-noll offset kan bara vara experimentet; efteråt
+flyttar optimeraren också offseten och filen är enda auktoriteten. `hpmpc
+archive` listar körningarna. Obs: `hpmpc train --days N` klipper på radantal
+bakifrån och tappar en gammal körning — använd `collect --days` i stället.
 
 **Historiken kopieras ur recordern varje styrcykel** (`archive.py`). Recordern är
 ett rullande fönster som rensas av ett annat system; identifieringen vill ha sex
@@ -223,7 +350,7 @@ terminalvärderingen fixar, fast i utvärderingen.
 
 ## Verifierat kontra antaget
 
-**Verifierat** (364 tester, syntetiskt hus med känd sanning):
+**Verifierat** (428 tester, syntetiskt hus med känd sanning):
 - Identifieringen återfinner värmekurva (lutning 0,3495 mot 0,35, R² 0,997) och
   husparametrar (UA +3 %, Ci +4 %, `k_wind` +3 %, plattans tidskonstant inom 8 %).
   `hpmpc train` skriver ut vad den lärt sig om sol och vind som area och
@@ -265,6 +392,15 @@ terminalvärderingen fixar, fast i utvärderingen.
   filen, nodens egen `calibration:` för J1-givaren, och `r25`/`beta` i mallen
   `Utegivare mAlresistans` (den sista som betaanpassning, 0,5 K sämre — den är
   inte i styrvägen).
+- **Värmekurvan är avläst på pumpens display** (2026-09): 45 °C framledning vid
+  −20 °C ute, 25 °C vid +11 °C. Ger `curve_slope: 0.645`, `curve_offset: 19.19`
+  vid `curve_ref: 20`. **`supply_max` höjdes därför till 45** — den ska följa
+  pumpens eget tak, inte golvslingans dimensionering: med modellen klippt på 40
+  medan pumpen fortsätter uppåt underskattas levererad värme i precis de
+  kallaste timmarna. 45 °C är högt för en platta, men huset är stort och pumpen
+  når dit i praktiken aldrig; den finns för de absolut kallaste dygnen.
+  Anpassningen kan ändå inte förbättra kurvan här: `fit_heating_curve` kräver
+  `entities.supply_temp`, som är tom.
 - **Hela styrkedjan går live** (2026-09): hpmpc → `input_number.varmepump_fiktiv_utetemp`
   → automationen `MPC to sensor emulator` → `number.varmepump_proxy_simulerad_utetemperatur`
   → noden → digipotarna → pumpen. Därmed faller två antaganden: **Docker-imagen är
@@ -275,7 +411,11 @@ terminalvärderingen fixar, fast i utvärderingen.
   Sista felet i kedjan var att `MPC to sensor emulator` bara triggade på att den
   fiktiva temperaturen *ändrades* — att slå på `varmepump_mpc_aktiv` gjorde
   därför ingenting alls förrän nästa cykel. Den triggar nu även på brytaren.
-  (`hpmpc check` i sin helhet är fortfarande inte avrapporterad.)
+- **`hpmpc providers`, `hpmpc check` och `collecting`-läget är körda live**
+  (2026-09). Därmed faller det sista antagandet om utgående trafik: SMHI och
+  elprisetjustnu svarar från NUC:en. Alla entiteter svarar, `hpmpc plan` säger
+  `[collecting]`, och cykelräknaren går. Kvar i drift innan den styr: en vecka
+  `hpmpc excite` när det blivit stadigt kallt, sedan `collect`/`train`/`power`.
 
 - **Kamintermen är mätt mot syntetiskt hus med känd sanning** (14 dygn, två
   brasor per dygn, `k_stove` 800 W/K = 4 kW vid brasans topp). Döljs kaminen för
@@ -289,12 +429,9 @@ terminalvärderingen fixar, fast i utvärderingen.
 **Antaget / ej verifierat:**
 - **Prestandakartans siffror är förankrade i publicerade mätpunkter för
   maskinklassen, inte hämtade ur Daikins databook** — den gick inte att nå från
-  utvecklingsmiljön. Formen är rimlig, nivån kalibreras mot elmätaren. Byt
-  tabellen när databooken finns.
-- **SMHI och elprisetjustnu har aldrig anropats live** — utgående trafik dit var
-  blockerad av sessionens policy. Parsning, cachning, felhantering och
-  reservvägar är testade mot mockade svar. `hpmpc providers` är första
-  kommandot att köra på riktig maskin.
+  utvecklingsmiljön. **Sedan 2026-10 är nivån bärande**: elmätaren sätter husets
+  storlek med kartans COP som facit (`power.calibrates: building`), så ett fel
+  i kartans nivå blir ett lika stort fel i UA. Byt tabellen när databooken finns.
 - **Delarens siffror är räknade, inte uppmätta.** 20 kΩ mot en Daikin 20 kΩ-kurva
   ger 0,18–1,83 V över −30…+30 °C. Kontrollera med kända motstånd över J1 vid
   idrifttagning: 20 kΩ → 1,650 V, 68 kΩ → 0,750 V, 200 kΩ → 0,300 V.
@@ -457,7 +594,9 @@ terminalvärderingen fixar, fast i utvärderingen.
   "det blev varmare ute". Excitationen bryter också kopplingen mellan
   värmepumpens effekt och klockan i effektuppdelningen.
 - **`hpmpc power` visar skalan *relativt* den som redan sitter i modellen.** Ett
-  värde nära 1,0 betyder att förra kalibreringen fortfarande stämmer.
+  värde nära 1,0 betyder att förra kalibreringen fortfarande stämmer. Med
+  `calibrates: building` heter raden `building heat scale` och är mätarens syn
+  på husets värmeförlust relativt modellens.
 - **Ett jämnt fel i NTC-tabellen absorberas av kurvanpassningen.**
   `fit_heating_curve` regresserar uppmätt framledning mot *kommenderad* offset,
   så konstant fel och skalfel hamnar i `curve_offset`/`curve_slope` och
@@ -499,14 +638,17 @@ terminalvärderingen fixar, fast i utvärderingen.
 - **Arkivet och recordern kan inte hamna i konflikt.** Raderas arkivet fyller det
   sig från det recordern har kvar; kortas recorderns retention behåller arkivet
   det redan kopierat. `training.archive: false` går direkt mot recordern som förut.
-- **Utetemperaturen kommer från `weather.smhi_home` via Home Assistant**, inte
-  direkt-SMHI, eftersom `entities.outdoor_temp` är tom här. Direktvägen gav 404
-  hos användaren (se ovan); väderentitetens *attribut* (`temperature`,
-  `wind_speed`, `humidity`) läses och används på samma sätt en riktig givare
-  skulle vara — dess *tillstånd* är bara ett väderomdöme (`cloudy`) och bär
-  ingen siffra. En givare vid huset är bättre om den tillkommer — den mäter
-  luften byggnaden faktiskt förlorar värme till — och vinner automatiskt så
-  fort entiteten fylls i.
+- **Utetemperaturen kommer nu från givaren på J1**
+  (`entities.outdoor_temp: sensor.varmepump_proxy_verklig_utetemperatur`, satt
+  2026-09). Den vinner över väderentiteten i `resolve_outdoor`, eftersom den
+  mäter luften byggnaden faktiskt förlorar värme till i stället för en 2,5 km
+  rutpunkt. `weather.smhi_home` bär fortfarande *prognosen* och är reservväg
+  för nu-värdet: dess *attribut* (`temperature`, `wind_speed`, `humidity`) läses
+  som en givare skulle, medan dess *tillstånd* bara är ett väderomdöme
+  (`cloudy`) utan siffra. Direkt-SMHI gav 404 hos användaren, se ovan.
+  **Räkna med ett steg i historiken** vid bytesdatumet: arkivet före det bär
+  SMHI-härledd temperatur, efter det termistorn. Två olika mätningar, inte en
+  bättre kalibrering av samma.
 - **Automatisk omträning finns bara i `hpmpc serve`, inte i `hpmpc run`.**
   `maybe_retrain()` (i `api.py`) kör var `training.retrain_days` (30 som
   standard) vid `retrain_hour` (natten), bygger dataset ur arkivet och byter
@@ -553,9 +695,9 @@ terminalvärderingen fixar, fast i utvärderingen.
   `Heat pump perceived outdoor temperature` är bokstavligen
   `{{ states('input_number.varmepump_fiktiv_utetemp') }}`. Att de följs åt är
   alltså ingen bekräftelse på något. `Utegivare verklig` skiljer sig däremot
-  legitimt: med tom `entities.outdoor_temp` räknar hpmpc på SMHI:s rutpunkt medan
-  den sensorn är termistorn på huset. Två olika mätningar, inte ett fel — de
-  konvergerar den dag `entities.outdoor_temp` pekar på noden.
+  legitimt så länge de kommer från olika mätningar. Sedan
+  `entities.outdoor_temp` pekar på noden (2026-09) läser båda termistorn och ska
+  följas åt; gör de inte det är det ett verkligt fel, inte två källor.
 - **Nodens `Simulerad utetemperatur` visar −25 när den är osatt.** Det är
   `min_value`, och Home Assistant ritar ett reglage utan tillstånd i sitt
   vänstra ändläge. Det ser ut som ett kommenderat värde men är ingenting — läs
@@ -569,8 +711,85 @@ terminalvärderingen fixar, fast i utvärderingen.
   har någon annan givare. Följden är att `input_number.varmepump_fiktiv_utetemp`
   aldrig ändras, automationen aldrig triggas, och noden ligger kvar på
   bootvärdet. Med tom `entities.outdoor_temp` hänger `t_outdoor` på SMHI eller
-  väderentiteten, alltså på just den vägen som aldrig anropats live — så
-  `hpmpc providers` och `docker compose logs hpmpc` är första två stegen.
+  väderentiteten. Numera pekar `entities.outdoor_temp` på noden, så vägen är
+  kort — men `hpmpc providers` och `docker compose logs hpmpc` är fortfarande
+  de två första stegen när ingenting skrivs.
+- **`dry_run: true` i flera dygn är farligt just här.** `_write` returnerar
+  innan den skriver något alls, automationen `MPC to sensor emulator` triggar
+  bara på *ändring* av `input_number.varmepump_fiktiv_utetemp`, och noden håller
+  sitt värde i fyra timmar innan den går till `FAILSAFE_WIPER` ≈ 0 °C. Med
+  kurvan 0,645/19,19 blir det 32 °C framledning — pumpen eldar medan loggen
+  säger "dry run". Samma mekanism som gör att containern inte får stoppas över
+  sommaren. **Provkör med `control.offset_min/offset_max` klampade mot 0
+  i stället**: cyklerna skriver vidare, noden hålls matad, och regulatorn har
+  ingen befogenhet. `_write` varnar numera när `dry_run` är på samtidigt som
+  någon av utgångarna fake_temperature/resistance/wiper är konfigurerad.
+  `hpmpc plan` är fortfarande helt ofarligt — den är en separat process som
+  räknar en gång och skriver aldrig.
+  **Planens not sa förr "dry run - nothing written"** även när `dry_run` var av
+  — `plan` skriver aldrig — och användaren frågade 2026-11 om de skulle köra
+  `hpmpc set control.dry_run 0`. Nu står det "preview only" för `plan` och
+  "control.dry_run is on" bara när inställningen verkligen är på.
+- **`hpmpc serve` loggade inte läget.** `_print_cycle` körs bara i `hpmpc run`,
+  och containern kör `serve` — så `docker compose logs` visade skrivraden från
+  `_write` men aldrig om beslutet kom från optimeraren, `collecting`, en
+  givarreserv eller `standby`. Ordet "collecting" fanns bara i startvarningen.
+  `ControllerService._log_cycle` skriver nu en rad per cykel med läge, offset
+  och de två temperaturerna. `standby` behövde det mest: utan raden ser läget
+  exakt ut som tystnad, och "är det trasigt eller är det sommar?" ska inte
+  besvaras genom att läsa källkoden.
+- **HA-hjälparna vinner över `config.yaml`.** `refresh_settings` bygger
+  konfigurationen i ordningen fil → lägesprofil → mappade hjälpentiteter, så ett
+  `hpmpc set control.offset_min -0.5` skrivs tyst över av
+  `input_number.offset_min` vid nästa cykel. Verifierat: filen sa −0,5, HA sa
+  −6,0, effektivt blev −6,0. Undantaget är `MODE_OWNED` medan ett icke-default
+  läge är aktivt. Det gäller allt i `runtime_overrides:` — börvärde, komfortband,
+  offsetgränser, effekttak, **och `control.dry_run`** via
+  `input_boolean.hpmpc_dry_run`. `hpmpc settings` sista kolumn säger vilka fält
+  det gäller; står det en entitet där är filens värde inte det som körs.
+  (`hpmpc settings` visar dessutom filens värde, inte det effektiva.)
+- **`MPC offset sanity check` släcker `varmepump_mpc_aktiv` och tänder den
+  aldrig igen.** Automationen i paketet slår av MPC om offseten passerar +25
+  eller −10, nollställer offseten och låter resistorn drivas vidare med
+  sanningen. Det är rätt policy, men den *låser* — systemet ser ut att sluta
+  reagera tills någon slår på brytaren för hand. Semesterläget behöver
+  legitimt ~20 K, så höj gränsen om det ska användas.
+- **En stabil innetemperatur är inte en död givare.** Upptäckt live under första
+  excitationsförsöket 2026-10: `sensor.hall_temperature_2` stod på samma värde i
+  fyra timmar, och varje cykel sa `t_indoor is stale (225 min > 45 min)` →
+  excitationen pausade sig själv till offset 0. Home Assistant flyttar inte
+  `last_updated` när en givare upprepar ett värde, så en platta som håller
+  temperaturen — alltså ett hus som fungerar — såg död ut. Tre ändringar:
+  åldern tas från **`last_reported`** när HA skickar den (2024.3+; flyttas vid
+  varje rapport, ändrad eller ej), innetemperaturen har en **egen gräns**
+  `max_indoor_age_minutes: 1440` medan utetemperaturen behåller 45 min, och
+  `hpmpc check` skriver vilken klocka åldern kommer från. Den riktiga
+  dödgivardetekteringen är integrationens egen: en Zigbee- eller ESPHome-enhet
+  som försvinner blir `unavailable` → `None` → reservläge direkt. Tidsgränsen
+  är bara reservskyddet för en integration utan vare sig hjärtslag eller
+  tillgänglighetsspårning. **Varför det inte syntes förut:** `check_readings`
+  nås aldrig i `collecting` — `step()` går till `_collect_only` innan dess —
+  så felet var osynligt tills excite, som kör kontrollen utan modell.
+- **Två sessioner arbetade parallellt från `ff6361a`, och `main` hade bara den
+  ena.** Kaminarbetet låg på `claude/ml-heat-pump-controller-0j4ngw`, säsongs-,
+  excite- och givarfixarna på `main`. Hopslaget 2026-10. Faran var konkret: med
+  `entities.stove_temp` i `config.yaml` och en image byggd från `main` hade
+  containern vägrat starta, eftersom okända nycklar är fel. **Kolla
+  `git log origin/main..origin/<annan branch>` innan något säljs in som "pushat
+  till main"** — en ny container klonar inte nödvändigtvis det `main` som körs.
+- **En givare som läggs till i efterhand fick ingen historik.** `refresh`
+  frågar bara efter det som hänt sedan senaste lagrade raden, så en entitet som
+  konfigureras när arkivet redan går kopierades från och med nu — trots att
+  recordern fortfarande höll ~10 dygn av den. Upptäckt när kamingivaren skulle
+  in i slutet av excite-veckan: veckans brasor hade arkiverats som "ingen eld"
+  och dödbandet hade inte kunnat mätas på den. Arkivet för nu en lista över
+  följda entiteter (`history/entities.json`) och hämtar bakåt
+  `history_days` för de nya, en gång. Frågan är "ny i konfigurationen", inte
+  "saknar data" — den senare slår fel åt båda håll: cykelns egen hämtning har
+  redan dragit in den nya givarens två senaste timmar när någon hinner titta,
+  och många entiteter som funnits hela tiden har helt enkelt inget i recordern.
+  Av samma skäl avgörs det *före* cykelns hämtning. Arkiv utan listan (äldre
+  kod) gissar ur vilka kolumner som har data i de två senaste månadsfilerna.
 - **`git pull` uppdaterar inte containern.** Containern kör koden som bakades in
   i imagen; en pull rör bara källan på värden. Symptomet är förvirrande: ett
   `hpmpc set` svarar *"'heat_pump.perceived_min_c' is not changeable at runtime"*
@@ -584,6 +803,50 @@ terminalvärderingen fixar, fast i utvärderingen.
   som ser förvillande lika ut: med den gamla typiska Daikintabellen och den
   uppmätta potentiometern blir räckvidden −19,83 → skrivs "−19.8", och den
   ändras först när `ntc:`-tabellen byts (då till −20,4).
+- **`excite_step` måste lösa ut utetemperaturen precis som `step`.** Den läste
+  förr bara `read_sensors()`, så med tom `entities.outdoor_temp` — exempel-
+  konfigurationens normalfall — blev `t_outdoor` None, `check_readings` sa
+  *"t_outdoor is unavailable"*, excitationen pausade sig själv till
+  `fallback_offset`, `_write` returnerade tidigt och skrev **ingenting**, och
+  `_archive_resolved` kallades aldrig. En hel excitationsvecka gav alltså noll
+  excitation *och* ett hål i arkivet i precis den vecka anpassningen behöver
+  mest. Båda vägarna delar nu `_sense()`.
+- **Temperaturerna ensamma kan inte bestämma UA i watt.** Skalas alla
+  extensiva parametrar (Ci, Cm, Him, Hie, Hme, A_sol, Q_int, Hfloor, k_stove)
+  med samma faktor blir varje innetemperaturkurva identisk — uppmätt till
+  1e-14 °C mellan UA 65 och 585 med obegränsad kapacitet. Det enda i
+  temperaturdatan som förankrar nivån är att pumpen slår i sitt kapacitetstak,
+  och det gör en 16 kW-pump bara de allra kallaste dygnen; resten bestäms av
+  priorn och regulariseringen. Det syntetiska testets "UA +3 %" bär just på
+  kapacitetstaket i januarivädret. Elmätaren är den riktiga ankaret, men den
+  är perfekt sammanblandad med verkningsgradsskalan: ett termiskt skalfel k ger
+  `efficiency_scale` ≈ k (uppmätt 0,60 → 0,583, 0,45 → 0,437; UA/skala
+  återger sanna 195 inom 3 %). Huset 2026-10-18: UA 67 och skalan i golvet
+  0,30 → UA **minst** ~220 W/K om Daikins COP-karta stämmer. Temperatur-
+  prediktionerna påverkas inte av skalfelet; det gör kronorna, avvägningen
+  komfort/kostnad, effekttaket och var kapacitet/elpatron tar slut. Åtgärdat
+  med `power.calibrates: building`, se besluten ovan. Kräver att
+  `power.source` inte är `none` — användaren satte `none` när verkningsgraden
+  fastnade på 0,30, och måste sätta tillbaka `auto`.
+- **Börvärdeshjälparen nådde aldrig optimeraren i normalläget** (hittat
+  2026-10-22). `refresh_settings` gjorde rätt — fil → profil → hjälpare, och
+  loggen sa "setpoint 21.5, comfort 20.8–22.5" — men `build_schedule` anropade
+  `apply_mode` *igen* på den redan lösta konfigurationen, och profilen
+  `normal: setpoint: 21.0` lade tillbaka 21,0 ovanpå hjälparens 21,5.
+  Optimeraren planerade alltså mot 20,3–22,0 och lät huset ligga 0,3–0,5 K
+  under bandet på instrumentpanelen, med positiv offset. Syntes först i
+  "tänk om"-tabellen: komfortstraff 0 vid en lägsta temperatur på 20,19.
+  Det gamla testet kontrollerade `controller.cfg`, inte schemat optimeraren
+  får — nu skickar kontrollern in `active=self.cfg.control` och
+  `normal=self.default_control` (standardläget löst med hjälparna, som en
+  hemkomst blandar tillbaka mot), och testerna läser `report["comfort"]`.
+  `hpmpc mode` visade samma fel och löser nu också med hjälparna.
+  **`hpmpc plan` skriver numera en "tänk om"-tabell** (fast offset min, −1, 0,
+  +1, max: medel/min/slut inne, kWh, kronor, komfortstraff) — första stället
+  att titta när planen ser konstig ut. Modellparametrarna 2026-10-22: Ci 17 808,
+  Cm 4 532, Him 5 922, Hie 44, Hme 322, Hfloor 444, Q_int 1 979 W, A_sol 4,4 —
+  i praktiken en nod med 22 kWh/K och 61 h tidskonstant. Följd: −3 K i 36 h
+  lyfter slutet bara ~0,55 K, så ett höjt börvärde tar ett par dygn.
 - **Kalibrera mot pumpens display, inte mot givaren.** Ett par avlästa som
   "jag skickade R, pumpen säger T" innefattar kabelresistans, kontakt och
   pumpens egen linjärisering. En bänkmätning av termistorn missar allt det.
@@ -643,14 +906,61 @@ hpmpc run / hpmpc serve
 
 ## Var vi står
 
-**Systemet är i drift.** Kortet byggt, potentiometern uppmätt, NTC-kurvan
-kalibrerad mot pumpens display, och hela kedjan hpmpc → HA → ESP32 → pumpen
-går igenom. Kontrollern samlar historik i läget `collecting` med offset 0 —
-pumpen kör sin egen kurva omodifierad tills en modell finns.
+**Systemet styr, med klampad offset (2026-10-18).** Excitationsveckan är
+körd, modellen tränad och installerad: validering 0,246 °C (persistens 0,412),
+48 h 0,194 °C, UA 366 W/K satt av elmätaren (×5,25 ±14 %), laddaren 11,3 kW,
+residual accepterad. Användarens `config.yaml` har `power.source: auto`,
+`training.ignore_before: "2026-09-19"` och `training.stove_deadband_k` satt.
+Offseten är klampad till **±0,5 K i Home Assistant** (`input_number.offset_min`
+/ `offset_max`), och `hpmpc plan` väljer +0,5 genom hela horisonten — huset
+glider inom komfortbandet, vilket är det billigaste.
 
-Kvar innan den styr på riktigt: `hpmpc providers` (aldrig körd live),
-`hpmpc curve` med pumpens två kurvpunkter, en vecka `hpmpc excite`, sedan
-`collect && train && power`, och några dygn `dry_run: true`.
+**2026-10-22:** användaren höjde börvärdet till 21,5 och vidgade offseten till
+±3 — och upptäckte via `hpmpc plan` att optimeraren ignorerade börvärdet (se
+fällan "Börvärdeshjälparen nådde aldrig optimeraren"). Rättat och pushat;
+tills den nya imagen körs rådde jag `offset_max: 0` i HA som skydd.
+Efter bygget (samma kväll) planerar den rätt: −3 K i ~20 h, komfortstraffet
+syns i "tänk om"-tabellen, huset når bandets botten 20,8 efter ett dygn.
+**Förväntan att förklara för användaren:** inom bandet finns ingen dragning
+mot börvärdet utöver den svaga terminaltermen, så huset hamnar nära
+*underkanten* (21,5 − 0,7 = 20,8), inte på 21,5. Vill man ligga nära
+börvärdet ska `input_number.komfort_under` minskas (t.ex. 0,3) — det kostar
+lastförskjutning, eftersom bandet är just det utrymme optimeraren flyttar
+värme inom. Föreslog också att `offset_min` kan gå till −6 nu: −3 ligger i
+gränsen i ett dygn, alltså en aktiv begränsning.
+
+**2026-11-03, omträning med 45 dygn efter värmestarten:** skalan höll —
+×1,00 ±9 %, dygns-R² 0,75, UA 394 W/K (mot 366) — alltså stämmer
+mätarkalibreringen fortfarande. Validering 0,313 °C mot persistens 0,399
+(förut 0,246 mot 0,412), 48 h 0,30 °C: relativt sämre, troligen för att
+huset nu hålls stilla av regulatorn och persistens därför blir svårare att
+slå; följ upp om det fortsätter. Residualen kastades. Användaren har vidgat
+offseten till −6/+4. Planen visar nu riktig prisflytt: glider (+1,9 K) i
+morgontoppen 4,2 kr, förvärmer (−3,1 K) natten därpå på 2,07 kr, och håller
+huset 20,7–21,2 nära bandets botten. "Saving vs constant offset" blev −0,9 %
+— planen betalar lite mer än den matchade konstanta offseten för att inte
+dyka under bandet; måttet räknar inte komfortstraffet. `komfort_under` är
+fortfarande obestämt.
+
+**Här står vi och väntar (från 2026-10-22):** börvärde 21,5, band 20,8–22,5,
+offset ±3 i HA (föreslaget: `offset_min` −6). Användaren återkommer om några
+dagar med `hpmpc plan`. Titta då på, i den här ordningen:
+1. Har huset nått bandet (≥ 20,8)? Annars: ligger planen fortfarande i
+   `offset_min` — då är gränsen den aktiva begränsningen.
+2. Stämmer planens `indoor` mot vad `sensor.hall_temperature_2` faktiskt
+   visade några timmar senare (inom några tiondelar)?
+3. Syns prisflytt när huset är i bandet — mer värme (negativ offset) på
+   billiga/milda timmar, glidning (positiv) på dyra? "Saving vs constant
+   offset" ska då bli några procent, inte ~0.
+4. Har användaren valt mellan "nära 21,5" (`komfort_under` ~0,3) och "spara
+   mest" (behåll 0,7)? Förklarat 2026-10-22, inget beslut än.
+5. `hpmpc power`: skalan nära ×1,0, och dygnselen mot mätaren.
+
+**Deployment:** repot har numera en `main`, och NUC:en (`/opt/hpmpc`) står på
+den. Det fanns ingen default branch alls innan — bara `claude/*` — så en
+`git pull` hämtade tyst fel kod. `main` är den branch som körs; pusha dit när
+något ska ut i drift. Containern kör koden som bakats in i imagen, så
+`git pull` ensamt ändrar ingenting: `docker compose up -d --build`.
 
 Designen är låst efter en genomgång som gav fem beslut värda att inte riva upp:
 
@@ -682,14 +992,12 @@ delaren mot kända motstånd. Först därefter pumpen.
 `resistance_ohm: 97377`, `wiper_ohm: 123`, `perceived_min_c: -19.5`, HA-paketets
 `pots = 2`, ändlägeslarmet på `510` och wipermallen på de uppmätta talen.
 `entities.pot_wiper` pekade redan rätt. Kvar i den tråden:
-- `entities.outdoor_temp` — givaren sitter på J1 sedan 2026-09, så den kan fyllas
-  i med `sensor.varmepump_proxy_verklig_utetemperatur`. **Gör det tidigt, inte
-  sent.** Bytet ger ett steg i träningsdatan mot den SMHI-härledda historiken,
-  och just nu är arkivet i princip tomt — byter man nu blir hela datasetet
-  homogent från dag ett, byter man om en månad ligger diskontinuiteten mitt i
-  det anpassningen ska läsa. Kontrollera först att nodens värde ser rimligt ut
-  mot SMHI ett dygn; det ersätter delarprovet mot kända motstånd som aldrig
-  gjordes.
+- `entities.outdoor_temp` — **gjort**, pekar på
+  `sensor.varmepump_proxy_verklig_utetemperatur`. Gjort tidigt med flit: arkivet
+  var i princip tomt, så hela datasetet blir homogent från dag ett i stället för
+  att bära en diskontinuitet mitt i. Kvar att göra i efterhand: jämför nodens
+  värde mot SMHI ett dygn — det ersätter delarprovet mot kända motstånd som
+  aldrig gjordes.
 - `control.offset_min` lämnad på −6 med flit. Räckvidden tillåter mer nu, men
   läs en vecka planer först (`docs/HARDWARE.md#sänk-inte-offsetgränserna-för-snabbt`).
 - `binary_sensor.varmepump_proxy_online` — **gjort**, automationerna
@@ -698,15 +1006,50 @@ delaren mot kända motstånd. Först därefter pumpen.
   ingen värme alls, inte för mycket. Ingenting ska stänga av värmen — pumpen har
   redan gjort det. Peka `notify.notify` mot något som faktiskt når dig.
 
-**C. Sedan den ursprungliga listan:**
-1. `hpmpc providers` — stäm av marginalkostnaden mot elfakturan.
+**C. Idrifttagningen — allt utom excitationsveckan är gjort.**
+
+1. ~~`hpmpc providers`~~ — gjort, svarar live.
 2. ~~Bestäm vilken givare som emuleras~~ — gjort: KRCS01-1-ingången.
 3. ~~`hpmpc calibrate-ntc` mot pumpens display~~ — gjort, tio punkter.
-4. `hpmpc curve` med de två kurvpunkterna från pumpens display.
-5. En vecka `hpmpc excite`.
-6. `hpmpc collect && hpmpc train && hpmpc power`.
-7. Några dygn med `dry_run: true`, läs planerna.
-8. Skarpt.
+4. ~~`hpmpc curve`~~ — gjort: −20:45 och 11:25, insatt med `supply_max: 45`.
+5. ~~Verifiera `collecting` live~~ — gjort: entiteter svarar, `plan` säger
+   `[collecting]`, cyklerna räknar.
+
+**Steg 6–9 är gjorda (2026-10).** Kvar: 10 och 11.
+
+6. ~~**Vänta tills det är stadigt kallt.**~~ `hpmpc plan` ska säga `[collecting]`
+   över hela dygnet, inte `[standby]`. Med `heat_stop_temp: 18` betyder det
+   ungefär dygnsmedel under ~12 °C. Hellre vänta två veckor än att excitera en
+   vecka där pumpen står still halva tiden.
+7. **En vecka `hpmpc excite`.** Kräver ingen historik — den läser inget dataset
+   och ingen modell — men ska ligga **före** `collect`/`train` och inom det
+   fönster `collect --days` läser. Tre villkor: `varmepump_mpc_aktiv` på,
+   styrcontainern **stoppad** (`docker compose stop hpmpc`; annars skriver två
+   processer till samma entitet var 15:e minut), och att pumpen faktiskt värmer.
+   ```bash
+   docker compose run -d --name hpmpc-excite hpmpc excite --hold-hours 6
+   ```
+   Kontrollera mitt i veckan att `input_number.varmepump_offset` verkligen
+   hoppar var sjätte timme.
+8. **Klampa offseten innan träningen** till −0,5 / +0,5. Modellen adopteras
+   inom en cykel efter `train` och styr skarpt direkt — klampningen är det som
+   gör provkörningen ofarlig. **Gör det i Home Assistant** (`input_number.offset_min`
+   / `offset_max`), inte med `hpmpc set`: hjälparna är mappade i
+   `runtime_overrides` och vinner över filen varje cykel. `hpmpc settings` visar
+   vilka fält som ägs av HA.
+9. **`hpmpc collect --days 45 && hpmpc train && hpmpc power`**, som *en*
+   `sh -c` inne i containern. Tre tal att läsa: `offset_excitation.std` väl över
+   0,5 (annars var veckan förgäves), `validation RMSE` under 0,3 °C, laddaren
+   nära 11 kW.
+10. ~~**Några dygn med klampad offset**~~ — gjort 2026-10-18 till 22.
+11. **← HÄR (från 2026-10-22).** **Vidga stegvis**, på samma ställe: ±3 är
+    satt; −6 föreslaget eftersom −3 ligger i gränsen under uppvärmningen.
+
+Säsongsväxlingen kräver sedan ingenting: stäng av **pumpen**, låt containern
+gå. Regulatorn går i `standby` när ingen offset kan producera värme, arkivet
+fortsätter fyllas, och träningen filtrerar bort sommaren själv. Att stoppa
+containern i stället är fel — noden faller till failsafe ≈ 0 °C efter fyra
+timmar och pumpen får order om att värma.
 
 ## Möjliga vidareutvecklingar
 

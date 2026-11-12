@@ -92,3 +92,33 @@ def test_metrics_are_prometheus_shaped(app_client):
         name, value = line.split()
         assert name.startswith("hpmpc_")
         float(value)
+
+
+def test_the_service_logs_the_mode_once_per_cycle(app_client, caplog):
+    """'docker compose logs' has to say what the controller is doing.
+
+    Only 'hpmpc run' printed the mode; the service wrote the outputs and
+    nothing else, so collecting, a sensor fallback and the out-of-season
+    standby were indistinguishable from each other in the log.
+    """
+    import logging
+
+    client, _ = app_client
+    service = client.app.state.service
+    with caplog.at_level(logging.INFO, logger="hpmpc.api"):
+        service.step()
+    assert "Cycle 1: mode mpc" in caplog.text
+    assert "offset" in caplog.text
+    assert "indoor 21.0 C" in caplog.text
+
+
+def test_a_plan_request_is_not_counted_or_logged_as_a_cycle(app_client, caplog):
+    import logging
+
+    client, _ = app_client
+    service = client.app.state.service
+    before = service.cycles
+    with caplog.at_level(logging.INFO, logger="hpmpc.api"):
+        service.step(apply=False)
+    assert service.cycles == before
+    assert "Cycle" not in caplog.text

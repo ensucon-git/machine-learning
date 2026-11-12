@@ -25,7 +25,7 @@ from .controller import Controller
 from .archive import build_training_frame
 from .dataset import save_dataset
 from .ha import HomeAssistant, HomeAssistantError
-from .train import load_model, load_model_if_trained, train
+from .train import load_model_if_trained, train
 
 log = logging.getLogger(__name__)
 
@@ -60,18 +60,15 @@ class ControllerService:
         self.controller = Controller(self.cfg, params, self.ha, residual)
         self.controller.reload_config(self.config_path)
 
-    def adopt_new_model(self) -> bool:
-        """Pick up a model trained while we were running, without a restart."""
-        if self.controller.trained:
-            return False
-        try:
-            working, params, residual, metadata = load_model(self.cfg)
-        except (OSError, ValueError, KeyError):
-            return False
+    def adopt_new_model(self, settle_seconds: float = 5.0) -> bool:
+        """Pick up a model trained while we were running - the first one, and
+        every one after it - without a restart."""
         with self.lock:
-            self.cfg = working
+            metadata = self.controller.pick_up_new_model(self.config_path, settle_seconds)
+            if metadata is None:
+                return False
+            self.cfg = self.controller.cfg
             self.model_metadata = metadata
-            self.controller.adopt_model(params, working, residual)
         return True
 
     def step(self, apply: bool | None = None) -> dict[str, Any]:
@@ -88,7 +85,33 @@ class ControllerService:
             if apply is not False:
                 self.last_report = report
                 self.cycles += 1
+                self._log_cycle(report)
             return report
+
+    def _log_cycle(self, report: dict[str, Any]) -> None:
+        """One line per cycle saying which mode the controller is in.
+
+        'hpmpc run' prints this to stdout; the service had no equivalent, so
+        'docker compose logs' showed the writes but never what decided them -
+        optimiser, collecting mode, a sensor fallback, or the out-of-season
+        standby. Standby is the one that needs it most: it looks exactly like
+        silence otherwise, and "is it broken or is it summer?" is not a
+        question anyone should have to answer by reading the source.
+        """
+        readings = report.get("readings", {})
+        mpc = report.get("mpc") or {}
+        parts = [f"mode {report.get('mode', '?')}", f"offset {report.get('offset', 0.0):+.2f} K"]
+        for label, key, unit in (("indoor", "t_indoor", "C"), ("outdoor", "t_outdoor", "C")):
+            value = readings.get(key)
+            if value is not None:
+                parts.append(f"{label} {float(value):.1f} {unit}")
+        if mpc.get("horizon_cost_sek") is not None:
+            parts.append(f"horizon {mpc['horizon_cost_sek']} SEK")
+        if not report.get("applied"):
+            parts.append("NOT written")
+        log.info("Cycle %d: %s", self.cycles, ", ".join(parts))
+        for problem in report.get("problems", []):
+            log.warning("  problem: %s", problem)
 
     def model_age_days(self) -> float | None:
         try:
@@ -116,23 +139,34 @@ class ControllerService:
             return
         log.info("Model is %.0f days old; retraining", age)
         try:
+            # Trained from the file, like 'hpmpc train', not from the running
+            # config: that one carries the last model's learned pump values,
+            # and an efficiency left over from an old calibration would set
+            # the scale the meter is supposed to measure.
+            train_cfg = load_config(self.config_path)
             with self.lock:
-                frame, _ = build_training_frame(self.cfg, self.ha)
-                save_dataset(frame, self.cfg.dataset_path)
-                report = train(self.cfg, frame)
-                working, params, residual, metadata = load_model(self.cfg)
-                self.cfg = working
-                self.controller.base_cfg = working
-                self.controller.cfg = working
-                self.controller.params = params
-                self.controller.residual = residual
-                self.controller.solver.params = params
-                self.model_metadata = metadata
+                frame, _ = build_training_frame(train_cfg, self.ha)
+                save_dataset(frame, train_cfg.dataset_path)
+                report = train(train_cfg, frame)
+            # The same path a manual 'hpmpc train' takes, so the two can never
+            # disagree about what a freshly trained model means.
+            self.adopt_new_model(settle_seconds=0.0)
             self.last_training = {
                 "at": datetime.now(timezone.utc).isoformat(),
                 "validation_rmse_c": report.get("thermal", {}).get("validation", {}).get("rmse_c"),
             }
-            log.info("Retrained: validation RMSE %s C", self.last_training["validation_rmse_c"])
+            if report.get("rejected"):
+                self.last_training["rejected"] = report["rejected"]
+                log.warning("Retrain rejected, staying on the model we have: %s", report["rejected"])
+            else:
+                log.info("Retrained: validation RMSE %s C", self.last_training["validation_rmse_c"])
+        except ValueError as exc:
+            # Out of season this is the normal answer, not a fault: identification
+            # refuses a dataset with no hours the pump could heat in. Keeping the
+            # model fitted on the last heating season is exactly right, and it
+            # means the summer needs nothing switched off by hand.
+            log.warning("Not retraining (%s); staying on the model we have", exc)
+            self.last_training = {"at": datetime.now(timezone.utc).isoformat(), "skipped": str(exc)}
         except Exception as exc:  # pragma: no cover - never take control down for this
             log.error("Automatic retraining failed (%s); continuing on the previous model", exc)
             self.last_training = {"at": datetime.now(timezone.utc).isoformat(), "error": str(exc)}

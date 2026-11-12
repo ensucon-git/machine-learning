@@ -65,11 +65,22 @@ def test_missing_indoor_sensor_falls_back(controller, cfg, fake_ha):
     assert any("unavailable" in p for p in report["problems"])
 
 
-def test_stale_data_falls_back(controller, cfg, fake_ha):
-    fake_ha.set("sensor.indoor", 21.0, age_minutes=cfg.control.max_data_age_minutes + 10)
+def test_stale_outdoor_data_falls_back(controller, cfg, fake_ha):
+    fake_ha.set("sensor.outdoor", -5.0, age_minutes=cfg.control.max_data_age_minutes + 10)
     report = controller.step(now=fake_ha.now)
     assert report["mode"] == "fallback"
-    assert any("stale" in p for p in report["problems"])
+    assert any("t_outdoor is stale" in p for p in report["problems"])
+
+
+def test_indoor_data_silent_beyond_its_own_limit_falls_back(controller, cfg, fake_ha):
+    # This used to fire at the outdoor limit, so an indoor sensor repeating one
+    # value for an hour - a house holding steady - sent the controller to its
+    # fallback. Indoor has its own, much longer, limit now; past it, the
+    # fallback still applies.
+    fake_ha.set("sensor.indoor", 21.0, age_minutes=cfg.control.max_indoor_age_minutes + 10)
+    report = controller.step(now=fake_ha.now)
+    assert report["mode"] == "fallback"
+    assert any("t_indoor is stale" in p for p in report["problems"])
 
 
 def test_implausible_reading_falls_back(controller, fake_ha):
@@ -460,3 +471,264 @@ def test_the_untrained_message_names_the_two_commands(cfg):
     assert "hpmpc train" in str(excinfo.value)
     # The tolerant loader turns the same situation into a state.
     assert load_model_if_trained(cfg)[1] is None
+
+
+# --------------------------------------------------------------- seasons
+
+def _warm(fake_ha, degrees: float) -> None:
+    """Put the whole forecast, and the sensor, well into the summer."""
+    fake_ha.set("sensor.outdoor", degrees)
+    hourly = fake_ha.weather_forecast("weather.home")
+    for row in hourly:
+        row["temperature"] = degrees
+    fake_ha.weather_forecast = lambda entity_id, forecast_type="hourly": hourly
+
+
+def test_no_offset_can_heat_means_standby_not_a_decision(controller, cfg, fake_ha):
+    # 25 C out with offset_min -8 leaves the pump at 17 C perceived at best,
+    # which is its heat stop: every schedule produces exactly no heat.
+    _warm(fake_ha, 25.0)
+    report = controller.step(now=fake_ha.now)
+    assert report["mode"] == "standby"
+    assert report["offset"] == pytest.approx(cfg.control.fallback_offset)
+    assert "mpc" not in report
+    # Standby still writes: the emulator is the pump's only sensor, so it has
+    # to keep seeing the truth rather than a frozen value.
+    assert dict(fake_ha.written)["number.fake_temp"] == pytest.approx(25.0)
+
+
+def test_a_mild_day_the_offset_can_still_heat_is_optimised(controller, cfg, fake_ha):
+    # 20 C out, but -8 K of offset shows the pump 12 C - below its heat stop,
+    # so there is a real decision to make and standby would be wrong.
+    _warm(fake_ha, 20.0)
+    assert controller.step(now=fake_ha.now)["mode"] == "mpc"
+
+
+def test_standby_ends_by_itself_when_it_turns_cold(controller, fake_ha):
+    _warm(fake_ha, 25.0)
+    assert controller.step(now=fake_ha.now)["mode"] == "standby"
+    _warm(fake_ha, 5.0)
+    assert controller.step(now=fake_ha.now)["mode"] == "mpc"
+
+
+def test_excitation_works_without_an_outdoor_sensor_entity(cfg, fake_ha):
+    """The deployed setup: no sensor, the weather entity carries the number.
+
+    Excitation used to read the sensors only, so with entities.outdoor_temp
+    empty it paused itself, wrote nothing for the whole week, and archived no
+    weather - losing exactly the week the fit needs most.
+    """
+    cfg.entities.outdoor_temp = ""
+    cfg.validate()
+    fake_ha.drop("sensor.outdoor")
+    fake_ha.set("weather.home", "cloudy",
+                attributes={"temperature": -5.0, "wind_speed": 3.0, "humidity": 80.0})
+
+    report = Controller(cfg, ThermalParams(), fake_ha).excite_step(now=fake_ha.now, apply=True)
+
+    assert report["mode"] == "excitation"
+    assert "problems" not in report
+    assert report["readings"]["t_outdoor"] == pytest.approx(-5.0)
+    # The written value is rounded for the entity; the offset itself is not.
+    assert dict(fake_ha.written)["number.fake_temp"] == pytest.approx(
+        -5.0 + report["offset"], abs=0.01)
+    assert "t_outdoor" in report["archive"]["recorded"]
+
+
+def test_dry_run_warns_when_the_emulator_is_the_pumps_only_sensor(controller, cfg, fake_ha):
+    """Dry run stops the writes, and the writes are what keep the node alive.
+
+    Safe where the pump has its own sensor; here it means the ESP32 holds for a
+    few hours and then drives its failsafe position, which is a fixed mild
+    outdoor temperature - so the pump heats while the log says 'dry run'.
+    """
+    cfg.control.dry_run = True
+    report = controller.step(now=fake_ha.now)
+    assert fake_ha.written == []
+    assert any("failsafe" in note for note in report["notes"])
+
+
+def test_a_plan_is_not_mistaken_for_a_dry_run(controller, cfg, fake_ha):
+    """'hpmpc plan' computes without writing on purpose, while the service
+    keeps writing every cycle; warning about a starved node there is false."""
+    report = controller.step(now=fake_ha.now, apply=False)
+    assert fake_ha.written == []
+    assert not any("failsafe" in note for note in report["notes"])
+    # Nor may it call itself a dry run: every plan said so, and the user went
+    # looking for a dry_run switch to turn off while the service wrote normally.
+    assert not any("dry run" in note for note in report["notes"])
+    assert any("preview only" in note for note in report["notes"])
+
+
+def test_a_real_dry_run_says_so(controller, cfg, fake_ha):
+    cfg.control.dry_run = True
+    report = controller.step(now=fake_ha.now)
+    assert any("control.dry_run is on" in note for note in report["notes"])
+
+
+def test_dry_run_is_quiet_when_the_pump_has_its_own_sensor(controller, cfg, fake_ha):
+    cfg.entities.fake_temperature_output = ""      # only the kelvin number, a dashboard value
+    cfg.validate()
+    report = controller.step(now=fake_ha.now, apply=False)
+    assert not any("failsafe" in note for note in report["notes"])
+
+
+def test_a_paused_excitation_says_which_reading_is_at_fault(controller, cfg, fake_ha):
+    """'sensor problem - excitation paused' on its own is not actionable.
+
+    The excitation runs for a week in the foreground of someone's terminal; if
+    it pauses itself, the reason has to be on screen next to the note, not only
+    in the report dict.
+    """
+    fake_ha.set("sensor.outdoor", -5.0, age_minutes=cfg.control.max_data_age_minutes + 10)
+    report = controller.excite_step(now=fake_ha.now, apply=False)
+    assert len(report["problems"]) == 1
+    assert report["problems"][0].startswith("t_outdoor is stale")
+    assert "> 45 min" in report["problems"][0]
+    assert any("excitation paused" in note for note in report["notes"])
+
+
+def test_the_staleness_limit_is_changeable_at_runtime(cfg):
+    from hpmpc.settings import apply as apply_settings
+
+    updated, notes = apply_settings(cfg, {"control.max_data_age_minutes": 120.0})
+    assert updated.control.max_data_age_minutes == 120.0
+    assert notes
+
+
+
+# ------------------------------------------- a steady house is not a dead sensor
+
+def test_a_steady_indoor_reading_that_still_reports_is_fresh(controller, fake_ha):
+    """The case from the field: 21.4 C for four hours, sensor fine.
+
+    Home Assistant leaves last_updated alone when a sensor repeats its value,
+    so judged on that the reading was 225 minutes old and the excitation
+    paused itself every cycle. last_reported moves on every report.
+    """
+    fake_ha.set("sensor.indoor", 21.4, age_minutes=225, reported_minutes=2)
+    assert controller.check_readings(controller.read_sensors()) == []
+
+
+def test_a_steady_indoor_reading_without_a_heartbeat_is_still_trusted(controller, fake_ha):
+    # Some integrations only ever report on change. A slab house holding one
+    # number for hours is then indistinguishable from silence - and is far more
+    # likely than a device that died without its integration noticing.
+    fake_ha.set("sensor.indoor", 21.4, age_minutes=225)
+    assert controller.check_readings(controller.read_sensors()) == []
+
+
+def test_an_indoor_reading_silent_for_more_than_a_day_is_stale(controller, cfg, fake_ha):
+    fake_ha.set("sensor.indoor", 21.4, age_minutes=cfg.control.max_indoor_age_minutes + 60)
+    problems = controller.check_readings(controller.read_sensors())
+    assert len(problems) == 1 and problems[0].startswith("t_indoor is stale")
+
+
+def test_the_outdoor_reading_keeps_its_short_limit(controller, cfg, fake_ha):
+    # It is what the pump is told, and it changes all the time - an hour of
+    # silence there is genuinely suspicious.
+    fake_ha.set("sensor.outdoor", -5.0, age_minutes=cfg.control.max_data_age_minutes + 15)
+    problems = controller.check_readings(controller.read_sensors())
+    assert len(problems) == 1 and problems[0].startswith("t_outdoor is stale")
+
+
+def test_a_steady_indoor_reading_lets_the_excitation_run(controller, cfg, fake_ha):
+    cfg.control.max_change_per_cycle = 99.0
+    fake_ha.set("sensor.indoor", 21.4, age_minutes=225)
+    report = controller.excite_step(now=fake_ha.now, apply=True)
+    assert "problems" not in report
+    assert not any("paused" in note for note in report["notes"])
+
+
+# ------------------------------------------- a retrained model replaces the old
+
+def _config_file(tmp_path, cfg):
+    from pathlib import Path
+
+    path = Path(tmp_path) / "config.yaml"
+    path.write_text(f"""
+entities:
+  indoor_temp: sensor.indoor
+  outdoor_temp: sensor.outdoor
+  price: sensor.price
+  weather: weather.home
+  offset_output: number.offset
+  fake_temperature_output: number.fake_temp
+control:
+  horizon_hours: 12
+  block_hours: 3
+  warm_start_hours: 0
+optimizer:
+  population: 32
+  elites: 6
+  iterations: 3
+  polish: false
+paths:
+  data_dir: {cfg.paths.data_dir}
+  model_dir: {cfg.paths.model_dir}
+  state_file: {cfg.paths.state_file}
+""", encoding="utf-8")
+    return path
+
+
+def _save_model(cfg, params, overrides, age_seconds):
+    import os
+    import time
+
+    from hpmpc.model.thermal import save_params
+
+    save_params(cfg.model_path, params, {"pump_overrides": overrides, "trained_at": f"-{age_seconds}s"})
+    stamp = time.time() - age_seconds
+    os.utime(cfg.model_path, (stamp, stamp))
+
+
+def _running_controller(tmp_path, cfg, fake_ha):
+    from hpmpc.config import load_config
+    from hpmpc.train import load_model
+
+    path = _config_file(tmp_path, cfg)
+    working, params, residual, _ = load_model(load_config(path))
+    return Controller(working, params, fake_ha, residual), path
+
+
+def test_a_retrained_model_is_picked_up_without_a_restart(tmp_path, cfg, fake_ha):
+    _save_model(cfg, ThermalParams(), {}, age_seconds=120)
+    controller, path = _running_controller(tmp_path, cfg, fake_ha)
+
+    retrained = ThermalParams(Hie=ThermalParams().Hie * 2)
+    _save_model(cfg, retrained, {}, age_seconds=60)
+    assert controller.pick_up_new_model(path) is not None
+    assert controller.params.Hie == pytest.approx(retrained.Hie)
+    assert controller.solver.params.Hie == pytest.approx(retrained.Hie)
+    assert controller.pick_up_new_model(path) is None          # nothing changed since
+
+
+def test_a_learned_value_the_new_model_drops_is_not_inherited(tmp_path, cfg, fake_ha):
+    """The case from the field: the efficiency fit pinned 0.30 at its bound,
+    the operator switched it off and retrained. The running service must end
+    up on the configured value, not keep the old model's 0.30."""
+    _save_model(cfg, ThermalParams(), {"efficiency_scale": 0.3}, age_seconds=120)
+    controller, path = _running_controller(tmp_path, cfg, fake_ha)
+    assert controller.cfg.heat_pump.efficiency_scale == pytest.approx(0.3)
+
+    _save_model(cfg, ThermalParams(), {}, age_seconds=60)
+    controller.pick_up_new_model(path)
+    assert controller.cfg.heat_pump.efficiency_scale == pytest.approx(1.0)
+    assert controller.base_cfg.heat_pump.efficiency_scale == pytest.approx(1.0)
+
+
+def test_a_model_still_being_written_waits_for_the_next_cycle(tmp_path, cfg, fake_ha):
+    _save_model(cfg, ThermalParams(), {}, age_seconds=120)
+    controller, path = _running_controller(tmp_path, cfg, fake_ha)
+    _save_model(cfg, ThermalParams(Hie=50.0), {}, age_seconds=0)
+    assert controller.pick_up_new_model(path) is None
+    assert controller.pick_up_new_model(path, settle_seconds=0) is not None
+
+
+def test_the_first_model_still_ends_collecting_mode(tmp_path, cfg, fake_ha):
+    path = _config_file(tmp_path, cfg)
+    controller = Controller(cfg, None, fake_ha)
+    assert controller.pick_up_new_model(path) is None
+    _save_model(cfg, ThermalParams(), {}, age_seconds=60)
+    assert controller.pick_up_new_model(path) is not None
+    assert controller.trained

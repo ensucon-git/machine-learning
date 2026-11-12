@@ -70,6 +70,17 @@ MODE_OWNED = {
 }
 
 
+def _model_stamp(cfg: Config) -> float | None:
+    """When the model on disk last changed - both files, since they are written apart."""
+    stamps = []
+    for path in (cfg.model_path, cfg.residual_path):
+        try:
+            stamps.append(Path(path).stat().st_mtime)
+        except OSError:
+            continue
+    return max(stamps) if Path(cfg.model_path).exists() and stamps else None
+
+
 @dataclass
 class ControllerState:
     """Everything that must survive a restart."""
@@ -127,7 +138,9 @@ class Controller:
         # reading and fills the archive - it just does not optimise.
         self.solver = MpcSolver(cfg, params) if params is not None else None
         self._config_mtime: float | None = None
+        self._model_stamp: float | None = _model_stamp(cfg) if params is not None else None
         self.mode = cfg.modes.default
+        self.default_control = apply_mode(cfg, cfg.modes.default).control
         slab = (
             float(steady_state_mass_temp(params, cfg.control.setpoint, 0.0))
             if params is not None
@@ -154,6 +167,45 @@ class Controller:
         self.state.warm_started = False
         log.info("Model adopted - switching from collecting to control")
 
+    def pick_up_new_model(self, config_path: str | Path,
+                          settle_seconds: float = 5.0) -> dict[str, Any] | None:
+        """Switch to a model that appeared or changed on disk. Returns its metadata.
+
+        'hpmpc train' writes the model from a separate process, so a running
+        service has to notice. It used to only notice the *first* model, which
+        meant every manual retrain needed a restart to take effect - and until
+        then the service kept steering on the model the operator had just
+        decided to replace.
+
+        The configuration is re-read from the file rather than taken from the
+        running one, because the running one already carries the previous
+        model's learned pump settings. A new model that no longer overrides one
+        of them - an efficiency fit that was switched off - would otherwise
+        inherit the old value silently.
+
+        ``settle_seconds`` skips a model written moments ago: the thermal
+        parameters and the residual model are two files, and a cycle that lands
+        between them should wait for the next one rather than adopt half.
+        """
+        stamp = _model_stamp(self.base_cfg)
+        if stamp is None or stamp == self._model_stamp:
+            return None
+        if settle_seconds and datetime.now(timezone.utc).timestamp() - stamp < settle_seconds:
+            return None
+        from .train import load_model
+
+        try:
+            working, params, residual, metadata = load_model(load_config(config_path))
+        except (OSError, ValueError, KeyError) as exc:
+            log.warning("A new model is on disk but could not be loaded (%s); keeping the current one", exc)
+            return None
+        replacing = self.trained
+        self._model_stamp = stamp
+        self.adopt_model(params, working, residual)
+        if replacing:
+            log.info("Switched to the model trained at %s", metadata.get("trained_at", "?"))
+        return metadata
+
     def refresh_settings(self) -> list[str]:
         """Re-derive the active configuration from the file, the mode and the helpers.
 
@@ -172,6 +224,10 @@ class Controller:
         candidate = apply_mode(base, mode)
 
         values = read_from_home_assistant(base, self.ha)
+        # What the default mode resolves to with these helpers - the band a
+        # return time blends back towards. Kept beside the active one so the
+        # comfort schedule never has to re-derive either from a profile.
+        self.default_control = apply_settings(apply_mode(base, base.modes.default), values)[0].control
         if mode != base.modes.default:
             ignored = sorted(set(values) & MODE_OWNED)
             if ignored:
@@ -235,6 +291,7 @@ class Controller:
             self.solver.cfg = working
             self.solver.pump = self.pump
             self.solver.params = params
+        self._model_stamp = _model_stamp(working) if params is not None else None
         log.info("Reloaded %s", file_path)
         return True
 
@@ -298,9 +355,18 @@ class Controller:
         return None, "unavailable"
 
     def check_readings(self, readings: dict[str, Any]) -> list[str]:
+        # Separate limits, because the two signals fail differently. The
+        # outdoor value is what the pump is told and changes all the time, so
+        # silence there is suspicious within the hour. The indoor value over a
+        # slab can sit on one number for a day in a house that is doing exactly
+        # what it should; a dead indoor device is caught by its integration
+        # going unavailable, long before any age limit would notice.
+        control = self.cfg.control
         problems: list[str] = []
-        max_age = self.cfg.control.max_data_age_minutes
-        for name, bounds in (("t_indoor", SANE_INDOOR), ("t_outdoor", SANE_OUTDOOR)):
+        for name, bounds, max_age in (
+            ("t_indoor", SANE_INDOOR, control.max_indoor_age_minutes),
+            ("t_outdoor", SANE_OUTDOOR, control.max_data_age_minutes),
+        ):
             v = readings.get(name)
             if v is None:
                 problems.append(f"{name} is unavailable")
@@ -715,21 +781,19 @@ class Controller:
         if recorded:
             report.setdefault("archive", {})["recorded"] = recorded
 
-    def step(self, now: datetime | None = None, apply: bool | None = None) -> dict[str, Any]:
-        now = now or datetime.now(timezone.utc)
-        apply = (not self.cfg.control.dry_run) if apply is None else apply
-        report: dict[str, Any] = {"timestamp": now.isoformat(), "applied": False, "notes": []}
-        self.archive_cycle(report, now)
+    def _sense(self, now: datetime, report: dict[str, Any]) -> tuple[dict[str, Any], pd.DataFrame | None]:
+        """Read the sensors, resolve the outdoor temperature, archive the result.
 
-        setting_notes = self.refresh_settings()
-        if setting_notes:
-            report["settings"] = setting_notes
-
+        Shared by the control loop and the excitation experiment. The forecast
+        comes first: without an outdoor sensor it is also where the current
+        outdoor temperature comes from, and the offset means nothing until we
+        know what it is being added to. Excitation needs exactly the same
+        resolution - it writes "outdoor + offset" like any other cycle, and the
+        week it runs is the week the fit cares about most, so the weather has to
+        reach the archive too.
+        """
         readings = self.read_sensors()
 
-        # The forecast comes first: without an outdoor sensor it is also where
-        # the current outdoor temperature comes from, and the offset means
-        # nothing until we know what it is being added to.
         forecast: pd.DataFrame | None = None
         sources: dict[str, Any] = {}
         try:
@@ -747,6 +811,20 @@ class Controller:
 
         report["readings"] = {k: v for k, v in readings.items() if v is not None}
         self._archive_resolved(now, readings, forecast, report)
+        return readings, forecast
+
+    def step(self, now: datetime | None = None, apply: bool | None = None) -> dict[str, Any]:
+        now = now or datetime.now(timezone.utc)
+        apply = (not self.cfg.control.dry_run) if apply is None else apply
+        report: dict[str, Any] = {"timestamp": now.isoformat(), "applied": False, "notes": []}
+        self.archive_cycle(report, now)
+
+        setting_notes = self.refresh_settings()
+        if setting_notes:
+            report["settings"] = setting_notes
+
+        readings, forecast = self._sense(now, report)
+        outdoor = readings.get("t_outdoor")
 
         # Colder outside than the actuator can present? Keep commanding anyway -
         # the emulator is the pump's only sensor now - but say what it is costing.
@@ -796,6 +874,9 @@ class Controller:
                 report["notes"].append(actuator["warning"])
                 log.warning("%s", actuator["warning"])
 
+        if self._heating_impossible(forecast) and self._safety_override(readings)[0] is None:
+            return self._standby(now, readings, report, apply)
+
         bias = self._residual_bias(forecast)
         exog = Exogenous(
             forecast["t_outdoor"].to_numpy(dtype=float),
@@ -807,7 +888,8 @@ class Controller:
         )
 
         comfort = build_schedule(
-            self.cfg, forecast.index, self.mode, read_return_time(self.base_cfg, self.ha)
+            self.cfg, forecast.index, self.mode, read_return_time(self.base_cfg, self.ha),
+            active=self.cfg.control, normal=self.default_control,
         )
         report["comfort"] = comfort.summary()
         result: MpcResult = self.solver.solve(
@@ -864,8 +946,7 @@ class Controller:
         }
         # Excitation week is exactly the data the fit needs most; archive it.
         self.archive_cycle(report, now)
-        readings = self.read_sensors()
-        report["readings"] = {k: v for k, v in readings.items() if v is not None}
+        readings, _forecast = self._sense(now, report)
         problems = self.check_readings(readings)
         if problems:
             report["problems"] = problems
@@ -882,6 +963,15 @@ class Controller:
         report["notes"].extend(notes)
         report["offset"] = offset
         self._write(offset, readings.get("t_outdoor"), report, apply)
+        if report.get("applied") and not report.get("problems"):
+            # Only cycles that really excited the house: a paused cycle wrote
+            # the fallback, and that is not the experiment.
+            try:
+                from .excitation import record
+
+                record(self.cfg, now)
+            except OSError as exc:
+                log.warning("Could not record the excitation run: %s", exc)
         self._persist(now, report)
         return report
 
@@ -904,6 +994,47 @@ class Controller:
         except Exception as exc:  # pragma: no cover - never let it break control
             log.warning("Residual model failed (%s); continuing with physics only", exc)
             return np.zeros(len(forecast))
+
+    def _heating_impossible(self, forecast: pd.DataFrame | None) -> bool:
+        """True when no offset the limits allow can make the pump produce heat.
+
+        Above ``heat_stop_temp`` the pump makes nothing, so every candidate
+        schedule costs exactly the same and the optimiser is choosing between
+        identical futures. The test is deliberately on the coldest hour of the
+        horizon with the most negative offset available - including what the
+        potentiometer can physically present - because a mild autumn day where
+        a -5 K offset would still start the pump is a day worth optimising.
+        """
+        if forecast is None or "t_outdoor" not in forecast or not len(forecast):
+            return False
+        coldest = float(np.nanmin(forecast["t_outdoor"].to_numpy(dtype=float)))
+        if not np.isfinite(coldest):
+            return False
+        reach = min(self.cfg.control.offset_min, 0.0)
+        coldest_perceived = max(coldest + reach, self.cfg.heat_pump.perceived_min_c)
+        return coldest_perceived >= self.cfg.heat_pump.heat_stop_temp
+
+    def _standby(self, now: datetime, readings: dict[str, Any],
+                 report: dict[str, Any], apply: bool) -> dict[str, Any]:
+        """Summer: hold the neutral offset, keep archiving, decide nothing.
+
+        Holding ``fallback_offset`` shows the pump the truth, so the day it is
+        switched back on it starts from its own curve with no stale bias left
+        in the emulator. Getting here takes no setting, and leaving again takes
+        none either - the first cold night puts the horizon back below the heat
+        stop and the optimiser resumes on the next cycle.
+        """
+        offset, notes = self._limit(self.cfg.control.fallback_offset, readings.get("t_outdoor"))
+        report["mode"] = "standby"
+        report["offset"] = offset
+        report["notes"].extend(notes)
+        report["notes"].append(
+            f"above the pump's heat stop ({self.cfg.heat_pump.heat_stop_temp:.0f} C) for the whole "
+            f"horizon - no offset can make heat, holding {self.cfg.control.fallback_offset:+.1f} K"
+        )
+        self._write(offset, readings.get("t_outdoor"), report, apply)
+        self._persist(now, report)
+        return report
 
     def _collect_only(self, now: datetime, readings: dict[str, Any],
                       report: dict[str, Any], apply: bool) -> dict[str, Any]:
@@ -946,7 +1077,34 @@ class Controller:
         outputs = self.outputs(offset, t_outdoor)
         report["outputs"] = outputs
         if not apply:
-            report["notes"].append("dry run - nothing written to Home Assistant")
+            # Two different things reach here, and the note has to say which.
+            # 'hpmpc plan' never writes - that is what it is for - and printing
+            # "dry run" on every plan sent the user looking for a dry_run switch
+            # to turn off while the service was writing normally all along.
+            report["notes"].append(
+                "dry run (control.dry_run is on) - nothing written to Home Assistant"
+                if self.cfg.control.dry_run
+                else "preview only - nothing written by this command; the running service writes as usual"
+            )
+            # "Compute everything, write nothing" is safe where the pump has its
+            # own sensor. Here it is not: the emulator IS the sensor, and it is
+            # fed by writes. Stop writing and Home Assistant stops pushing, the
+            # node holds for four hours and then drives FAILSAFE_WIPER - a fixed
+            # position around 0 C, which in October means the pump heats the
+            # house flat out while the log says "dry run". Clamp offset_min and
+            # offset_max toward zero instead: the cycle keeps writing, so the
+            # node stays fed, and the controller simply has no authority.
+            # Only for the setting itself: 'hpmpc plan' never writes by design,
+            # and is a separate process while the service keeps the node fed.
+            if self.cfg.control.dry_run and any(
+                    self.cfg.entities.outputs()[k] for k in ("fake_temperature", "resistance", "wiper")):
+                warning = (
+                    "dry run with the sensor emulator as the pump's only sensor: nothing is being "
+                    "written, so the node falls back to its failsafe position within hours. Clamp "
+                    "control.offset_min/offset_max toward 0 instead of running dry for long."
+                )
+                report["notes"].append(warning)
+                log.warning("%s", warning)
             return
         if not outputs:
             report["notes"].append("no output entity configured - nothing written")

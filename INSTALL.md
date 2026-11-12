@@ -316,8 +316,31 @@ emulatorn.
 Automationen `MPC potentiometer at end stop` i HA-paketet larmar om wipern
 står kvar i ett ändläge i en halvtimme.
 
-Sätt `dry_run: true` i konfigurationen och låt den gå ett par dygn. Läs
-planerna med `hpmpc plan`. Först därefter `hpmpc set control.dry_run 0`.
+**Provkör med klampad offset, inte med `dry_run`.** `dry_run` beräknar allt och
+skriver ingenting — vilket är säkert på en pump som har en egen givare, men inte
+här: emulatorn *är* givaren, och den hålls vid liv av skrivningarna. Uteblir de
+slutar automationen i HA pusha, noden håller sitt värde i fyra timmar och går
+sedan till `FAILSAFE_WIPER` (~0 °C). I oktober betyder det att pumpen eldar för
+fullt medan loggen säger "dry run".
+
+Ta ifrån regulatorn befogenheten i stället, så fortsätter cyklerna skriva:
+
+```bash
+hpmpc settings | grep offset_    # var styrs de ifrån?
+```
+
+Står det en entitet i sista kolumnen ägs fältet av Home Assistant och `hpmpc set`
+skrivs över vid nästa cykel — dra reglagen `input_number.offset_min` och
+`input_number.offset_max` till −0,5 respektive 0,5 i stället. Är kolumnen tom:
+
+```bash
+hpmpc set control.offset_min -0.5
+hpmpc set control.offset_max 0.5
+```
+
+Läs planerna med `hpmpc plan` ett par dygn, vidga sedan stegvis (−2/+3, sedan
+fullt). Regulatorn varnar i loggen om du kör `dry_run` med emulatorn som enda
+givare.
 
 ---
 
@@ -349,6 +372,31 @@ andra är den bästa kontrollen på att fasentiteterna är rätt kopplade.
 Därefter sköter sig omträningen själv: `training.retrain_days: 30` gör att
 tjänsten tränar om när modellen blivit en månad gammal, vid `retrain_hour`
 lokal tid. Sätt till 0 om du hellre gör det för hand.
+
+### Sommaren sköter sig själv
+
+Det finns ingenting att stänga av när du stänger av värmepumpen för säsongen,
+och ingenting att slå på igen till hösten.
+
+Över `heat_pump.heat_stop_temp` (17 °C) gör pumpen ingen värme, och då gör
+offseten ingenting. Tre saker följer av det, alla automatiska:
+
+- **Regulatorn går i `standby`** när inte ens det mest negativa tillåtna
+  offsetet kan få pumpen under värmestoppet någonstans i horisonten. Den håller
+  `fallback_offset` — alltså sanningen till pumpens givare — och löser ingen
+  optimering. Första kalla natten lägger horisonten under värmestoppet igen och
+  MPC:n återupptar av sig själv, på nästa cykel.
+- **Arkiveringen fortsätter.** Den kostar några MB om året, hålen går inte att
+  fylla i efterhand, och utan utegivare är arkivet det enda stället din
+  utetemperatur finns. Pausa den inte.
+- **Träningen hoppar över sommaren.** Fönster där pumpen inte kunde värma
+  filtreras bort (`training.min_heating_fraction`), så anpassningen läser bara
+  eldningssäsongen även om datasetet spänner över ett helt år. Blir det inga
+  fönster kvar vägrar `hpmpc train` med besked, och den automatiska omträningen
+  behåller den modell du har i stället för att byta ut en vintermodell mot en
+  sommarmodell.
+
+Det enda du behöver göra är alltså att stänga av pumpen, och slå på den igen.
 
 ---
 

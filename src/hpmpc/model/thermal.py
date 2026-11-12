@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import json
 import math
-from dataclasses import asdict, dataclass, fields
+from dataclasses import asdict, dataclass, fields, replace
 from pathlib import Path
 from typing import Any
 
@@ -53,6 +53,10 @@ PARAM_BOUNDS: dict[str, tuple[float, float]] = {
     # enough that a runaway fit is visibly at the limit.
     "k_stove": (0.0, 3000.0),
 }
+
+# Every parameter measured in watts or watt-hours. Scaling all of them together
+# leaves indoor temperatures unchanged; the rest are ratios and stay put.
+EXTENSIVE_PARAMS = ("Ci", "Cm", "Him", "Hie", "Hme", "A_sol", "Q_int", "Hfloor", "k_stove")
 
 
 @dataclass
@@ -86,14 +90,36 @@ class ThermalParams:
         return cls(**{n: float(v) for n, v in zip(cls.names(), np.asarray(vec, dtype=float))})
 
     @classmethod
-    def bounds(cls) -> tuple[np.ndarray, np.ndarray]:
-        lo = np.array([PARAM_BOUNDS[n][0] for n in cls.names()], dtype=float)
-        hi = np.array([PARAM_BOUNDS[n][1] for n in cls.names()], dtype=float)
+    def bounds(cls, size: float = 1.0) -> tuple[np.ndarray, np.ndarray]:
+        """Parameter bounds for a house ``size`` times the one they were drawn for.
+
+        The extensive bounds scale with the house. A 350 m2 house is the same
+        physics as a 140 m2 one with every flow larger, and fixed bounds would
+        make it unrepresentable - its slab coupling alone runs past them.
+        """
+        names = cls.names()
+        factor = np.array([size if n in EXTENSIVE_PARAMS else 1.0 for n in names])
+        lo = np.array([PARAM_BOUNDS[n][0] for n in names], dtype=float) * factor
+        hi = np.array([PARAM_BOUNDS[n][1] for n in names], dtype=float) * factor
         return lo, hi
 
-    def clipped(self) -> "ThermalParams":
-        lo, hi = self.bounds()
+    def clipped(self, size: float = 1.0) -> "ThermalParams":
+        lo, hi = self.bounds(size)
         return ThermalParams.from_vector(np.clip(self.to_vector(), lo, hi))
+
+    def size(self) -> float:
+        """How many times larger this house is than the one the bounds were drawn for."""
+        return max(self.heat_loss_w_per_k(), 1e-6) / REFERENCE_HEAT_LOSS_W_PER_K
+
+    def scaled(self, factor: float) -> "ThermalParams":
+        """The same house, with every heat flow and heat store ``factor`` times larger.
+
+        Indoor temperatures cannot tell these apart: every term of both node
+        equations scales together, so the trajectories are identical until the
+        pump reaches its capacity. That is why the level has to come from an
+        electricity meter, and why applying it does not undo the fit.
+        """
+        return replace(self, **{n: getattr(self, n) * float(factor) for n in EXTENSIVE_PARAMS})
 
     def to_dict(self) -> dict[str, float]:
         return asdict(self)
@@ -117,6 +143,10 @@ class ThermalParams:
         does not care about the breeze.
         """
         return self.Hie * (1.0 + self.k_wind * max(float(wind), 0.0)) + self.Hme
+
+
+# The defaults' heat loss: the size of house PARAM_BOUNDS were drawn for.
+REFERENCE_HEAT_LOSS_W_PER_K = ThermalParams().heat_loss_w_per_k()
 
 
 @dataclass
