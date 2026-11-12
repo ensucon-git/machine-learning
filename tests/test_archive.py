@@ -414,3 +414,77 @@ def _load_cfg(path):
     from hpmpc.config import load_config
 
     return load_config(path)
+
+
+# ---------------------------------------------------------------------------
+# A disk that fills up mid-write leaves a gzip stream cut in half. That used to
+# take down every caller, including last_timestamp - so one bad file stopped
+# the controller, which is the opposite of an archive that heals itself.
+# ---------------------------------------------------------------------------
+
+def _month(rows=2000, start="2026-10-01"):
+    """Rows that vary, like real ones.
+
+    A month of identical values compresses to almost nothing, and then a
+    truncation test says more about gzip's block size than about the salvage.
+    """
+    import numpy as np
+    import pandas as pd
+
+    index = pd.date_range(start, periods=rows, freq="15min", tz="UTC")
+    step = np.arange(rows)
+    return pd.DataFrame(
+        {"t_indoor": 21.0 + np.sin(step / 40.0), "t_outdoor": 3.0 + np.cos(step / 70.0)},
+        index=index,
+    )
+
+
+def test_a_truncated_month_file_is_salvaged_not_fatal(tmp_path):
+    from hpmpc.archive import Archive
+
+    archive = Archive(tmp_path, 15)
+    archive.merge(_month())
+    path = archive.files()[0]
+    whole = path.read_bytes()
+    path.write_bytes(whole[: int(len(whole) * 0.6)])    # disk full mid-write
+
+    frame = archive.load()
+
+    assert not frame.empty, "most of the month is still readable and must be kept"
+    assert 0 < len(frame) < 2000
+    assert list(frame.columns) == ["t_indoor", "t_outdoor"]
+    # The original is set aside, never deleted, and no longer matches the glob.
+    aside = [p for p in tmp_path.iterdir() if ".corrupt-" in p.name]
+    assert len(aside) == 1 and aside[0].read_bytes() == whole[: int(len(whole) * 0.6)]
+    assert archive.files() == [path]
+    # And the rewritten file reads cleanly the next time, without salvaging again.
+    assert len(archive.load()) == len(frame)
+
+
+def test_an_empty_month_file_is_set_aside_and_the_archive_carries_on(tmp_path):
+    from hpmpc.archive import Archive
+
+    archive = Archive(tmp_path, 15)
+    archive.merge(_month(start="2026-09-01"))
+    archive.merge(_month(start="2026-10-01"))
+    september, october = archive.files()
+    october.write_bytes(b"")                            # nothing reached the disk
+
+    frame = archive.load()
+
+    assert not frame.empty, "September is intact and must still be readable"
+    assert frame.index.max() < pd.Timestamp("2026-10-01", tz="UTC")
+    assert not october.exists()
+    assert any(".corrupt-" in p.name for p in tmp_path.iterdir())
+
+
+def test_last_timestamp_survives_a_corrupt_file(tmp_path):
+    """This is the one that mattered: every control cycle calls it."""
+    from hpmpc.archive import Archive
+
+    archive = Archive(tmp_path, 15)
+    archive.merge(_month())
+    path = archive.files()[0]
+    path.write_bytes(path.read_bytes()[:40])
+
+    assert archive.last_timestamp() is None or archive.last_timestamp() is not None

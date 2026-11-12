@@ -25,7 +25,10 @@ history that is read through them.
 
 from __future__ import annotations
 
+import gzip
+import io
 import logging
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -169,13 +172,92 @@ class Archive:
 def _read(path: Path) -> pd.DataFrame:
     if not path.exists():
         return pd.DataFrame()
-    frame = pd.read_csv(path, index_col=0, parse_dates=True)
+    try:
+        frame = pd.read_csv(path, index_col=0, parse_dates=True)
+    except Exception as exc:                        # noqa: BLE001 - see _salvage
+        frame = _salvage(path, exc)
     if frame.empty:
         return frame
     if frame.index.tz is None:
         frame.index = frame.index.tz_localize("UTC")
     frame.index.name = "time"
     return frame.sort_index()
+
+
+def _salvage(path: Path, exc: Exception) -> pd.DataFrame:
+    """Recover what a half-written month file still holds, then set it aside.
+
+    A disk filling up mid-write leaves the gzip stream cut off, and pandas
+    raises from deep inside its parser - which took down every caller, because
+    ``_read`` is also how ``last_timestamp`` and therefore every control cycle
+    reads the archive. One bad file stopped the whole controller, which is the
+    opposite of what an archive that is supposed to heal itself should do.
+
+    gzip decompresses sequentially, so everything written before the cut is
+    still good: read until it dies, drop the half-written last line, keep the
+    rest. Losing a month of history to a full disk is the expensive part, not
+    the broken bytes at the end of it.
+
+    The original is never deleted, only renamed out of the way - it no longer
+    matches the ``*.csv.gz`` glob, so it is not read again, and it is there if
+    anyone wants to look. The replacement is written to a temporary file first
+    and swapped in, so a disk that is STILL full leaves the original untouched
+    rather than destroying it on the way out.
+    """
+    rows: list[str] = []
+    try:
+        with gzip.open(path, "rt") as handle:
+            # One line at a time, on purpose: readlines() reads to the end
+            # before it raises, so the partial content would be thrown away
+            # with the exception. Appending as we go keeps everything that
+            # made it out of the stream before it died.
+            for line in handle:
+                rows.append(line)
+    except Exception:                               # noqa: BLE001
+        pass                    # whatever came out before the stream died
+    if rows and not rows[-1].endswith("\n"):
+        rows.pop()              # the write stopped in the middle of a line
+
+    salvaged = pd.DataFrame()
+    if len(rows) > 1:           # a header alone carries no history
+        try:
+            salvaged = pd.read_csv(io.StringIO("".join(rows)), index_col=0, parse_dates=True)
+        except Exception:                           # noqa: BLE001
+            salvaged = pd.DataFrame()
+
+    aside = path.with_name(f"{path.name}.corrupt-{int(time.time())}")
+    if salvaged.empty:
+        path.rename(aside)
+        log.error(
+            "%s is unreadable (%s) and nothing could be recovered from it. Moved to %s; "
+            "the archive refills this month from whatever the recorder still holds.",
+            path.name, exc, aside.name,
+        )
+        return pd.DataFrame()
+
+    staged = path.with_name(f"{path.name}.rewrite")
+    try:
+        # compression is explicit: pandas infers it from the extension, and the
+        # staged name does not end in .gz, so the replacement would land
+        # uncompressed and be unreadable the next time round.
+        salvaged.to_csv(staged, index=True, float_format="%.4f", compression="gzip")
+    except Exception as write_exc:                  # noqa: BLE001
+        staged.unlink(missing_ok=True)
+        log.error(
+            "%s is damaged (%s); recovered %d rows in memory but could not rewrite it (%s). "
+            "Leaving the file alone and carrying on with what was recovered.",
+            path.name, exc, len(salvaged), write_exc,
+        )
+        return salvaged
+    path.rename(aside)
+    staged.rename(path)
+    log.error(
+        "%s was damaged (%s) - most likely a disk that filled up mid-write. Recovered %d rows "
+        "(%s to %s) and rewrote the file; the original is kept as %s. Any gap left refills from "
+        "the recorder on the next cycle.",
+        path.name, exc, len(salvaged), salvaged.index[0], salvaged.index[-1], aside.name,
+    )
+    return salvaged
 
 
 def _month_end(path: Path) -> datetime:
