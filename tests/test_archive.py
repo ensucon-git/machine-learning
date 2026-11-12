@@ -548,3 +548,136 @@ def test_last_timestamp_survives_a_corrupt_file(tmp_path):
     path.write_bytes(path.read_bytes()[:40])
 
     assert archive.last_timestamp() is None or archive.last_timestamp() is not None
+
+
+# ---------------------------------------------------------------------------
+# Surviving a full disk, and repairing what one left behind.
+
+
+def test_a_full_disk_mid_write_leaves_the_month_intact(tmp_path, monkeypatch):
+    """Salvaging half a file is a consolation prize; not halving it is the fix.
+
+    Every merge rewrites a whole month file, so the window in which a full disk
+    can cut one in half is every single control cycle. Staging the replacement
+    and renaming it into place closes that window: running out of space now
+    costs this cycle's rows, which the next cycle fetches again, instead of the
+    month of history that was already on disk.
+    """
+    archive = Archive(tmp_path, 15)
+    archive.merge(_month(rows=400))
+    before = archive.load()
+
+    real_to_csv = pd.DataFrame.to_csv
+
+    def full_disk(self, path_or_buf=None, *args, **kwargs):
+        if str(path_or_buf).endswith(".new"):
+            # Some of it reaches the disk before the write dies, which is what
+            # makes a truncated gzip rather than an empty file.
+            real_to_csv(self.iloc[: len(self) // 2], path_or_buf, *args, **kwargs)
+            raise OSError(28, "No space left on device")
+        return real_to_csv(self, path_or_buf, *args, **kwargs)
+
+    monkeypatch.setattr(pd.DataFrame, "to_csv", full_disk)
+    with pytest.raises(OSError):
+        archive.merge(_month(rows=400, start="2026-10-05"))
+    monkeypatch.undo()
+
+    pd.testing.assert_frame_equal(before, archive.load())
+    assert not [p for p in tmp_path.iterdir() if p.name.endswith(".new")], "staged file left behind"
+    assert not [p for p in tmp_path.iterdir() if ".corrupt-" in p.name], "nothing was damaged"
+
+
+def test_a_hole_a_later_cycle_sealed_in_can_still_be_backfilled(cfg):
+    """The incremental pull cannot repair a gap, and that is not a bug in it.
+
+    "Everything since the last stored row" is exactly right while the archive
+    is being extended and exactly wrong once something has been written after a
+    hole - one cycle after the controller comes back is enough, and from then
+    on every pull steps straight over the missing days. Hence an explicit
+    window, bounded in practice by what the recorder still holds.
+    """
+    ha = RecorderHomeAssistant(keep_days=10.0)
+    recorded(cfg, ha, days=9.0)
+    archive = open_archive(cfg)
+    refresh(cfg, ha, archive, now=ha.now)
+    whole = archive.load()
+
+    # The outage: four days missing, with rows on both sides of them.
+    hole = (whole.index > pd.Timestamp(ha.now - timedelta(days=5))) & (
+        whole.index < pd.Timestamp(ha.now - timedelta(days=1))
+    )
+    assert hole.sum() > 100
+    kept = whole[~hole]
+    for path in archive.files():
+        path.unlink()
+    archive.merge(kept)
+
+    refresh(cfg, ha, archive, now=ha.now)
+    assert len(archive.load()) == len(kept), "the incremental pull stepped over the hole"
+
+    info = refresh(cfg, ha, archive, now=ha.now, reach_back_days=8.0)
+
+    assert "backfill" in str(info["reason"])
+    repaired = archive.load()
+    assert len(repaired) == len(whole)
+    pd.testing.assert_frame_equal(repaired, whole)
+
+
+def test_the_backfill_cannot_reach_past_the_recorder(cfg):
+    """Worth stating: this repairs what Home Assistant still has, nothing more."""
+    ha = RecorderHomeAssistant(keep_days=3.0)
+    recorded(cfg, ha, days=20.0)
+    archive = open_archive(cfg)
+
+    refresh(cfg, ha, archive, now=ha.now, reach_back_days=20.0)
+
+    assert archive.span_days() == pytest.approx(3.0, abs=0.2)
+
+
+def test_a_missing_price_is_refetched_without_overwriting_what_was_paid(cfg, monkeypatch):
+    """The one signal the recorder cannot give back - but the market can.
+
+    The price never passes through Home Assistant unless an entity is
+    configured for it: the controller fetches it live and writes down what it
+    planned against, so a cycle that did not run leaves a hole no later pull
+    can fill. The day-ahead market is settled, though, so the hole is simply
+    fetched again - and only the hole, because what the controller actually
+    paid is the number a backtest has to grade against.
+    """
+    from hpmpc.archive import backfill_prices
+
+    monkeypatch.setattr(cfg.entities, "price", "")   # the user's case: no price entity
+    now = pd.Timestamp("2026-11-12 12:00", tz="UTC")
+    grid = pd.date_range(now - pd.Timedelta(days=3), now, freq="15min")
+    stored = pd.DataFrame({"t_indoor": 21.0, "t_outdoor": 2.0, "price": float("nan")}, index=grid)
+    first_day = grid < grid[0] + pd.Timedelta(days=1)
+    stored.loc[first_day, "price"] = 0.42            # what the controller really paid
+    archive = open_archive(cfg)
+    archive.merge(stored)
+
+    asked: list = []
+
+    def fake_fetch_days(days, area="SE3", **kwargs):
+        asked.extend(days)
+        hours = pd.date_range(grid[0].floor("D"), grid[-1].ceil("D"), freq="h")
+        return [(h, 1.23) for h in hours], []
+
+    monkeypatch.setattr("hpmpc.providers.elpris.fetch_days", fake_fetch_days)
+    info = backfill_prices(cfg, archive, days=3.0, now=now.to_pydatetime())
+
+    price = archive.load()["price"]
+    assert price.loc[grid[first_day]].to_numpy() == pytest.approx(0.42), "a recorded price must survive"
+    assert price.loc[grid[~first_day]].to_numpy() == pytest.approx(1.23), "the hole must be filled"
+    assert not price.isna().any()
+    assert info["filled"] == int((~first_day).sum())
+    # Only the days with something missing are asked for.
+    assert grid[0].date() not in asked
+
+
+def test_the_price_backfill_leaves_a_configured_entity_alone(cfg, monkeypatch):
+    from hpmpc.archive import backfill_prices
+
+    monkeypatch.setattr(cfg.entities, "price", "sensor.nordpool")
+    info = backfill_prices(cfg, open_archive(cfg), days=3.0)
+
+    assert "sensor.nordpool" in str(info["skipped"])

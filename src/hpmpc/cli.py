@@ -4,6 +4,7 @@
     hpmpc init-config           write a starting config.yaml
     hpmpc check                 verify config and Home Assistant connectivity
     hpmpc archive               our own copy of the history - span, gaps, size
+      --backfill-days N         repair a hole from the recorder, prices included
     hpmpc collect               refresh the archive and build a dataset from it
     hpmpc excite                run the identification experiment
     hpmpc train                 fit the model
@@ -315,18 +316,46 @@ def cmd_stove(args: argparse.Namespace) -> int:
     return 0
 
 
+def _recorder_hint(cfg) -> str:
+    """What a backfill can realistically still reach.
+
+    Home Assistant keeps ten days by default, and nobody remembers changing it,
+    so the honest answer is a reminder to hurry rather than a number we know.
+    """
+    return ("Home Assistant keeps 10 days unless recorder.purge_keep_days says otherwise, "
+            "so repair a\nhole within a week of noticing it or it is gone for good")
+
+
 def cmd_archive(args: argparse.Namespace) -> int:
     """What history we have kept ourselves, independently of the recorder."""
     cfg = _load(args)
     archive = open_archive(cfg)
 
-    if args.refresh:
-        from .archive import refresh
+    if args.refresh or args.backfill_days:
+        from .archive import backfill_prices, refresh
 
+        reach_back = float(args.backfill_days) if args.backfill_days else None
         with _connect(cfg) as ha:
-            info = refresh(cfg, ha, archive)
+            info = refresh(cfg, ha, archive, reach_back_days=reach_back)
         print(f"Pulled from {info.get('pulled_from', '-')} ({info.get('reason')}): "
               f"+{info.get('rows_added', 0)} rows, {info.get('pruned', 0)} month files pruned")
+
+        if reach_back:
+            # The recorder cannot give the price back - it never went through
+            # Home Assistant. The day-ahead market can, for any day that is over.
+            prices = backfill_prices(cfg, archive, days=reach_back)
+            if prices.get("skipped"):
+                print(f"Prices: {prices['skipped']}")
+            elif prices.get("error"):
+                print(f"Prices: could not refetch ({prices['error']})")
+            elif prices.get("filled"):
+                print(f"Prices: refetched {prices['filled']} missing steps over "
+                      f"{len(prices.get('days') or [])} days")
+            else:
+                print(f"Prices: nothing missing ({prices.get('reason', 'already complete')})")
+            print()
+            print("A backfill only reaches as far as Home Assistant's recorder still goes -")
+            print(f"{_recorder_hint(cfg)}. Check 'coverage' below for what actually landed.")
         print()
 
     info = archive.describe()
@@ -1384,6 +1413,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("archive", help="our own copy of the history - span, gaps, size")
     p.add_argument("--refresh", action="store_true", help="pull new rows from the recorder first")
+    p.add_argument("--backfill-days", type=float, default=None, metavar="N",
+                   help="re-ask the recorder for the last N days to repair a hole, and "
+                        "refetch any spot prices missing from them")
     p.add_argument("--prune", action="store_true", help="delete history older than archive_keep_days")
     p.set_defaults(func=cmd_archive)
 

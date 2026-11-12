@@ -29,10 +29,12 @@ import gzip
 import io
 import json
 import logging
+import os
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
@@ -40,6 +42,7 @@ import pandas as pd
 from .config import Config
 from .dataset import CONTINUOUS, column_map, finish_dataset, pivot_history
 from .ha import HomeAssistant
+from .providers._http import ProviderError
 
 log = logging.getLogger(__name__)
 
@@ -127,7 +130,7 @@ class Archive:
                 new_rows = int(len(chunk.index.difference(existing.index)))
                 merged = chunk.combine_first(existing).sort_index()
             merged.index.name = "time"
-            merged.to_csv(path, index=True, float_format="%.4f")
+            _write_atomic(path, merged)
             added += new_rows
         return added
 
@@ -168,6 +171,31 @@ class Archive:
             expected = (frame.index[-1] - frame.index[0]) / step + 1
             info["coverage"] = round(float(len(frame) / expected), 4)
         return info
+
+
+def _write_atomic(path: Path, frame: pd.DataFrame) -> None:
+    """Write a month file through a staged copy, so a full disk cannot halve it.
+
+    gzip has no way to say "the rest is missing": a write that runs out of space
+    leaves a stream that stops mid-record, and everything after the cut is gone.
+    Writing a neighbour file and renaming it into place makes that impossible -
+    the rename is atomic, so the old file stays whole until a complete new one
+    exists. A disk that fills up then costs this cycle's rows, which the next
+    cycle fetches again, instead of the month of history that was already there.
+
+    The staged name does not match the ``*.csv.gz`` glob, so a leftover from a
+    crash is never read as history.
+    """
+    staged = path.with_name(f"{path.name}.new")
+    try:
+        # compression is explicit: pandas infers it from the extension, and the
+        # staged name does not end in .gz, so the file would land uncompressed
+        # and be unreadable once it was renamed into place.
+        frame.to_csv(staged, index=True, float_format="%.4f", compression="gzip")
+        os.replace(staged, path)
+    except BaseException:
+        staged.unlink(missing_ok=True)
+        raise
 
 
 def _read(path: Path) -> pd.DataFrame:
@@ -271,18 +299,28 @@ def open_archive(cfg: Config) -> Archive:
 
 
 def refresh(cfg: Config, ha: HomeAssistant, archive: Archive | None = None,
-            now: datetime | None = None) -> dict[str, object]:
+            now: datetime | None = None, reach_back_days: float | None = None) -> dict[str, object]:
     """Copy everything the recorder has that the archive does not.
 
     On an empty archive this reaches back ``training.history_days``, which is
     how a fresh install inherits whatever history Home Assistant happens to
     hold. After that each call asks for a couple of hours, because that is all
     that can have happened since the last control cycle.
+
+    ``reach_back_days`` overrides that and asks for a fixed window regardless of
+    what is already stored. The incremental rule is right for a running system
+    and exactly wrong for repairing a hole: once anything at all is stored after
+    the hole - one cycle is enough - "since the last row" steps straight over it
+    and the gap is sealed in for good. Merging is non-destructive, so asking for
+    a window that is mostly already present only fills what is missing.
     """
     archive = archive or open_archive(cfg)
     now = now or datetime.now(timezone.utc)
     last = archive.last_timestamp()
-    if last is None:
+    if reach_back_days is not None:
+        start = now - timedelta(days=float(reach_back_days))
+        reason = f"backfill - asking the recorder for the last {float(reach_back_days):g} days"
+    elif last is None:
         start = now - timedelta(days=float(cfg.training.history_days))
         reason = "empty archive - reaching back as far as the recorder goes"
     else:
@@ -370,6 +408,78 @@ def _backfill_new_entities(cfg: Config, ha: HomeAssistant, archive: Archive,
         log.info("Archive: reached back to %s for newly configured %s",
                  start.isoformat(timespec="minutes"), ", ".join(found))
     return found
+
+
+def backfill_prices(cfg: Config, archive: Archive | None = None, days: float = 14.0,
+                    now: datetime | None = None, client: object | None = None) -> dict[str, object]:
+    """Refetch the spot price for days the archive has no price for.
+
+    The price is the one archived signal the recorder cannot give back. Unless
+    an entity is configured for it, it never passes through Home Assistant at
+    all: the controller fetches it live and writes down the number it used, so
+    any cycle that did not run leaves a hole that no later pull can fill. The
+    day-ahead market is settled history, though, and elprisetjustnu serves any
+    past day, so the hole can simply be fetched again.
+
+    The house does not care what electricity costs and identification does not
+    either - this matters for the backtest, which grades savings on exactly this
+    number, and would otherwise grade those days against a flat invention.
+
+    Only days with something missing are requested, and the refetched price is
+    blanked wherever the archive already holds one, so this can never overwrite
+    what the controller actually paid.
+    """
+    from .providers.elpris import fetch_days
+
+    archive = archive or open_archive(cfg)
+    if cfg.entities.price:
+        return {"skipped": f"entities.price is set to {cfg.entities.price} - the recorder has it"}
+
+    now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    step = pd.Timedelta(minutes=int(cfg.training.resample_minutes))
+    start = pd.Timestamp(now - timedelta(days=float(days))).ceil(step)
+    end = pd.Timestamp(now).floor(step)
+    if end <= start:
+        return {"filled": 0, "days": []}
+    grid = pd.date_range(start, end, freq=step)
+
+    stored = archive.load()
+    have = stored["price"].reindex(grid) if "price" in stored.columns else pd.Series(np.nan, index=grid)
+    gaps = have.isna()
+    if not bool(gaps.any()):
+        return {"filled": 0, "days": [], "reason": "every step in the window already has a price"}
+
+    zone = ZoneInfo(cfg.site.timezone)
+    wanted = sorted({stamp.tz_convert(zone).date() for stamp in grid[gaps]})
+    try:
+        points, unavailable = fetch_days(wanted, cfg.forecast.price_area, client=client)
+    except (ProviderError, ValueError) as exc:    # PriceUnavailable is a ProviderError
+        return {"filled": 0, "days": [d.isoformat() for d in wanted], "error": str(exc)}
+    if not points:
+        return {"filled": 0, "days": [d.isoformat() for d in wanted],
+                "error": "; ".join(unavailable) or "no prices returned"}
+
+    series = pd.Series({stamp: value for stamp, value in points}).sort_index()
+    # The market publishes a step function - the price holds until the next
+    # quoted start - so forward fill onto our grid rather than interpolating.
+    on_grid = series.reindex(series.index.union(grid)).ffill().reindex(grid)
+    on_grid = on_grid.where(gaps)          # never overwrite a price we recorded
+    on_grid = on_grid.dropna()
+    if on_grid.empty:
+        return {"filled": 0, "days": [d.isoformat() for d in wanted],
+                "error": "the fetched days did not cover any missing step"}
+
+    archive.merge(pd.DataFrame({"price": on_grid}))
+    result: dict[str, object] = {
+        "filled": int(len(on_grid)),
+        "days": [d.isoformat() for d in wanted],
+        "from": str(on_grid.index[0]),
+        "to": str(on_grid.index[-1]),
+    }
+    if unavailable:
+        result["unavailable"] = unavailable
+    log.info("Archive: refetched %d missing price steps over %d days", len(on_grid), len(wanted))
+    return result
 
 
 # Signals the recorder cannot supply when no entity is configured for them:

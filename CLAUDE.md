@@ -635,6 +635,30 @@ terminalvärderingen fixar, fast i utvärderingen.
   till slutet *innan* det kastar och slänger då allt partiellt innehåll — man
   måste iterera rad för rad; och `to_csv` gissar kompression ur filändelsen, så
   en stagead fil utan `.gz` blev okomprimerad och oläslig nästa gång.
+- **Månadsfilerna skrivs numera via en stagead fil och `os.replace`** (2026-11-12).
+  Räddningen ovan är ett tröstpris — den riktiga fixen är att filen aldrig kan
+  halveras. Varje `merge` skriver om en hel månadsfil, så fönstret där en full
+  disk kan kapa en fil mitt i var *varje styrcykel*. Nu kostar en full disk den
+  cykelns rader, som nästa cykel hämtar igen, i stället för månaden bakom dem.
+  `_salvage` finns kvar för filer som redan är skadade.
+- **Ett hål som en senare cykel har förseglat går inte att fylla inkrementellt.**
+  `refresh` frågar efter "allt sedan senaste raden", vilket är precis rätt medan
+  arkivet byggs på och precis fel när något redan skrivits *efter* ett hål — en
+  enda cykel räcker, och därefter kliver varje hämtning rakt över de saknade
+  dygnen. Därför finns `hpmpc archive --backfill-days N`: den ber recordern om
+  ett fast fönster oavsett vad som redan ligger där, och `merge` är
+  icke-förstörande så den fyller bara det som saknas. Gränsen är recorderns egen
+  retention — **10 dygn som standard i Home Assistant**, alltså ska ett hål
+  lagas inom en vecka från att det upptäcks, sedan är det borta.
+  Samma kommando hämtar om **spotpriset** för de dygnen från elprisetjustnu.
+  Priset är den enda arkiverade signalen recordern inte kan ge tillbaka — utan
+  `entities.price` passerar det aldrig Home Assistant, utan hämtas live och
+  skrivs ner av `record_resolved`. Dygnsmarknaden är avräknad historik, så den
+  går att hämta igen; redan lagrade priser skrivs aldrig över (det är de talen
+  ett backtest ska graderas mot). Vad som *inte* går att få tillbaka är
+  SMHI-härledda `wind`/`cloud`/`humidity` för en period utan egna givare — de
+  fanns bara i stunden. De är sekundära regressorer; `t_indoor` och `t_outdoor`,
+  som är de enda `REQUIRED`-kolumnerna, kommer från entiteter och kan återfyllas.
 - **Arkivet och recordern kan inte hamna i konflikt.** Raderas arkivet fyller det
   sig från det recordern har kvar; kortas recorderns retention behåller arkivet
   det redan kopierat. `training.archive: false` går direkt mot recordern som förut.
@@ -894,6 +918,7 @@ hpmpc settings       # vad som går att ändra i drift
 hpmpc set control.price_addition 0.7084
 hpmpc excite         # identifieringsexperiment, ~1 vecka
 hpmpc archive        # vår egen historik — omfång, hål, storlek
+hpmpc archive --backfill-days 7   # laga ett hål ur recordern + priserna
 hpmpc collect --days 45 && hpmpc train
 hpmpc power          # effektuppdelningen — laddaren ska hamna nära 11 kW
 hpmpc stove --days 7 # takgivaren mot huset; föreslår stove_deadband_k ur datan

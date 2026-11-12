@@ -156,3 +156,42 @@ def fetch_prices(
             "extrapolate the last known price."
         )
     return points, meta
+
+
+def fetch_days(
+    days: list[date],
+    area: str = "SE3",
+    timeout: float = 30.0,
+    client: httpx.Client | None = None,
+) -> tuple[list[tuple[pd.Timestamp, float]], list[str]]:
+    """Spot prices for a list of days that are already over.
+
+    Deliberately separate from ``fetch_prices``: that one is the live path, and
+    the rules it carries - yesterday for the hours behind us, tomorrow only
+    after publication, a warning when it is late - say nothing about a day that
+    has already been settled. This one asks for exactly the days it is given,
+    skips the cache (a repair should not be answered from a stale file), and
+    returns what it could not get instead of raising, because a backfill that
+    recovers four days out of five is worth keeping.
+    """
+    area = area.upper()
+    if area not in AREAS:
+        raise ValueError(f"Unknown Swedish bidding area '{area}' (expected one of {', '.join(AREAS)})")
+
+    points: list[tuple[pd.Timestamp, float]] = []
+    missing: list[str] = []
+    for day in days:
+        try:
+            payload = get_json(price_url(day, area), timeout=timeout, client=client, allow_404=True)
+        except ProviderError as exc:
+            missing.append(f"{day.isoformat()}: {exc}")
+            continue
+        if payload is None:
+            missing.append(f"{day.isoformat()}: not published")
+            continue
+        day_points = parse_day(payload)
+        if day_points:
+            points.extend(day_points)
+        else:
+            missing.append(f"{day.isoformat()}: empty")
+    return sorted(dict(points).items()), missing
