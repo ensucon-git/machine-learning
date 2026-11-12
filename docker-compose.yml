@@ -29,5 +29,37 @@ services:
     ports:
       - "${HPMPC_PORT:-8129}:8129"
 
+  # Nightly snapshots of /data and the config to another disk - a NAS share
+  # mounted on this host. Off unless COMPOSE_PROFILES=backup is in .env. It is
+  # a separate container on purpose: a network share that stops answering can
+  # hang whatever touches it, and that must never be the control loop.
+  #
+  #   BACKUP_DIR=/mnt/nfs/docker-volumes/hpmpc   (in .env)
+  #   COMPOSE_PROFILES=backup                    (in .env)
+  #   docker compose up -d
+  #   docker compose exec hpmpc-backup hpmpc backup --to /backup   # one now
+  hpmpc-backup:
+    image: hpmpc:latest
+    container_name: hpmpc-backup
+    profiles: ["backup"]
+    restart: unless-stopped
+    depends_on: [hpmpc]
+    environment:
+      TZ: ${TZ:-Europe/Stockholm}
+    # After the nightly retrain (03:00), so the snapshot carries the new model.
+    command: ["backup", "--to", "/backup", "--daily-at", "${BACKUP_AT:-04:15}"]
+    volumes:
+      - ./config:/config:ro
+      - hpmpc-data:/data:ro
+      - ${BACKUP_DIR:-./backup}:/backup
+    healthcheck:
+      # Unhealthy when the newest snapshot is more than 30 h old - the share
+      # unmounted, full or refusing writes.
+      test: ["CMD", "hpmpc", "backup", "--to", "/backup", "--check"]
+      interval: 1h
+      timeout: 30s
+      start_period: 10m
+      retries: 1
+
 volumes:
   hpmpc-data:

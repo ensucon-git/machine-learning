@@ -14,3 +14,4 @@ data/history/
 config/config.yaml
 .env
 models/
+backup/

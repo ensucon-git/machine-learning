@@ -1071,6 +1071,55 @@ def cmd_train(args: argparse.Namespace) -> int:
     return 0
 
 
+def _backup_dirs(args: argparse.Namespace) -> tuple[Path, Path]:
+    """Data and config directories, without loading the configuration - a
+    config.yaml broken enough to stop the controller must still be saved."""
+    data_dir = Path(args.data_dir or os.environ.get("HPMPC_DATA_DIR", "data"))
+    return data_dir, Path(args.config).parent
+
+
+def cmd_backup(args: argparse.Namespace) -> int:
+    from . import backup
+
+    data_dir, config_dir = _backup_dirs(args)
+    dest = Path(args.to)
+    if args.check:
+        age = backup.newest_age(dest)
+        if age is None:
+            print(f"No snapshot in {dest}")
+            return 1
+        hours = age.total_seconds() / 3600.0
+        print(f"Newest snapshot is {hours:.1f} h old")
+        return 0 if hours <= args.max_age_hours else 1
+    if args.daily_at:
+        log.info("Backing up %s and %s to %s daily at %s (keeping %d daily, %d monthly)",
+                 data_dir, config_dir, dest, args.daily_at, args.keep_daily, args.keep_monthly)
+        backup.run_daily(data_dir, config_dir, dest, args.daily_at, args.keep_daily, args.keep_monthly)
+        return 0
+    try:
+        path = backup.snapshot(data_dir, config_dir, dest, keep_daily=args.keep_daily,
+                               keep_monthly=args.keep_monthly)
+    except backup.BackupError as exc:
+        print(exc)
+        return 1
+    print(f"Wrote {path}")
+    return 0
+
+
+def cmd_restore(args: argparse.Namespace) -> int:
+    from . import backup
+
+    data_dir, config_dir = _backup_dirs(args)
+    try:
+        counts = backup.restore(Path(args.snapshot), data_dir, config_dir, force=args.force)
+    except backup.BackupError as exc:
+        print(exc)
+        return 1
+    print(f"Restored {counts['data']} files into {data_dir} and {counts['config']} into {config_dir}.\n"
+          "Start the controller again; it picks up the model and the archive as they are.")
+    return 0
+
+
 def cmd_revert_model(args: argparse.Namespace) -> int:
     from .train import previous_path, revert_model
 
@@ -1431,6 +1480,25 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--force", action="store_true",
                    help="install the model even if it predicts no better than 'no change'")
     p.set_defaults(func=cmd_train)
+
+    p = sub.add_parser("backup", help="snapshot /data and the config to another disk, e.g. a NAS")
+    p.add_argument("--to", required=True, help="directory to write snapshots into")
+    p.add_argument("--data-dir", default=None, help="default: $HPMPC_DATA_DIR, then data/")
+    p.add_argument("--keep-daily", type=int, default=14)
+    p.add_argument("--keep-monthly", type=int, default=12)
+    p.add_argument("--daily-at", default=None, metavar="HH:MM",
+                   help="keep running and write one snapshot a day at this local time")
+    p.add_argument("--check", action="store_true",
+                   help="exit 0 if the newest snapshot is recent enough (for a healthcheck)")
+    p.add_argument("--max-age-hours", type=float, default=30.0)
+    p.set_defaults(func=cmd_backup)
+
+    p = sub.add_parser("restore", help="unpack a snapshot written by 'hpmpc backup'")
+    p.add_argument("snapshot")
+    p.add_argument("--data-dir", default=None, help="default: $HPMPC_DATA_DIR, then data/")
+    p.add_argument("--force", action="store_true",
+                   help="write over a data directory that already holds a model or an archive")
+    p.set_defaults(func=cmd_restore)
 
     p = sub.add_parser("revert-model", help="go back to the model the last training replaced")
     p.set_defaults(func=cmd_revert_model)

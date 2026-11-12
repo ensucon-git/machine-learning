@@ -421,21 +421,64 @@ docker compose build && docker compose up -d
 
 Modellen och historiken ligger i volymen `hpmpc-data` och överlever bygget.
 **Radera inte den volymen** — där ligger arkivet under `history/`, och det är den
-enda kopian av historik som recordern redan har rensat bort. En backup av volymen
-är en backup av allt modellen vet om huset.
+enda kopian av historik som recordern redan har rensat bort, om du inte slagit på
+säkerhetskopieringen nedan.
 
 ### Säkerhetskopiera
 
-Två saker är värda att spara — resten går att räkna fram igen:
+Det mesta i `/data` går **inte** att få tillbaka. Arkivet under `history/` håller
+historik som recordern rensat för länge sedan (den sparar ungefär tio dygn),
+`excitation_runs.json` är en veckas experiment som inte går att göra om mitt i
+vintern, och `models/` är en månads anpassning på båda. `config.yaml` bär din
+kalibrering av givaren och värmekurvan.
+
+**Automatiskt, varje natt, till en NAS.** Montera utdelningen på värden och slå
+på sidecar-tjänsten `hpmpc-backup` i `.env`:
 
 ```bash
-cp config/config.yaml ~/backup/
-docker compose cp hpmpc:/data/models ~/backup/models
+# 1. Kolla att utdelningen är monterad och skrivbar från värden
+mount | grep /mnt/nfs/docker-volumes/hpmpc
+sudo touch /mnt/nfs/docker-volumes/hpmpc/test && sudo rm /mnt/nfs/docker-volumes/hpmpc/test
+
+# 2. Lägg till i /opt/hpmpc/.env
+BACKUP_DIR=/mnt/nfs/docker-volumes/hpmpc
+COMPOSE_PROFILES=backup
+# BACKUP_AT=04:15        # valfritt; efter nattens omträning kl 03
+
+# 3. Starta, och ta en första kopia direkt
+docker compose up -d --build
+docker compose exec hpmpc-backup hpmpc backup --to /backup
+ls -lh /mnt/nfs/docker-volumes/hpmpc
 ```
 
-`config.yaml` innehåller din kalibrering av givaren och värmekurvan, och
-`models/` innehåller en månads inlärning. Historiken kan alltid hämtas om från
-Home Assistant.
+Den skriver `hpmpc-ÅÅÅÅMMDD-TTMMSS.tar.gz` med `data/` och `config/`, läser
+tillbaka hela filen innan den räknas som klar, och sparar de senaste 14 dygnen
+plus den första kopian i varje månad i ett år. `docker ps` visar `hpmpc-backup`
+som **unhealthy** om senaste kopian är äldre än 30 timmar — utdelningen
+avmonterad, full eller skrivskyddad.
+
+Den går i en egen container med flit: en NFS-utdelning som slutar svara kan få
+den process som rör den att hänga, och det får aldrig vara styrslingan som håller
+noden matad. Säger den *Permission denied* skriver containern som root, och en
+utdelning med `root_squash` gör root till `nobody` — mappa root till en användare
+som äger katalogen på NAS:en, eller gör katalogen skrivbar för den.
+
+`.env` (med `HA_TOKEN`) och ESPHome-filen ingår inte — de ligger utanför
+containern. Kopiera dem för hand en gång.
+
+**Återställ på en ny maskin** (eller samma, efter en död disk):
+
+```bash
+cd /opt/hpmpc && git pull
+docker compose build
+docker compose stop hpmpc
+docker compose run --rm -v /mnt/nfs/docker-volumes/hpmpc:/backup:ro hpmpc \
+    restore /backup/hpmpc-20261112-041500.tar.gz --force
+docker compose up -d
+```
+
+`restore` vägrar skriva över en datakatalog som redan har en modell eller ett
+arkiv utan `--force`, så det går inte att råka spola en levande installation.
 
 ---
 

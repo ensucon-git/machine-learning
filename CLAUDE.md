@@ -236,6 +236,20 @@ flyttar optimeraren också offseten och filen är enda auktoriteten. `hpmpc
 archive` listar körningarna. Obs: `hpmpc train --days N` klipper på radantal
 bakifrån och tappar en gammal körning — använd `collect --days` i stället.
 
+**Säkerhetskopian är en egen container, aldrig styrslingan** (`backup.py`,
+tjänsten `hpmpc-backup` i compose, profilen `backup`, 2026-11-12). Målet är en
+NFS-utdelning på användarens NAS (`/mnt/nfs/docker-volumes/hpmpc`, monterad på
+värden). En hård NFS-mount som slutar svara låser den process som rör den i
+oavbrytbar sömn — gör det kontrollern slutar skrivningarna, och noden går till
+failsafe inom fyra timmar. Sidecaren monterar `/data` och `/config` read-only,
+skriver en verifierad `hpmpc-ÅÅÅÅMMDD-TTMMSS.tar.gz` kl 04:15 (efter omträningen
+kl 03), sparar 14 dygn + första i månaden i ett år, och har en healthcheck som
+blir unhealthy vid > 30 h. `hpmpc backup` läser **inte** `config.yaml` — en
+config trasig nog att stoppa kontrollern är just den vars senaste goda kopia
+behövs. `hpmpc restore` vägrar skriva över en datakatalog med modell eller
+arkiv utan `--force`. INSTALL.md sa förut att historiken "alltid kan hämtas om
+från Home Assistant" — fel sedan arkivet fanns, rättat.
+
 **Historiken kopieras ur recordern varje styrcykel** (`archive.py`). Recordern är
 ett rullande fönster som rensas av ett annat system; identifieringen vill ha sex
 veckor. Att kräva `purge_keep_days: 45` gör modellen beroende av en inställning
@@ -350,7 +364,7 @@ terminalvärderingen fixar, fast i utvärderingen.
 
 ## Verifierat kontra antaget
 
-**Verifierat** (428 tester, syntetiskt hus med känd sanning):
+**Verifierat** (445 tester, syntetiskt hus med känd sanning):
 - Identifieringen återfinner värmekurva (lutning 0,3495 mot 0,35, R² 0,997) och
   husparametrar (UA +3 %, Ci +4 %, `k_wind` +3 %, plattans tidskonstant inom 8 %).
   `hpmpc train` skriver ut vad den lärt sig om sol och vind som area och
@@ -919,6 +933,8 @@ hpmpc set control.price_addition 0.7084
 hpmpc excite         # identifieringsexperiment, ~1 vecka
 hpmpc archive        # vår egen historik — omfång, hål, storlek
 hpmpc archive --backfill-days 7   # laga ett hål ur recordern + priserna
+hpmpc backup --to /backup          # en kopia nu (sidecaren gör det varje natt)
+hpmpc restore /backup/hpmpc-….tar.gz --force   # tillbaka, med kontrollern stoppad
 hpmpc collect --days 45 && hpmpc train
 hpmpc power          # effektuppdelningen — laddaren ska hamna nära 11 kW
 hpmpc stove --days 7 # takgivaren mot huset; föreslår stove_deadband_k ur datan
